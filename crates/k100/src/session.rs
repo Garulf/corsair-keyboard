@@ -34,13 +34,15 @@ impl<T: Transport> Session<T> {
     pub fn start(transport: T, model: &'static Model) -> Result<Self, DeviceError> {
         let mut device = Device::new(transport);
         let info = read_info(&mut device)?;
-        device.set_property(PropertyId::OPERATING_MODE, OperatingMode::Software.raw())?;
         let mut session = Self {
             device,
             model,
             info,
             released: false,
         };
+        session
+            .device
+            .set_property(PropertyId::OPERATING_MODE, OperatingMode::Software.raw())?;
         session
             .device
             .open_file(LIGHTING_HANDLE, FileId::REAL_TIME_LIGHTINGS_BUFFER)?;
@@ -98,24 +100,19 @@ impl<T: Transport> Session<T> {
         if self.released {
             return Ok(());
         }
-        self.released = true;
-        let keys = self.set_key_mappings(&KeyMappings::all_normal(self.model.key_count));
-        let lighting = self.device.unbind(LIGHTING_HANDLE);
-        let indication = self.device.unbind(INDICATION_HANDLE);
-        let mode = self
-            .device
-            .set_property(PropertyId::OPERATING_MODE, OperatingMode::Hardware.raw());
-        keys.and(lighting).and(indication).and(mode)
+        let result = restore(&mut self.device, self.model.key_count);
+        self.released = result.is_ok();
+        result
     }
 
     fn write_lighting(&mut self, handle: u8, file: FileId, data: &[u8]) -> Result<(), DeviceError> {
         match self.device.write_file(handle, data) {
             Ok(()) => Ok(()),
             Err(error) => {
-                if matches!(
-                    error.status(),
-                    Some(Status::InvalidState | Status::InvalidDeviceAddress)
-                ) {
+                let Some(status) = error.status() else {
+                    return Err(error);
+                };
+                if matches!(status, Status::InvalidState | Status::InvalidDeviceAddress) {
                     let _ = self.device.unbind(handle);
                     self.device.open_file(handle, file)?;
                 }
@@ -128,6 +125,31 @@ impl<T: Transport> Session<T> {
 impl<T: Transport> Drop for Session<T> {
     fn drop(&mut self) {
         let _ = self.release();
+    }
+}
+
+pub fn restore<T: Transport>(device: &mut Device<T>, key_count: usize) -> Result<(), DeviceError> {
+    let keys = device
+        .open_file(KEYMAP_HANDLE, FileId::KEY_MAPPINGS)
+        .and_then(|()| device.write_file(KEYMAP_HANDLE, KeyMappings::all_normal(key_count).as_bytes()));
+    let keymap_unbound = device.unbind(KEYMAP_HANDLE);
+    let lighting = unbind_if_bound(device, LIGHTING_HANDLE);
+    let indication = unbind_if_bound(device, INDICATION_HANDLE);
+    let mode = device.set_property(PropertyId::OPERATING_MODE, OperatingMode::Hardware.raw());
+    keys.and(keymap_unbound).and(lighting).and(indication).and(mode)
+}
+
+fn unbind_if_bound<T: Transport>(device: &mut Device<T>, handle: u8) -> Result<(), DeviceError> {
+    match device.unbind(handle) {
+        Err(error)
+            if matches!(
+                error.status(),
+                Some(Status::InvalidDeviceAddress | Status::InvalidState)
+            ) =>
+        {
+            Ok(())
+        }
+        other => other,
     }
 }
 
@@ -352,5 +374,118 @@ mod tests {
                 .unwrap()
         );
         assert!(session.try_set_property(PropertyId::BRIGHTNESS, 500).unwrap());
+    }
+
+    fn set_mode_value(report: &[u8]) -> Option<u32> {
+        (report[1] == 0x01 && property_of(report) == 0x03).then(|| u32::from_le_bytes(report[4..8].try_into().unwrap()))
+    }
+
+    fn info_or_ok(request: &[u8]) -> Vec<u8> {
+        if request[1] == 0x02 {
+            value_reply(request, 1)
+        } else {
+            ok_reply(request)
+        }
+    }
+
+    #[test]
+    fn start_restores_hardware_mode_when_the_software_mode_write_gets_no_reply() {
+        let fake = FakeTransport::with_responder(|request| match set_mode_value(request) {
+            Some(2) => vec![],
+            _ => vec![info_or_ok(request)],
+        });
+        let log = fake.log();
+        assert!(Session::start(fake, k100()).is_err());
+        let log = log.lock().unwrap();
+        assert_eq!(set_mode_value(log.last().unwrap()), Some(1));
+    }
+
+    #[test]
+    fn start_restores_hardware_mode_when_opening_lighting_fails() {
+        let fake = FakeTransport::with_responder(|request| {
+            vec![if request[1] == 0x0D && request[3] == 0x22 {
+                status_reply(request, 3)
+            } else {
+                info_or_ok(request)
+            }]
+        });
+        let log = fake.log();
+        assert!(Session::start(fake, k100()).is_err());
+        assert_eq!(set_mode_value(log.lock().unwrap().last().unwrap()), Some(1));
+    }
+
+    #[test]
+    fn a_failed_release_is_retried_on_drop() {
+        let mut failures = 1;
+        let fake = FakeTransport::with_responder(move |request| {
+            vec![if set_mode_value(request) == Some(1) && failures > 0 {
+                failures -= 1;
+                status_reply(request, 7)
+            } else {
+                info_or_ok(request)
+            }]
+        });
+        let log = fake.log();
+        let mut session = Session::start(fake, k100()).unwrap();
+        assert!(session.release().is_err());
+        drop(session);
+        let restores = log
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| set_mode_value(r) == Some(1))
+            .count();
+        assert_eq!(restores, 2);
+    }
+
+    #[test]
+    fn lighting_writes_are_not_retried_after_a_timeout() {
+        let fake = FakeTransport::with_responder(|request| {
+            if request[1] == 0x06 {
+                vec![]
+            } else {
+                vec![info_or_ok(request)]
+            }
+        });
+        let log = fake.log();
+        let mut session = Session::start(fake, k100()).unwrap();
+        log.lock().unwrap().clear();
+        assert!(matches!(
+            session.write_frame(&[Rgb::BLACK; LED_COUNT]),
+            Err(DeviceError::Timeout(_))
+        ));
+        let begins = log.lock().unwrap().iter().filter(|r| r[1] == 0x06).count();
+        assert_eq!(begins, 1);
+    }
+
+    #[test]
+    fn restore_attempts_every_step_even_when_the_keymap_fails() {
+        let fake = FakeTransport::with_responder(|request| {
+            vec![if request[1] == 0x0D {
+                status_reply(request, 3)
+            } else {
+                ok_reply(request)
+            }]
+        });
+        let log = fake.log();
+        let mut device = Device::new(fake);
+        assert!(restore(&mut device, 146).is_err());
+        let log = log.lock().unwrap();
+        let unbound: Vec<u8> = log.iter().filter(|r| r[1] == 0x05).map(|r| r[3]).collect();
+        assert_eq!(unbound, [2, 0, 1]);
+        assert_eq!(set_mode_value(log.last().unwrap()), Some(1));
+    }
+
+    #[test]
+    fn restore_treats_already_unbound_handles_as_success() {
+        let fake = FakeTransport::with_responder(|request| {
+            vec![if request[1] == 0x05 && request[3] != KEYMAP_HANDLE {
+                status_reply(request, 6)
+            } else {
+                ok_reply(request)
+            }]
+        });
+        let mut device = Device::new(fake);
+        restore(&mut device, 146).unwrap();
     }
 }

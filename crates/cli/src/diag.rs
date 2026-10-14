@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use bragi::{FileId, Notification, OperatingMode, PollingRate, PropertyId};
+use bragi::{Notification, OperatingMode, PollingRate, PropertyId};
 use clap::Subcommand;
 use k100::hid::{HidInput, HidTransport, OpenedDevice, open_device};
 use k100::{
@@ -113,15 +113,12 @@ fn describe(error: DeviceError) -> String {
 
 fn release(commands: HidTransport, key_count: usize) -> Result<()> {
     let mut device = Device::new(commands);
-    for handle in 0..=2 {
-        let _ = device.unbind(handle);
-    }
-    device.open_file(2, FileId::KEY_MAPPINGS)?;
-    device.write_file(2, KeyMappings::all_normal(key_count).as_bytes())?;
-    device.unbind(2)?;
-    device.set_property(PropertyId::OPERATING_MODE, OperatingMode::Hardware.raw())?;
-    println!("released: hardware mode, all keys normal");
-    Ok(())
+    let result = k100::restore(&mut device, key_count);
+    let mode = device
+        .get_property(PropertyId::OPERATING_MODE)
+        .map(OperatingMode::from_raw);
+    println!("restore: {result:?}; operating mode now {mode:?}");
+    Ok(result?)
 }
 
 fn lights(mut session: Session<HidTransport>, colors: &[String], hold_ms: u64, stop: &AtomicBool) -> Result<()> {

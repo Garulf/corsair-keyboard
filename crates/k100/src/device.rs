@@ -5,6 +5,7 @@ use bragi::{Command, FileId, PropertyId, Request, Response, ResponseError, Statu
 use crate::transport::{Transport, TransportError};
 
 const RESPONSE_TIMEOUT: Duration = Duration::from_millis(1000);
+const MAX_DRAINED_REPORTS: usize = 64;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DeviceError {
@@ -41,28 +42,32 @@ impl<T: Transport> Device<T> {
         self.transport.write(request.as_bytes())?;
         let command = request.command();
         let deadline = Instant::now() + RESPONSE_TIMEOUT;
-        loop {
-            let remaining = deadline.saturating_duration_since(Instant::now());
+        while let Some(remaining) = deadline.checked_duration_since(Instant::now()).filter(|d| !d.is_zero()) {
             let Some(bytes) = self.transport.read(remaining)? else {
-                return Err(DeviceError::Timeout(command));
+                break;
             };
+            if bytes.get(1) != Some(&(command as u8)) {
+                continue;
+            }
             let response = match Response::parse(&bytes) {
                 Ok(response) => response,
                 Err(ResponseError::NotAReply | ResponseError::TooShort(_)) => continue,
                 Err(error) => return Err(error.into()),
             };
-            if response.command_byte() != command as u8 {
-                continue;
-            }
             response
                 .status()
                 .map_err(|status| DeviceError::Status { command, status })?;
             return Ok(response);
         }
+        Err(DeviceError::Timeout(command))
     }
 
     fn drain(&mut self) -> Result<(), DeviceError> {
-        while self.transport.read(Duration::ZERO)?.is_some() {}
+        for _ in 0..MAX_DRAINED_REPORTS {
+            if self.transport.read(Duration::ZERO)?.is_none() {
+                break;
+            }
+        }
         Ok(())
     }
 
@@ -151,5 +156,32 @@ mod tests {
         let commands: Vec<u8> = log.iter().map(|report| report[1]).collect();
         assert_eq!(commands, [0x0D, 0x06, 0x07]);
         assert_eq!(ok_reply(&log[0])[1], 0x0D);
+    }
+
+    struct Chatty;
+
+    impl Transport for Chatty {
+        fn write(&mut self, _report: &[u8; bragi::REPORT_LEN]) -> Result<(), TransportError> {
+            Ok(())
+        }
+
+        fn read(&mut self, _timeout: Duration) -> Result<Option<Vec<u8>>, TransportError> {
+            Ok(Some(vec![0x00, 0x02, 0x00]))
+        }
+    }
+
+    #[test]
+    fn stops_at_the_deadline_when_unrelated_reports_keep_arriving() {
+        let started = Instant::now();
+        let mut device = Device::new(Chatty);
+        assert!(matches!(device.ping(), Err(DeviceError::Timeout(Command::Ping))));
+        assert!(started.elapsed() < Duration::from_secs(3));
+    }
+
+    #[test]
+    fn skips_transport_errors_addressed_to_other_commands() {
+        let fake = FakeTransport::with_responder(|request| vec![vec![0x10, 0x02, 0x00], ok_reply(request)]);
+        let mut device = Device::new(fake);
+        device.ping().unwrap();
     }
 }

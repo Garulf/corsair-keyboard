@@ -15,4 +15,4 @@ k100 = { path = "crates/k100" }
 thiserror = "2.0"
 hidapi = { version = "2.6", default-features = false }
 clap = { version = "4.6", features = ["derive"] }
-ctrlc = "3.5"
+ctrlc = { version = "3.5", features = ["termination"] }
