@@ -205,13 +205,14 @@ impl Controller {
         if name == self.active {
             return error("cannot delete the active profile".into());
         }
-        if self.profiles.remove(name).is_none() {
+        if !self.profiles.contains_key(name) {
             return error(format!("no profile named {name:?}"));
         }
-        match config.delete_profile(name) {
-            Ok(()) => Reply::Done,
-            Err(failure) => error(format!("deleting profile: {failure}")),
+        if let Err(failure) = config.delete_profile(name) {
+            return error(format!("deleting profile: {failure}"));
         }
+        self.profiles.remove(name);
+        Reply::Done
     }
 
     fn set_polling_rate(&mut self, hz: u32, config: &ConfigDir) -> Reply {

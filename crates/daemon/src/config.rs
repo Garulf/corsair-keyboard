@@ -62,11 +62,17 @@ pub fn default_profile() -> Profile {
 }
 
 pub fn profile_file_name(name: &str) -> String {
-    let stem: String = name
-        .to_lowercase()
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
-        .collect();
+    let mut stem = String::with_capacity(name.len());
+    for c in name.chars() {
+        if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_' {
+            stem.push(c);
+        } else {
+            let mut bytes = [0u8; 4];
+            for byte in c.encode_utf8(&mut bytes).bytes() {
+                stem.push_str(&format!("%{byte:02X}"));
+            }
+        }
+    }
     format!("{stem}.toml")
 }
 
@@ -115,7 +121,15 @@ impl ConfigDir {
             let parsed = std::fs::read_to_string(&path)
                 .map_err(|error| error.to_string())
                 .and_then(|text| toml::from_str::<Profile>(&text).map_err(|error| error.to_string()));
+            let expected = parsed.as_ref().ok().map(|profile| profile_file_name(&profile.name));
+            let actual = path.file_name().map(|name| name.to_string_lossy().into_owned());
             match parsed {
+                Ok(profile) if expected != actual => errors.push(format!(
+                    "{}: profile {:?} must be stored as {}",
+                    path.display(),
+                    profile.name,
+                    expected.unwrap_or_default()
+                )),
                 Ok(profile) if profiles.iter().any(|p| p.name == profile.name) => {
                     errors.push(format!("{}: duplicate profile name {:?}", path.display(), profile.name));
                 }
@@ -135,7 +149,10 @@ impl ConfigDir {
     }
 
     pub fn ensure_default_profile(&self) -> io::Result<()> {
-        if self.load_profiles().0.is_empty() {
+        let has_profile_files = std::fs::read_dir(self.profiles_dir())
+            .map(|entries| entries.filter_map(Result::ok).any(|e| e.path().extension().is_some_and(|x| x == "toml")))
+            .unwrap_or(false);
+        if !has_profile_files {
             self.save_profile(&default_profile())?;
         }
         Ok(())
@@ -190,7 +207,7 @@ mod tests {
         config.save_profile(&Profile { name: "Games & Stuff".into(), ..default_profile() }).unwrap();
         config.ensure_default_profile().unwrap();
         assert_eq!(config.load_profiles().0.len(), 2);
-        assert!(config.profiles_dir().join("games---stuff.toml").exists());
+        assert!(config.profiles_dir().join("%47ames%20%26%20%53tuff.toml").exists());
     }
 
     #[test]
@@ -204,7 +221,7 @@ mod tests {
         assert_eq!(profiles.len(), 1);
         assert_eq!(errors.len(), 2, "{errors:?}");
         assert!(errors.iter().any(|e| e.contains("broken.toml")));
-        assert!(errors.iter().any(|e| e.contains("duplicate")));
+        assert!(errors.iter().any(|e| e.contains("copy.toml") && e.contains("must be stored as default.toml")));
     }
 
     #[test]
@@ -220,5 +237,34 @@ mod tests {
         assert!(Settings::default().ignore_conflicts.is_empty());
         let settings: Settings = toml::from_str("ignore_conflicts = [\"OpenRGB.exe\"]").unwrap();
         assert_eq!(settings.ignore_conflicts, ["OpenRGB.exe"]);
+    }
+
+    #[test]
+    fn file_names_are_reversible_and_distinct() {
+        assert_eq!(profile_file_name("default"), "default.toml");
+        assert_eq!(profile_file_name("my-games_2"), "my-games_2.toml");
+        let names = ["A b", "a-b", "Games", "games", "\u{65e5}\u{672c}", "\u{4e2d}\u{6587}", "a%20b"];
+        let files: std::collections::HashSet<String> =
+            names.iter().map(|n| profile_file_name(n).to_lowercase()).collect();
+        assert_eq!(files.len(), names.len(), "{files:?}");
+    }
+
+    #[test]
+    fn files_whose_name_does_not_match_the_profile_are_reported() {
+        let (_temp, config) = dir();
+        std::fs::create_dir_all(config.profiles_dir()).unwrap();
+        std::fs::write(config.profiles_dir().join("Demo.toml"), "name = \"demo\"\n").unwrap();
+        let (profiles, errors) = config.load_profiles();
+        assert!(profiles.is_empty());
+        assert!(errors[0].contains("demo.toml"), "{errors:?}");
+    }
+
+    #[test]
+    fn a_broken_default_is_not_overwritten() {
+        let (_temp, config) = dir();
+        std::fs::create_dir_all(config.profiles_dir()).unwrap();
+        std::fs::write(config.profiles_dir().join("default.toml"), "name = ").unwrap();
+        config.ensure_default_profile().unwrap();
+        assert_eq!(std::fs::read_to_string(config.profiles_dir().join("default.toml")).unwrap(), "name = ");
     }
 }
