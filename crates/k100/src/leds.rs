@@ -73,6 +73,26 @@ pub fn encode_indicators(records: &[IndicatorRecord]) -> Vec<u8> {
     bytes
 }
 
+#[cfg(feature = "serde")]
+impl serde::Serialize for Rgb {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&format!("#{:02x}{:02x}{:02x}", self.r, self.g, self.b))
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de> serde::Deserialize<'de> for Rgb {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = <std::borrow::Cow<'de, str>>::deserialize(deserializer)?;
+        let hex = text.trim_start_matches('#');
+        let value = (hex.len() == 6).then(|| u32::from_str_radix(hex, 16).ok()).flatten();
+        let [_, r, g, b] = value
+            .ok_or_else(|| serde::de::Error::custom(format!("expected #rrggbb, got {text:?}")))?
+            .to_be_bytes();
+        Ok(Rgb::new(r, g, b))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -106,5 +126,27 @@ mod tests {
             encode_indicators(&records),
             vec![0x2B, 0x00, 182, 255, 0, 0, 0xFF, 114, 0, 0, 9, 0]
         );
+    }
+}
+
+#[cfg(all(test, feature = "serde"))]
+mod serde_tests {
+    use super::*;
+
+    #[derive(serde::Serialize, serde::Deserialize, PartialEq, Debug)]
+    struct Wrapper {
+        color: Rgb,
+    }
+
+    #[test]
+    fn rgb_round_trips_as_hex() {
+        let text = toml::to_string(&Wrapper {
+            color: Rgb::new(255, 128, 0),
+        })
+        .unwrap();
+        assert_eq!(text.trim(), "color = \"#ff8000\"");
+        let back: Wrapper = toml::from_str("color = \"00ff7f\"").unwrap();
+        assert_eq!(back.color, Rgb::new(0, 255, 127));
+        assert!(toml::from_str::<Wrapper>("color = \"#12345\"").is_err());
     }
 }
