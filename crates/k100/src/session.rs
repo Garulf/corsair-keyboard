@@ -86,6 +86,10 @@ impl<T: Transport> Session<T> {
         self.device.set_property(property, value)
     }
 
+    pub fn try_set_property(&mut self, property: PropertyId, value: u32) -> Result<bool, DeviceError> {
+        Ok(optional(self.device.set_property(property, value).map(|()| 0))?.is_some())
+    }
+
     pub fn ping(&mut self) -> Result<(), DeviceError> {
         self.device.ping()
     }
@@ -330,5 +334,23 @@ mod tests {
         let log = log.lock().unwrap();
         let last = log.last().unwrap();
         assert_eq!(&last[..8], &[0x08, 0x01, 0x03, 0x00, 1, 0, 0, 0]);
+    }
+
+    #[test]
+    fn try_set_property_reports_unsupported_properties_as_false() {
+        let fake = FakeTransport::with_responder(|request| {
+            vec![match (request[1], property_of(request)) {
+                (0x01, 0x92) => status_reply(request, 5),
+                (0x02, _) => value_reply(request, 1),
+                _ => ok_reply(request),
+            }]
+        });
+        let mut session = Session::start(fake, k100()).unwrap();
+        assert!(
+            !session
+                .try_set_property(PropertyId::KEY_PRESS_NOTIFICATIONS_REPORTING, 1)
+                .unwrap()
+        );
+        assert!(session.try_set_property(PropertyId::BRIGHTNESS, 500).unwrap());
     }
 }

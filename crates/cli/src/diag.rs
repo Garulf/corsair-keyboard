@@ -37,7 +37,7 @@ pub enum Diag {
     Props,
     /// Suppress one key's native output for a while
     Mask {
-        #[arg(default_value_t = 0x47)]
+        #[arg(default_value = "0x47", value_parser = parse_key)]
         key: u8,
         #[arg(long, default_value_t = 10)]
         seconds: u64,
@@ -194,7 +194,9 @@ fn mask(mut session: Session<HidTransport>, key: u8, seconds: u64, stop: &Atomic
 }
 
 fn watch(mut session: Session<HidTransport>, mut input: HidInput, seconds: u64, stop: &AtomicBool) -> Result<()> {
-    session.set_property(PropertyId::KEY_PRESS_NOTIFICATIONS_REPORTING, 1)?;
+    if !session.try_set_property(PropertyId::KEY_PRESS_NOTIFICATIONS_REPORTING, 1)? {
+        println!("key press reporting property not supported; showing whatever the keyboard sends");
+    }
     let mut tracker = KeyStateTracker::default();
     let deadline = Instant::now() + Duration::from_secs(seconds);
     let mut last_ping = Instant::now();
@@ -212,7 +214,6 @@ fn watch(mut session: Session<HidTransport>, mut input: HidInput, seconds: u64, 
             .unwrap_or_default();
         println!("raw {:02x?} -> {events:?}", &report[..report.len().min(24)]);
     }
-    session.set_property(PropertyId::KEY_PRESS_NOTIFICATIONS_REPORTING, 0)?;
     Ok(session.release()?)
 }
 
@@ -236,6 +237,14 @@ pub fn parse_rgb(text: &str) -> std::result::Result<Rgb, String> {
     let value = value.ok_or_else(|| format!("expected a 6-digit hex color, got {text:?}"))?;
     let [_, r, g, b] = value.to_be_bytes();
     Ok(Rgb::new(r, g, b))
+}
+
+pub fn parse_key(text: &str) -> std::result::Result<u8, String> {
+    let parsed = match text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
+        Some(hex) => u8::from_str_radix(hex, 16),
+        None => text.parse(),
+    };
+    parsed.map_err(|error| format!("invalid key index {text:?}: {error}"))
 }
 
 pub fn format_version(raw: u32) -> String {
@@ -281,5 +290,14 @@ mod tests {
         let frame = rainbow_frame(0);
         assert_eq!(frame.len(), LED_COUNT);
         assert_ne!(frame[0], frame[96]);
+    }
+
+    #[test]
+    fn parses_decimal_and_hex_key_indices() {
+        assert_eq!(parse_key("71"), Ok(71));
+        assert_eq!(parse_key("0x47"), Ok(71));
+        assert_eq!(parse_key("0X83"), Ok(131));
+        assert!(parse_key("256").is_err());
+        assert!(parse_key("0xzz").is_err());
     }
 }
