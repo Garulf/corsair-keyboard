@@ -1,4 +1,4 @@
-use crate::{Command, FileId, PropertyId};
+use crate::{Command, FileId, PropertyId, Status};
 
 pub const REPORT_LEN: usize = 1024;
 
@@ -81,6 +81,58 @@ pub fn write_buffer_packets(handle: u8, data: &[u8]) -> Vec<Request> {
     packets
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ResponseError {
+    #[error("response too short ({0} bytes)")]
+    TooShort(usize),
+    #[error("report is a request, not a reply")]
+    NotAReply,
+    #[error("device reported transport error {0:#x}")]
+    Transport(u8),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Response {
+    command: u8,
+    status: u8,
+    payload: Vec<u8>,
+}
+
+impl Response {
+    pub fn parse(bytes: &[u8]) -> Result<Self, ResponseError> {
+        if bytes.len() < 3 {
+            return Err(ResponseError::TooShort(bytes.len()));
+        }
+        if bytes[0] & REQUEST_FLAG != 0 {
+            return Err(ResponseError::NotAReply);
+        }
+        let transport_error = bytes[0] >> 4;
+        if transport_error != 0 {
+            return Err(ResponseError::Transport(transport_error));
+        }
+        Ok(Self {
+            command: bytes[1],
+            status: bytes[2],
+            payload: bytes[3..].to_vec(),
+        })
+    }
+
+    pub fn command_byte(&self) -> u8 {
+        self.command
+    }
+
+    pub fn status(&self) -> Result<(), Status> {
+        Status::check(self.status)
+    }
+
+    pub fn value_u32(&self) -> u32 {
+        let mut value = [0u8; 4];
+        let len = self.payload.len().min(4);
+        value[..len].copy_from_slice(&self.payload[..len]);
+        u32::from_le_bytes(value)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -156,5 +208,32 @@ mod tests {
         let packets = write_buffer_packets(0, &[]);
         assert_eq!(packets.len(), 1);
         assert_eq!(prefix(&packets[0], 7), [0x08, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn parses_success_reply_with_value() {
+        let response = Response::parse(&[0x00, 0x02, 0x00, 0xE8, 0x03, 0x00, 0x00]).unwrap();
+        assert_eq!(response.command_byte(), 0x02);
+        assert_eq!(response.status(), Ok(()));
+        assert_eq!(response.value_u32(), 1000);
+    }
+
+    #[test]
+    fn short_value_is_zero_extended() {
+        let response = Response::parse(&[0x00, 0x02, 0x00, 0x07]).unwrap();
+        assert_eq!(response.value_u32(), 7);
+    }
+
+    #[test]
+    fn reports_device_status() {
+        let response = Response::parse(&[0x00, 0x06, 0x03]).unwrap();
+        assert_eq!(response.status(), Err(crate::Status::InvalidState));
+    }
+
+    #[test]
+    fn rejects_requests_short_frames_and_transport_errors() {
+        assert_eq!(Response::parse(&[0x08, 0x01, 0x00]), Err(ResponseError::NotAReply));
+        assert_eq!(Response::parse(&[0x00, 0x01]), Err(ResponseError::TooShort(2)));
+        assert_eq!(Response::parse(&[0x10, 0x01, 0x00]), Err(ResponseError::Transport(1)));
     }
 }
