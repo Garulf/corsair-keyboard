@@ -1,0 +1,17 @@
+[package]
+name = "k100"
+description = "Driver for the Corsair K100 RGB keyboard"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+bragi.workspace = true
+thiserror.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+hidapi = { workspace = true, features = ["windows-native"] }
+
+[target.'cfg(not(windows))'.dependencies]
+hidapi = { workspace = true, features = ["linux-native-basic-udev"] }
