@@ -387,6 +387,7 @@ dependencies = [
  "clap",
  "ctrlc",
  "engine",
+ "ipc",
  "k100",
  "serde",
  "toml",

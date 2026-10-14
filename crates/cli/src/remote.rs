@@ -1,0 +1,132 @@
+use std::path::PathBuf;
+
+use clap::Subcommand;
+use ipc::{Client, DaemonState, DeviceState, Profile, Reply, Request};
+
+type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+
+#[derive(Debug, Subcommand)]
+pub enum ProfileCommand {
+    /// List profiles
+    List,
+    /// Switch the active profile
+    Set { name: String },
+    /// Print a profile as TOML
+    Show { name: String },
+    /// Create or replace a profile from a TOML file
+    Import { file: PathBuf },
+    /// Write a profile to a TOML file
+    Export { name: String, file: PathBuf },
+}
+
+pub fn status() -> Result<()> {
+    match Client::connect()?.request(&Request::GetState)? {
+        Reply::State { state } => {
+            println!("{}", format_state(&state));
+            Ok(())
+        }
+        other => Err(format!("unexpected reply {other:?}").into()),
+    }
+}
+
+pub fn profile(command: ProfileCommand) -> Result<()> {
+    let mut client = Client::connect()?;
+    match command {
+        ProfileCommand::List => match client.request(&Request::ListProfiles)? {
+            Reply::Profiles { names } => names.iter().for_each(|name| println!("{name}")),
+            other => return Err(format!("unexpected reply {other:?}").into()),
+        },
+        ProfileCommand::Set { name } => expect_done(client.request(&Request::SetActiveProfile { name })?)?,
+        ProfileCommand::Show { name } => println!("{}", toml::to_string_pretty(&fetch(&mut client, name)?)?),
+        ProfileCommand::Import { file } => {
+            let profile: Profile = toml::from_str(&std::fs::read_to_string(&file)?)?;
+            expect_done(client.request(&Request::SaveProfile { profile })?)?;
+        }
+        ProfileCommand::Export { name, file } => {
+            std::fs::write(&file, toml::to_string_pretty(&fetch(&mut client, name)?)?)?;
+        }
+    }
+    Ok(())
+}
+
+pub fn simple(request: Request) -> Result<()> {
+    Ok(expect_done(Client::connect()?.request(&request)?)?)
+}
+
+pub fn events() -> Result<()> {
+    let mut client = Client::connect()?;
+    expect_done(client.request(&Request::Subscribe)?)?;
+    while let Some(event) = client.next_event()? {
+        println!("{event:?}");
+    }
+    Ok(())
+}
+
+fn fetch(client: &mut Client, name: String) -> Result<Profile> {
+    match client.request(&Request::GetProfile { name })? {
+        Reply::Profile { profile } => Ok(profile),
+        Reply::Error { message } => Err(message.into()),
+        other => Err(format!("unexpected reply {other:?}").into()),
+    }
+}
+
+pub fn expect_done(reply: Reply) -> std::result::Result<(), String> {
+    match reply {
+        Reply::Done => Ok(()),
+        Reply::Error { message } => Err(message),
+        other => Err(format!("unexpected reply {other:?}")),
+    }
+}
+
+pub fn format_state(state: &DaemonState) -> String {
+    let device = match &state.device {
+        DeviceState::Connected { model, firmware } => format!("connected: {model} (firmware {firmware})"),
+        DeviceState::Disconnected => "no keyboard found".to_owned(),
+        DeviceState::Blocked { processes } => format!("blocked by {}; close it to continue", processes.join(", ")),
+        DeviceState::Released => "released (run `k100 reacquire` to take it back)".to_owned(),
+        DeviceState::Paused { reason } => format!("paused: {reason}"),
+    };
+    let polling = state.polling_rate_hz.map_or("device default".to_owned(), |hz| format!("{hz} Hz"));
+    let mut lines = vec![
+        format!("keyboard:   {device}"),
+        format!("profile:    {} ({} profiles)", state.active_profile, state.profiles.len()),
+        format!("brightness: {}%", state.brightness),
+        format!("polling:    {polling}"),
+    ];
+    lines.extend(state.config_errors.iter().map(|error| format!("config error: {error}")));
+    lines.join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use ipc::{DaemonState, DeviceState, Reply};
+
+    use super::*;
+
+    #[test]
+    fn formats_state_for_humans() {
+        let state = DaemonState {
+            device: DeviceState::Connected { model: "K100 RGB".into(), firmware: "1.15.61".into() },
+            active_profile: "games".into(),
+            profiles: vec!["default".into(), "games".into()],
+            brightness: 70,
+            polling_rate_hz: Some(4000),
+            config_errors: vec!["broken.toml: oops".into()],
+        };
+        let text = format_state(&state);
+        assert!(text.contains("connected: K100 RGB (firmware 1.15.61)"), "{text}");
+        assert!(text.contains("profile:    games (2 profiles)"), "{text}");
+        assert!(text.contains("brightness: 70%"), "{text}");
+        assert!(text.contains("polling:    4000 Hz"), "{text}");
+        assert!(text.contains("broken.toml: oops"), "{text}");
+        let blocked = DaemonState { device: DeviceState::Blocked { processes: vec!["iCUE.exe".into()] }, ..state };
+        assert!(format_state(&blocked).contains("blocked by iCUE.exe"));
+    }
+
+    #[test]
+    fn done_or_error() {
+        assert_eq!(expect_done(Reply::Done), Ok(()));
+        assert_eq!(expect_done(Reply::Error { message: "no".into() }), Err("no".to_string()));
+        assert!(expect_done(Reply::Profiles { names: vec![] }).is_err());
+    }
+}
