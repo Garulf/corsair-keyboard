@@ -49,6 +49,14 @@ pub enum Diag {
     },
     /// Enter software mode and exit without restoring, to observe firmware revert
     Kill,
+    /// Play a layer file on the keyboard (effects react to key presses)
+    Preview {
+        file: std::path::PathBuf,
+        #[arg(long, default_value_t = 20)]
+        seconds: u64,
+        #[arg(long, default_value_t = 60)]
+        fps: u32,
+    },
 }
 
 pub fn run(command: Diag) -> Result<()> {
@@ -68,6 +76,9 @@ pub fn run(command: Diag) -> Result<()> {
         Diag::Mask { key, seconds } => mask(Session::start(commands, model)?, key, seconds, &stop),
         Diag::Watch { seconds } => watch(Session::start(commands, model)?, input, seconds, &stop),
         Diag::Kill => kill(Session::start(commands, model)?),
+        Diag::Preview { file, seconds, fps } => {
+            preview(Session::start(commands, model)?, input, &file, seconds, fps, &stop)
+        }
     }
 }
 
@@ -221,6 +232,56 @@ pub fn parse_key(text: &str) -> std::result::Result<u8, String> {
     parsed.map_err(|error| format!("invalid key index {text:?}: {error}"))
 }
 
+#[derive(serde::Deserialize)]
+struct LayerFile {
+    layers: Vec<engine::LayerConfig>,
+}
+
+pub fn load_layers(text: &str) -> std::result::Result<Vec<engine::LayerConfig>, String> {
+    toml::from_str::<LayerFile>(text).map(|file| file.layers).map_err(|error| error.to_string())
+}
+
+pub fn frame_interval(fps: u32) -> Duration {
+    Duration::from_secs(1) / fps.clamp(1, 200)
+}
+
+fn preview(
+    mut session: Session<HidTransport>,
+    mut input: HidInput,
+    file: &std::path::Path,
+    seconds: u64,
+    fps: u32,
+    stop: &AtomicBool,
+) -> Result<()> {
+    let layers = load_layers(&std::fs::read_to_string(file)?)?;
+    let mut compositor = engine::Compositor::new(engine::Layout::ansi(), &layers);
+    let mut tracker = KeyStateTracker::default();
+    let interval = frame_interval(fps);
+    let started = Instant::now();
+    let mut last_ping = Instant::now();
+    let mut frames = 0u32;
+    while started.elapsed() < Duration::from_secs(seconds) && !stop.load(Ordering::SeqCst) {
+        let frame_start = Instant::now();
+        let mut presses = Vec::new();
+        while let Some(report) = input.read(Duration::ZERO)? {
+            let events = Notification::parse(&report).map(|n| tracker.update(&n)).unwrap_or_default();
+            presses.extend(events.into_iter().filter_map(|event| match event {
+                k100::InputEvent::KeyDown(led) => Some(engine::KeyPress { led, at: started.elapsed() }),
+                _ => None,
+            }));
+        }
+        session.write_frame(&compositor.render(started.elapsed(), &presses))?;
+        frames += 1;
+        if last_ping.elapsed() >= k100::PING_INTERVAL {
+            session.ping()?;
+            last_ping = Instant::now();
+        }
+        thread::sleep(interval.saturating_sub(frame_start.elapsed()));
+    }
+    println!("{frames} frames in {:?}", started.elapsed());
+    Ok(session.release()?)
+}
+
 pub fn format_version(raw: u32) -> String {
     let [major, minor, build_lo, build_hi] = raw.to_le_bytes();
     format!("{major}.{minor}.{}", u16::from_le_bytes([build_lo, build_hi]))
@@ -273,5 +334,25 @@ mod tests {
         assert_eq!(parse_key("0X83"), Ok(131));
         assert!(parse_key("256").is_err());
         assert!(parse_key("0xzz").is_err());
+    }
+
+    #[test]
+    fn loads_layer_files() {
+        let text = "[[layers]]\nname = \"a\"\nzone = \"all\"\neffect = { type = \"solid\", color = \"#010203\" }\n";
+        assert_eq!(load_layers(text).unwrap().len(), 1);
+        assert!(load_layers("layers = 3").is_err());
+    }
+
+    #[test]
+    fn frame_interval_is_clamped() {
+        assert_eq!(frame_interval(50), Duration::from_millis(20));
+        assert_eq!(frame_interval(0), Duration::from_secs(1));
+        assert_eq!(frame_interval(10_000), Duration::from_millis(5));
+    }
+
+    #[test]
+    fn example_layer_file_parses() {
+        let text = include_str!("../../../examples/layers/rainbow-wasd.toml");
+        assert!(load_layers(text).unwrap().len() >= 3);
     }
 }

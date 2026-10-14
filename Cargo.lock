@@ -253,7 +253,10 @@ dependencies = [
  "bragi",
  "clap",
  "ctrlc",
+ "engine",
  "k100",
+ "serde",
+ "toml",
 ]
 
 [[package]]

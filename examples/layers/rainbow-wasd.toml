@@ -1,0 +1,15 @@
+[[layers]]
+name = "rainbow"
+zone = "all"
+effect = { type = "rainbow_wave", speed = 0.3 }
+
+[[layers]]
+name = "wasd"
+zone = "wasd"
+effect = { type = "solid", color = "#ffffff" }
+
+[[layers]]
+name = "ripples"
+zone = "keys"
+blend = "add"
+effect = { type = "ripple", color = "#ff2000" }
