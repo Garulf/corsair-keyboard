@@ -8,6 +8,7 @@ use daemon::config::ConfigDir;
 use daemon::controller::Controller;
 use daemon::runtime::{self, Command, HidConnector};
 use daemon::server;
+use daemon::shutdown::{self, ReleaseSignal};
 use notify::{RecursiveMode, Watcher};
 
 fn main() -> ExitCode {
@@ -45,10 +46,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let listener = server::bind()?;
     let (sender, receiver) = mpsc::channel();
 
-    let shutdown = sender.clone();
-    ctrlc::set_handler(move || {
-        let _ = shutdown.send(Command::Shutdown);
-    })?;
+    let released = ReleaseSignal::default();
+    shutdown::install(sender.clone(), released.clone())?;
 
     let reload = sender.clone();
     let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
@@ -72,6 +71,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("k100d: config in {}", config.root().display());
     let connector = HidConnector { ignore_conflicts: settings.ignore_conflicts.clone() };
     runtime::run(Controller::new(settings, profiles, errors), config, receiver, sender, connector);
+    released.notify();
     eprintln!("k100d: stopped");
     Ok(())
 }
