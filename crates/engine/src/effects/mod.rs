@@ -1,7 +1,10 @@
+mod reactive;
 mod spatial;
 mod temporal;
 
-use k100::Rgb;
+use std::time::Duration;
+
+use k100::{LED_COUNT, Rgb};
 use serde::{Deserialize, Serialize};
 
 use crate::layer::Effect;
@@ -24,6 +27,22 @@ fn default_wavelength() -> f32 {
 
 fn default_columns() -> u8 {
     24
+}
+
+fn default_fade_ms() -> u64 {
+    1000
+}
+
+fn default_ripple_speed() -> f32 {
+    1500.0
+}
+
+fn default_ripple_width() -> f32 {
+    120.0
+}
+
+fn default_lifetime_ms() -> u64 {
+    1500
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -100,6 +119,24 @@ pub enum EffectConfig {
         #[serde(default = "default_columns")]
         columns: u8,
     },
+    Type {
+        color: Rgb,
+        #[serde(default = "black")]
+        background: Rgb,
+        #[serde(default = "default_fade_ms")]
+        fade_ms: u64,
+    },
+    Ripple {
+        color: Rgb,
+        #[serde(default = "black")]
+        background: Rgb,
+        #[serde(default = "default_ripple_speed")]
+        speed: f32,
+        #[serde(default = "default_ripple_width")]
+        width: f32,
+        #[serde(default = "default_lifetime_ms")]
+        lifetime_ms: u64,
+    },
 }
 
 impl EffectConfig {
@@ -123,6 +160,20 @@ impl EffectConfig {
             EffectConfig::Rain { color, background, speed, columns } => {
                 Box::new(temporal::Rain { color, background, speed, columns })
             }
+            EffectConfig::Type { color, background, fade_ms } => Box::new(reactive::Type {
+                color,
+                background,
+                fade: Duration::from_millis(fade_ms),
+                last_press: [None; LED_COUNT],
+            }),
+            EffectConfig::Ripple { color, background, speed, width, lifetime_ms } => Box::new(reactive::Ripple {
+                color,
+                background,
+                speed,
+                width,
+                lifetime: Duration::from_millis(lifetime_ms),
+                active: Vec::new(),
+            }),
         }
     }
 }
