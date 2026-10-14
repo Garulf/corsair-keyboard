@@ -1,5 +1,6 @@
 mod device;
 pub mod fake;
+pub mod hid;
 mod input;
 mod keymap;
 mod leds;

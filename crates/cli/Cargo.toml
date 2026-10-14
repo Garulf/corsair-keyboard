@@ -1,0 +1,17 @@
+[package]
+name = "k100-cli"
+description = "Command-line control for the Corsair K100"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "k100"
+path = "src/main.rs"
+
+[dependencies]
+bragi.workspace = true
+k100.workspace = true
+clap.workspace = true
+ctrlc.workspace = true
