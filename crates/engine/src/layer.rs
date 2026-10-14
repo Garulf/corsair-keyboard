@@ -60,6 +60,7 @@ fn enabled() -> bool {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LayerConfig {
     pub name: String,
     pub zone: Zone,
@@ -194,5 +195,21 @@ mod tests {
         let frame = Compositor::new(Layout::ansi(), &profile.layers).render(Duration::ZERO, &[]);
         assert_eq!(frame[131], Rgb::new(160, 32, 32));
         assert_eq!(frame[4], Rgb::new(32, 32, 32));
+    }
+
+    #[test]
+    fn misspelled_fields_are_rejected() {
+        #[derive(serde::Deserialize, Debug)]
+        struct Profile {
+            #[allow(dead_code)]
+            layers: Vec<LayerConfig>,
+        }
+        let layer_typo = "[[layers]]\nname = \"a\"\nzone = \"all\"\nopactiy = 0.2\neffect = { type = \"solid\", color = \"#ffffff\" }\n";
+        assert!(toml::from_str::<Profile>(layer_typo).unwrap_err().to_string().contains("opactiy"));
+        let effect_typo =
+            "[[layers]]\nname = \"a\"\nzone = \"all\"\neffect = { type = \"rainbow_wave\", speeed = 5.0 }\n";
+        assert!(toml::from_str::<Profile>(effect_typo).unwrap_err().to_string().contains("speeed"));
+        let key_typo = "[[layers]]\nname = \"a\"\nzone = \"all\"\neffect = { type = \"static_custom\", keys = [{ led = 4, colour = \"#ffffff\" }] }\n";
+        assert!(toml::from_str::<Profile>(key_typo).unwrap_err().to_string().contains("colour"));
     }
 }

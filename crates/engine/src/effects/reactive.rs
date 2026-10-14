@@ -5,6 +5,9 @@ use k100::{Frame, LED_COUNT, Rgb};
 use crate::color::lerp;
 use crate::layer::{Effect, FrameCtx, KeyPress};
 
+const MAX_RIPPLES: usize = 64;
+const MAX_RIPPLE_RADIUS: f32 = 2700.0;
+
 fn age(now: Duration, then: Duration) -> f32 {
     now.saturating_sub(then).as_secs_f32()
 }
@@ -49,10 +52,15 @@ impl Effect for Ripple {
             }
         }
         let lifetime = self.lifetime;
-        self.active
-            .retain(|(press, _)| ctx.time.saturating_sub(press.at) <= lifetime && press.at <= ctx.time + lifetime);
         let lifetime_s = lifetime.as_secs_f32().max(f32::EPSILON);
         let half_width = (self.width / 2.0).max(1.0);
+        let speed = self.speed;
+        self.active.retain(|(press, _)| {
+            let alive = ctx.time.saturating_sub(press.at) <= lifetime && press.at <= ctx.time + lifetime;
+            alive && age(ctx.time, press.at) * speed - half_width <= MAX_RIPPLE_RADIUS
+        });
+        let overflow = self.active.len().saturating_sub(MAX_RIPPLES);
+        self.active.drain(..overflow);
         for geometry in ctx.layout.leds() {
             let (x, y) = geometry.rect.center();
             let level = self
@@ -133,5 +141,27 @@ mod tests {
             step(effect, &layout, 5000, &[press(250, 5000), press(4, 5000)]);
             step(effect, &layout, 10, &[]);
         }
+    }
+
+    #[test]
+    fn ripple_memory_stays_bounded_with_long_lifetimes() {
+        let layout = Layout::ansi();
+        let mut ripple = super::Ripple {
+            color: RED,
+            background: Rgb::BLACK,
+            speed: 1500.0,
+            width: 120.0,
+            lifetime: Duration::from_secs(3600),
+            active: Vec::new(),
+        };
+        for frame in 0..1500u64 {
+            let presses = [press(4, frame * 16), press(22, frame * 16)];
+            let mut out = [Rgb::BLACK; LED_COUNT];
+            ripple.render(
+                &FrameCtx { time: Duration::from_millis(frame * 16), layout: &layout, presses: &presses },
+                &mut out,
+            );
+        }
+        assert!(ripple.active.len() <= 64, "{} ripples kept", ripple.active.len());
     }
 }
