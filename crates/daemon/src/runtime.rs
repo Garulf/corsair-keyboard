@@ -10,7 +10,7 @@ use ipc::{DeviceState, Event, Reply, Request};
 use k100::{InputEvent, InputSource, KeyStateTracker, Session};
 
 use crate::config::ConfigDir;
-use crate::conflict::running_conflicts;
+use crate::conflict::{remove_ignored, running_conflicts};
 use crate::controller::{Controller, DeviceLink};
 
 const RECONNECT_INTERVAL: Duration = Duration::from_secs(2);
@@ -42,11 +42,13 @@ pub trait Connector {
     fn connect(&mut self) -> Result<Connection, ConnectError>;
 }
 
-pub struct HidConnector;
+pub struct HidConnector {
+    pub ignore_conflicts: Vec<String>,
+}
 
 impl Connector for HidConnector {
     fn connect(&mut self) -> Result<Connection, ConnectError> {
-        let conflicts = running_conflicts();
+        let conflicts = remove_ignored(running_conflicts(), &self.ignore_conflicts);
         if !conflicts.is_empty() {
             return Err(ConnectError::Blocked(conflicts));
         }

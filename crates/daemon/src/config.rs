@@ -31,11 +31,19 @@ pub struct Settings {
     pub fps: u32,
     #[serde(default)]
     pub polling_rate_hz: Option<u32>,
+    #[serde(default)]
+    pub ignore_conflicts: Vec<String>,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { version: 1, default_profile: default_profile_name(), fps: 60, polling_rate_hz: None }
+        Self {
+            version: 1,
+            default_profile: default_profile_name(),
+            fps: 60,
+            polling_rate_hz: None,
+            ignore_conflicts: Vec::new(),
+        }
     }
 }
 
@@ -205,5 +213,12 @@ mod tests {
         config.save_profile(&Profile { name: "temp".into(), ..default_profile() }).unwrap();
         config.delete_profile("temp").unwrap();
         assert!(config.load_profiles().0.is_empty());
+    }
+
+    #[test]
+    fn ignore_conflicts_defaults_to_empty_and_parses() {
+        assert!(Settings::default().ignore_conflicts.is_empty());
+        let settings: Settings = toml::from_str("ignore_conflicts = [\"OpenRGB.exe\"]").unwrap();
+        assert_eq!(settings.ignore_conflicts, ["OpenRGB.exe"]);
     }
 }

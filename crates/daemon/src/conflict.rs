@@ -23,6 +23,10 @@ pub fn find_conflicts<'a>(names: impl IntoIterator<Item = &'a str>) -> Vec<Strin
     found
 }
 
+pub fn remove_ignored(found: Vec<String>, ignored: &[String]) -> Vec<String> {
+    found.into_iter().filter(|name| !ignored.iter().any(|skip| skip.eq_ignore_ascii_case(name))).collect()
+}
+
 pub fn running_conflicts() -> Vec<String> {
     let mut system = System::new_with_specifics(RefreshKind::nothing().with_processes(ProcessRefreshKind::nothing()));
     system.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing());
@@ -39,5 +43,11 @@ mod tests {
         let names = ["explorer.exe", "iCUE.exe", "ICUE.EXE", "OpenRGB.exe", "ckb-next-daemon", "bash"];
         assert_eq!(find_conflicts(names), ["ckb-next-daemon", "iCUE.exe", "OpenRGB.exe"]);
         assert!(find_conflicts(["k100d.exe"]).is_empty());
+    }
+
+    #[test]
+    fn ignored_names_are_not_conflicts() {
+        let names = ["OpenRGB.exe", "iCUE.exe"];
+        assert_eq!(remove_ignored(find_conflicts(names), &["openrgb.exe".to_string()]), ["iCUE.exe"]);
     }
 }

@@ -70,7 +70,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     thread::spawn(move || server::serve(listener, server_sender));
 
     eprintln!("k100d: config in {}", config.root().display());
-    runtime::run(Controller::new(settings, profiles, errors), config, receiver, sender, HidConnector);
+    let connector = HidConnector { ignore_conflicts: settings.ignore_conflicts.clone() };
+    runtime::run(Controller::new(settings, profiles, errors), config, receiver, sender, connector);
     eprintln!("k100d: stopped");
     Ok(())
 }

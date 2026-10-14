@@ -82,7 +82,10 @@ pub fn format_state(state: &DaemonState) -> String {
     let device = match &state.device {
         DeviceState::Connected { model, firmware } => format!("connected: {model} (firmware {firmware})"),
         DeviceState::Disconnected => "no keyboard found".to_owned(),
-        DeviceState::Blocked { processes } => format!("blocked by {}; close it to continue", processes.join(", ")),
+        DeviceState::Blocked { processes } => format!(
+            "blocked by {}; close it, or list it under ignore_conflicts in settings.toml if it does not control the K100",
+            processes.join(", ")
+        ),
         DeviceState::Released => "released (run `k100 reacquire` to take it back)".to_owned(),
         DeviceState::Paused { reason } => format!("paused: {reason}"),
     };
@@ -120,7 +123,9 @@ mod tests {
         assert!(text.contains("polling:    4000 Hz"), "{text}");
         assert!(text.contains("broken.toml: oops"), "{text}");
         let blocked = DaemonState { device: DeviceState::Blocked { processes: vec!["iCUE.exe".into()] }, ..state };
-        assert!(format_state(&blocked).contains("blocked by iCUE.exe"));
+        let blocked_text = format_state(&blocked);
+        assert!(blocked_text.contains("blocked by iCUE.exe"));
+        assert!(blocked_text.contains("ignore_conflicts"), "{blocked_text}");
     }
 
     #[test]
