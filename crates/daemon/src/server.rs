@@ -5,7 +5,7 @@ use std::thread;
 use interprocess::local_socket::{Listener, ListenerOptions, Name, Stream, prelude::*};
 use ipc::{MAX_LINE, Reply, Request, write_message};
 
-use crate::runtime::Command;
+use crate::runtime::{Command, SUBSCRIBER_QUEUE};
 
 pub fn bind() -> io::Result<Listener> {
     let listener = bind_name(ipc::socket_name()?)?;
@@ -68,7 +68,7 @@ fn handle_client(stream: Stream, commands: &Sender<Command>) -> io::Result<()> {
             }
         };
         if request == Request::Subscribe {
-            let (events_tx, events_rx) = mpsc::channel();
+            let (events_tx, events_rx) = mpsc::sync_channel(SUBSCRIBER_QUEUE);
             if commands.send(Command::Subscribe(events_tx)).is_err() {
                 return Ok(());
             }

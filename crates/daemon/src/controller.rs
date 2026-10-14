@@ -6,7 +6,7 @@ use engine::{Compositor, KeyPress, Layout};
 use ipc::{DaemonState, DeviceState, Event, PROTOCOL_VERSION, Profile, Reply, Request};
 use k100::{DeviceError, Frame, Session, Transport};
 
-use crate::config::{ConfigDir, Settings, default_profile};
+use crate::config::{ConfigDir, Settings, default_profile, profile_file_name};
 
 const BRIGHTNESS_SCALE: u32 = 10;
 
@@ -35,15 +35,26 @@ impl<T: Transport> DeviceLink for Session<T> {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkInfo {
+    pub model: String,
+    pub firmware: String,
+    pub max_polling_rate: Option<PollingRate>,
+}
+
 pub struct Controller {
     settings: Settings,
     profiles: BTreeMap<String, Profile>,
     active: String,
+    chosen: Option<String>,
     compositor: Compositor,
     link: Option<Box<dyn DeviceLink>>,
+    max_polling_rate: Option<PollingRate>,
     device: DeviceState,
     last_ping: Duration,
-    config_errors: Vec<String>,
+    profile_errors: Vec<String>,
+    settings_error: Option<String>,
+    device_warning: Option<String>,
     events: Vec<Event>,
 }
 
@@ -54,29 +65,36 @@ impl Controller {
             let fallback = default_profile();
             profiles.insert(fallback.name.clone(), fallback);
         }
-        let active = pick_active(&profiles, &settings.default_profile, None);
+        let active = pick_active(&profiles, None, &settings.default_profile);
         let compositor = Compositor::new(Layout::ansi(), &profiles[&active].layers);
         Self {
             settings,
             profiles,
             active,
+            chosen: None,
             compositor,
             link: None,
+            max_polling_rate: None,
             device: DeviceState::Disconnected,
             last_ping: Duration::ZERO,
-            config_errors,
+            profile_errors: config_errors,
+            settings_error: None,
+            device_warning: None,
             events: Vec::new(),
         }
     }
 
     pub fn state(&self) -> DaemonState {
+        let mut config_errors: Vec<String> = self.settings_error.iter().cloned().collect();
+        config_errors.extend(self.profile_errors.iter().cloned());
+        config_errors.extend(self.device_warning.iter().cloned());
         DaemonState {
             device: self.device.clone(),
             active_profile: self.active.clone(),
             profiles: self.profiles.keys().cloned().collect(),
             brightness: self.active_profile().brightness,
             polling_rate_hz: self.settings.polling_rate_hz,
-            config_errors: self.config_errors.clone(),
+            config_errors,
         }
     }
 
@@ -88,15 +106,23 @@ impl Controller {
         Duration::from_secs(1) / self.settings.fps.clamp(1, 200)
     }
 
-    pub fn attach(&mut self, link: Box<dyn DeviceLink>, model: &str, firmware: String, now: Duration) {
+    pub fn ignore_conflicts(&self) -> &[String] {
+        &self.settings.ignore_conflicts
+    }
+
+    pub fn attach(&mut self, link: Box<dyn DeviceLink>, info: LinkInfo, now: Duration) {
         self.link = Some(link);
+        self.max_polling_rate = info.max_polling_rate;
         self.last_ping = now;
-        self.apply_brightness();
-        if let Some(rate) = self.settings.polling_rate_hz.and_then(PollingRate::from_hz) {
-            self.with_link(|link| link.set_property(PropertyId::POLLING_RATE, rate.raw()));
+        self.device_warning = None;
+        let _ = self.apply_brightness();
+        if let Some(hz) = self.settings.polling_rate_hz {
+            if let Err(message) = self.apply_polling_rate(hz) {
+                self.device_warning = Some(message);
+            }
         }
         if self.link.is_some() {
-            self.set_state(DeviceState::Connected { model: model.to_owned(), firmware });
+            self.set_state(DeviceState::Connected { model: info.model, firmware: info.firmware });
         }
     }
 
@@ -110,10 +136,10 @@ impl Controller {
             return;
         }
         let frame = self.compositor.render(now, presses);
-        self.with_link(|link| link.write_frame(&frame));
+        let _ = self.with_link(|link| link.write_frame(&frame));
         if now.saturating_sub(self.last_ping) >= k100::PING_INTERVAL {
             self.last_ping = now;
-            self.with_link(|link| link.ping());
+            let _ = self.with_link(|link| link.ping());
         }
     }
 
@@ -132,6 +158,7 @@ impl Controller {
                 if !self.profiles.contains_key(&name) {
                     return error(format!("no profile named {name:?}"));
                 }
+                self.chosen = Some(name.clone());
                 self.activate(name);
                 Reply::Done
             }
@@ -152,14 +179,34 @@ impl Controller {
         }
     }
 
-    pub fn reload(&mut self, profiles: Vec<Profile>, config_errors: Vec<String>) {
-        self.config_errors = config_errors;
-        if profiles.is_empty() {
+    pub fn reload(&mut self, profiles: Vec<Profile>, config_errors: Vec<String>, failed_files: Vec<String>) {
+        self.profile_errors = config_errors;
+        let mut fresh: BTreeMap<String, Profile> = profiles.into_iter().map(|p| (p.name.clone(), p)).collect();
+        for (name, profile) in &self.profiles {
+            if failed_files.contains(&profile_file_name(name)) && !fresh.contains_key(name) {
+                fresh.insert(name.clone(), profile.clone());
+            }
+        }
+        if fresh.is_empty() {
             return;
         }
-        self.profiles = profiles.into_iter().map(|p| (p.name.clone(), p)).collect();
-        let active = pick_active(&self.profiles, &self.settings.default_profile, Some(&self.active));
+        self.profiles = fresh;
+        let active = pick_active(&self.profiles, self.chosen.as_deref(), &self.settings.default_profile);
         self.activate(active);
+    }
+
+    pub fn reload_settings(&mut self, settings: Result<Settings, String>) {
+        match settings {
+            Ok(settings) => {
+                self.settings_error = None;
+                let polling_changed = settings.polling_rate_hz != self.settings.polling_rate_hz;
+                self.settings = settings;
+                if let (true, Some(hz)) = (polling_changed, self.settings.polling_rate_hz) {
+                    self.device_warning = self.apply_polling_rate(hz).err();
+                }
+            }
+            Err(message) => self.settings_error = Some(message),
+        }
     }
 
     pub fn take_events(&mut self) -> Vec<Event> {
@@ -180,7 +227,7 @@ impl Controller {
         let changed = name != self.active;
         self.active = name;
         self.compositor = Compositor::new(Layout::ansi(), &self.active_profile().layers);
-        self.apply_brightness();
+        let _ = self.apply_brightness();
         if changed {
             self.events.push(Event::ProfileChanged { name: self.active.clone() });
         }
@@ -216,15 +263,27 @@ impl Controller {
     }
 
     fn set_polling_rate(&mut self, hz: u32, config: &ConfigDir) -> Reply {
-        let Some(rate) = PollingRate::from_hz(hz) else {
-            return error(format!("unsupported polling rate {hz} Hz (125, 250, 500, 1000, 2000, 4000, 8000)"));
-        };
-        self.settings.polling_rate_hz = Some(hz);
-        if let Err(failure) = config.save_settings(&self.settings) {
+        if let Err(message) = self.apply_polling_rate(hz) {
+            return error(message);
+        }
+        let mut on_disk = config.load_settings().unwrap_or_else(|_| self.settings.clone());
+        on_disk.polling_rate_hz = Some(hz);
+        if let Err(failure) = config.save_settings(&on_disk) {
             return error(format!("saving settings: {failure}"));
         }
-        self.with_link(|link| link.set_property(PropertyId::POLLING_RATE, rate.raw()));
+        self.settings = on_disk;
+        self.device_warning = None;
         Reply::Done
+    }
+
+    fn apply_polling_rate(&mut self, hz: u32) -> Result<(), String> {
+        let rate = PollingRate::from_hz(hz)
+            .ok_or_else(|| format!("unsupported polling rate {hz} Hz (125, 250, 500, 1000, 2000, 4000, 8000)"))?;
+        if let Some(max) = self.max_polling_rate.filter(|max| rate > *max) {
+            return Err(format!("this keyboard supports at most {} Hz", max.hz()));
+        }
+        self.with_link(|link| link.set_property(PropertyId::POLLING_RATE, rate.raw()))
+            .map_err(|failure| format!("keyboard rejected {hz} Hz: {failure}"))
     }
 
     fn release(&mut self) -> Reply {
@@ -236,17 +295,24 @@ impl Controller {
         }
     }
 
-    fn apply_brightness(&mut self) {
+    fn apply_brightness(&mut self) -> Result<(), DeviceError> {
         let value = u32::from(self.active_profile().brightness.min(100)) * BRIGHTNESS_SCALE;
-        self.with_link(|link| link.set_property(PropertyId::BRIGHTNESS, value));
+        self.with_link(|link| link.set_property(PropertyId::BRIGHTNESS, value))
     }
 
-    fn with_link(&mut self, operation: impl FnOnce(&mut dyn DeviceLink) -> Result<(), DeviceError>) {
-        let Some(link) = self.link.as_deref_mut() else { return };
-        if let Err(failure) = operation(link) {
-            self.link = None;
-            self.set_state(DeviceState::Paused { reason: failure.to_string() });
+    fn with_link(
+        &mut self,
+        operation: impl FnOnce(&mut dyn DeviceLink) -> Result<(), DeviceError>,
+    ) -> Result<(), DeviceError> {
+        let Some(link) = self.link.as_deref_mut() else { return Ok(()) };
+        let result = operation(link);
+        if let Err(failure) = &result {
+            if failure.status().is_none() {
+                self.link = None;
+                self.set_state(DeviceState::Paused { reason: failure.to_string() });
+            }
         }
+        result
     }
 
     fn set_state(&mut self, state: DeviceState) {
@@ -257,11 +323,11 @@ impl Controller {
     }
 }
 
-fn pick_active(profiles: &BTreeMap<String, Profile>, preferred: &str, current: Option<&String>) -> String {
-    current
+fn pick_active(profiles: &BTreeMap<String, Profile>, chosen: Option<&str>, preferred: &str) -> String {
+    chosen
         .filter(|name| profiles.contains_key(*name))
-        .cloned()
-        .or_else(|| profiles.contains_key(preferred).then(|| preferred.to_owned()))
+        .or_else(|| profiles.contains_key(preferred).then_some(preferred))
+        .map(str::to_owned)
         .unwrap_or_else(|| profiles.keys().next().cloned().unwrap_or_default())
 }
 
@@ -283,6 +349,7 @@ mod tests {
         pings: usize,
         released: bool,
         fail_writes: bool,
+        reject_polling: bool,
     }
 
     struct FakeLink(Arc<Mutex<Log>>);
@@ -297,7 +364,12 @@ mod tests {
             Ok(())
         }
         fn set_property(&mut self, property: PropertyId, value: u32) -> Result<(), DeviceError> {
-            self.0.lock().unwrap().properties.push((property.0, value));
+            let mut log = self.0.lock().unwrap();
+            if log.reject_polling && property == PropertyId::POLLING_RATE {
+                let status = bragi::Status::InvalidArgument;
+                return Err(DeviceError::Status { command: bragi::Command::SetProperty, status });
+            }
+            log.properties.push((property.0, value));
             Ok(())
         }
         fn ping(&mut self) -> Result<(), DeviceError> {
@@ -310,6 +382,10 @@ mod tests {
         }
     }
 
+    fn info(max_polling_rate: Option<PollingRate>) -> LinkInfo {
+        LinkInfo { model: "K100".into(), firmware: "1.15.61".into(), max_polling_rate }
+    }
+
     fn profile(name: &str, brightness: u8) -> Profile {
         Profile { name: name.into(), brightness, ..default_profile() }
     }
@@ -320,7 +396,7 @@ mod tests {
         let mut controller =
             Controller::new(Settings::default(), vec![profile("default", 80), profile("games", 30)], vec![]);
         let log = Arc::new(Mutex::new(Log::default()));
-        controller.attach(Box::new(FakeLink(log.clone())), "K100", "1.15.61".into(), Duration::ZERO);
+        controller.attach(Box::new(FakeLink(log.clone())), info(Some(PollingRate::Hz8000)), Duration::ZERO);
         (controller, log, temp, config)
     }
 
@@ -401,12 +477,25 @@ mod tests {
     }
 
     #[test]
-    fn reload_keeps_a_valid_active_profile_or_falls_back() {
+    fn reload_keeps_the_last_good_version_of_a_broken_file() {
         let (mut controller, _log, _temp, config) = controller();
         controller.handle(Request::SetActiveProfile { name: "games".into() }, &config);
-        controller.reload(vec![profile("default", 50)], vec!["games.toml: broken".into()]);
-        assert_eq!(controller.state().active_profile, "default");
+        controller.take_events();
+        controller.reload(vec![profile("default", 50)], vec!["games.toml: broken".into()], vec!["games.toml".into()]);
+        assert_eq!(controller.state().active_profile, "games");
+        assert_eq!(controller.state().brightness, 30);
         assert_eq!(controller.state().config_errors, ["games.toml: broken"]);
+        assert!(controller.take_events().is_empty(), "no profile change announced");
+    }
+
+    #[test]
+    fn the_chosen_profile_returns_when_its_file_comes_back() {
+        let (mut controller, _log, _temp, config) = controller();
+        controller.handle(Request::SetActiveProfile { name: "games".into() }, &config);
+        controller.reload(vec![profile("default", 50)], vec![], vec![]);
+        assert_eq!(controller.state().active_profile, "default");
+        controller.reload(vec![profile("default", 50), profile("games", 30)], vec![], vec![]);
+        assert_eq!(controller.state().active_profile, "games");
     }
 
     #[test]
@@ -414,5 +503,44 @@ mod tests {
         let controller = Controller::new(Settings::default(), vec![], vec![]);
         assert_eq!(controller.state().active_profile, "default");
         assert_eq!(controller.state().device, DeviceState::Disconnected);
+    }
+
+    #[test]
+    fn rejected_polling_rates_keep_the_link() {
+        let (mut controller, log, _temp, config) = controller();
+        log.lock().unwrap().reject_polling = true;
+        let reply = controller.handle(Request::SetPollingRate { hz: 2000 }, &config);
+        assert!(matches!(reply, Reply::Error { .. }), "{reply:?}");
+        assert!(matches!(controller.state().device, DeviceState::Connected { .. }));
+        controller.tick(Duration::from_millis(16), &[]);
+        assert_eq!(log.lock().unwrap().frames, 1);
+    }
+
+    #[test]
+    fn polling_above_the_keyboard_maximum_is_refused() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = ConfigDir::new(temp.path().to_path_buf());
+        let mut controller = Controller::new(Settings::default(), vec![profile("default", 80)], vec![]);
+        let log = Arc::new(Mutex::new(Log::default()));
+        controller.attach(Box::new(FakeLink(log.clone())), info(Some(PollingRate::Hz1000)), Duration::ZERO);
+        let reply = controller.handle(Request::SetPollingRate { hz: 8000 }, &config);
+        assert!(matches!(reply, Reply::Error { ref message } if message.contains("1000")), "{reply:?}");
+    }
+
+    #[test]
+    fn settings_reload_updates_conflicts_and_polling_saves_keep_other_edits() {
+        let (mut controller, _log, _temp, config) = controller();
+        let edited = Settings { ignore_conflicts: vec!["OpenRGB.exe".into()], ..Settings::default() };
+        config.save_settings(&edited).unwrap();
+        controller.reload_settings(config.load_settings());
+        assert_eq!(controller.ignore_conflicts(), ["OpenRGB.exe"]);
+        controller.reload_settings(Err("settings.toml: broken".into()));
+        assert_eq!(controller.ignore_conflicts(), ["OpenRGB.exe"], "last good settings kept");
+        assert!(controller.state().config_errors.iter().any(|e| e.contains("settings.toml")));
+        let manual = Settings { fps: 30, ..edited };
+        config.save_settings(&manual).unwrap();
+        assert_eq!(controller.handle(Request::SetPollingRate { hz: 500 }, &config), Reply::Done);
+        let saved = config.load_settings().unwrap();
+        assert_eq!((saved.fps, saved.polling_rate_hz), (30, Some(500)));
     }
 }

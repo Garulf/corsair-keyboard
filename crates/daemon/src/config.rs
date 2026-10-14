@@ -112,9 +112,15 @@ impl ConfigDir {
     }
 
     pub fn load_profiles(&self) -> (Vec<Profile>, Vec<String>) {
+        let (profiles, errors, _failed) = self.load_profile_set();
+        (profiles, errors)
+    }
+
+    pub fn load_profile_set(&self) -> (Vec<Profile>, Vec<String>, Vec<String>) {
         let mut profiles: Vec<Profile> = Vec::new();
         let mut errors = Vec::new();
-        let Ok(entries) = std::fs::read_dir(self.profiles_dir()) else { return (profiles, errors) };
+        let mut failed = Vec::new();
+        let Ok(entries) = std::fs::read_dir(self.profiles_dir()) else { return (profiles, errors, failed) };
         let mut paths: Vec<PathBuf> = entries.filter_map(|entry| entry.ok().map(|e| e.path())).collect();
         paths.sort();
         for path in paths.into_iter().filter(|p| p.extension().is_some_and(|ext| ext == "toml")) {
@@ -134,10 +140,13 @@ impl ConfigDir {
                     errors.push(format!("{}: duplicate profile name {:?}", path.display(), profile.name));
                 }
                 Ok(profile) => profiles.push(profile),
-                Err(error) => errors.push(format!("{}: {error}", path.display())),
+                Err(error) => {
+                    errors.push(format!("{}: {error}", path.display()));
+                    failed.extend(path.file_name().map(|name| name.to_string_lossy().into_owned()));
+                }
             }
         }
-        (profiles, errors)
+        (profiles, errors, failed)
     }
 
     pub fn save_profile(&self, profile: &Profile) -> io::Result<()> {

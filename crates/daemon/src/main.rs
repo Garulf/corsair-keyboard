@@ -56,6 +56,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     })?;
     watcher.watch(&config.profiles_dir(), RecursiveMode::NonRecursive)?;
+    watcher.watch(config.root(), RecursiveMode::NonRecursive)?;
 
     if let Some(seconds) = exit_after {
         let timer = sender.clone();
@@ -69,8 +70,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     thread::spawn(move || server::serve(listener, server_sender));
 
     eprintln!("k100d: config in {}", config.root().display());
-    let connector = HidConnector { ignore_conflicts: settings.ignore_conflicts.clone() };
-    runtime::run(Controller::new(settings, profiles, errors), config, receiver, sender, connector);
+    runtime::run(Controller::new(settings, profiles, errors), config, receiver, sender, HidConnector);
     released.notify();
     eprintln!("k100d: stopped");
     Ok(())

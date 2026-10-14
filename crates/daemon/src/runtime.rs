@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, SyncSender, TrySendError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -11,14 +11,15 @@ use k100::{InputEvent, InputSource, KeyStateTracker, Session};
 
 use crate::config::ConfigDir;
 use crate::conflict::{remove_ignored, running_conflicts};
-use crate::controller::{Controller, DeviceLink};
+use crate::controller::{Controller, DeviceLink, LinkInfo};
 
 const RECONNECT_INTERVAL: Duration = Duration::from_secs(2);
 const INPUT_POLL: Duration = Duration::from_millis(100);
+pub const SUBSCRIBER_QUEUE: usize = 256;
 
 pub enum Command {
     Request(Request, Sender<Reply>),
-    Subscribe(Sender<Reply>),
+    Subscribe(SyncSender<Reply>),
     Input(InputEvent),
     Reload,
     Shutdown,
@@ -26,8 +27,7 @@ pub enum Command {
 
 pub struct Connection {
     pub link: Box<dyn DeviceLink>,
-    pub model: String,
-    pub firmware: String,
+    pub info: LinkInfo,
     pub input: Option<Box<dyn InputSource>>,
 }
 
@@ -39,16 +39,14 @@ pub enum ConnectError {
 }
 
 pub trait Connector {
-    fn connect(&mut self) -> Result<Connection, ConnectError>;
+    fn connect(&mut self, ignore_conflicts: &[String]) -> Result<Connection, ConnectError>;
 }
 
-pub struct HidConnector {
-    pub ignore_conflicts: Vec<String>,
-}
+pub struct HidConnector;
 
 impl Connector for HidConnector {
-    fn connect(&mut self) -> Result<Connection, ConnectError> {
-        let conflicts = remove_ignored(running_conflicts(), &self.ignore_conflicts);
+    fn connect(&mut self, ignore_conflicts: &[String]) -> Result<Connection, ConnectError> {
+        let conflicts = remove_ignored(running_conflicts(), ignore_conflicts);
         if !conflicts.is_empty() {
             return Err(ConnectError::Blocked(conflicts));
         }
@@ -58,13 +56,12 @@ impl Connector for HidConnector {
         })?;
         let session =
             Session::start(opened.commands, opened.model).map_err(|error| ConnectError::Failed(error.to_string()))?;
-        let firmware = format_firmware(session.info().firmware);
-        Ok(Connection {
-            link: Box::new(session),
+        let info = LinkInfo {
             model: opened.model.name.to_owned(),
-            firmware,
-            input: Some(Box::new(opened.input)),
-        })
+            firmware: format_firmware(session.info().firmware),
+            max_polling_rate: session.info().max_polling_rate,
+        };
+        Ok(Connection { link: Box::new(session), info, input: Some(Box::new(opened.input)) })
     }
 }
 
@@ -81,7 +78,7 @@ pub fn run(
     mut connector: impl Connector,
 ) {
     let started = Instant::now();
-    let mut subscribers: Vec<Sender<Reply>> = Vec::new();
+    let mut subscribers: Vec<SyncSender<Reply>> = Vec::new();
     let mut presses: Vec<KeyPress> = Vec::new();
     let mut input_stop: Option<Arc<AtomicBool>> = None;
     let mut next_frame = Instant::now();
@@ -102,8 +99,9 @@ pub fn run(
                 broadcast(&mut subscribers, input_event(event));
             }
             Ok(Command::Reload) => {
-                let (profiles, errors) = config.load_profiles();
-                controller.reload(profiles, errors);
+                controller.reload_settings(config.load_settings());
+                let (profiles, errors, failed) = config.load_profile_set();
+                controller.reload(profiles, errors, failed);
             }
             Err(RecvTimeoutError::Timeout) => {}
         }
@@ -123,12 +121,12 @@ pub fn run(
             }
             if Instant::now() >= next_connect {
                 next_connect = Instant::now() + RECONNECT_INTERVAL;
-                match connector.connect() {
+                match connector.connect(controller.ignore_conflicts()) {
                     Ok(connection) => {
                         if let Some(input) = connection.input {
                             input_stop = Some(spawn_input(input, sender.clone()));
                         }
-                        controller.attach(connection.link, &connection.model, connection.firmware, started.elapsed());
+                        controller.attach(connection.link, connection.info, started.elapsed());
                     }
                     Err(ConnectError::Blocked(processes)) => {
                         controller.set_device_state(DeviceState::Blocked { processes })
@@ -150,8 +148,11 @@ pub fn run(
     controller.shutdown();
 }
 
-fn broadcast(subscribers: &mut Vec<Sender<Reply>>, event: Event) {
-    subscribers.retain(|subscriber| subscriber.send(Reply::Event { event: event.clone() }).is_ok());
+fn broadcast(subscribers: &mut Vec<SyncSender<Reply>>, event: Event) {
+    subscribers.retain(|subscriber| match subscriber.try_send(Reply::Event { event: event.clone() }) {
+        Ok(()) => true,
+        Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => false,
+    });
 }
 
 fn input_event(event: InputEvent) -> Event {
@@ -217,12 +218,11 @@ mod tests {
     }
 
     impl Connector for ScriptedConnector {
-        fn connect(&mut self) -> Result<Connection, ConnectError> {
+        fn connect(&mut self, _ignore: &[String]) -> Result<Connection, ConnectError> {
             let next = if self.attempts.is_empty() { Ok(()) } else { self.attempts.remove(0) };
             next.map(|()| Connection {
                 link: Box::new(CountingLink(self.frames.clone())),
-                model: "K100".into(),
-                firmware: "1.15.61".into(),
+                info: LinkInfo { model: "K100".into(), firmware: "1.15.61".into(), max_polling_rate: None },
                 input: None,
             })
         }
@@ -245,7 +245,7 @@ mod tests {
             frames: frames.clone(),
         };
         let (sender, receiver) = mpsc::channel();
-        let (events_tx, events_rx) = mpsc::channel();
+        let (events_tx, events_rx) = mpsc::sync_channel(SUBSCRIBER_QUEUE);
         sender.send(Command::Subscribe(events_tx)).unwrap();
         let loop_sender = sender.clone();
         let handle = std::thread::spawn(move || run(controller, config, receiver, loop_sender, connector));
@@ -264,5 +264,17 @@ mod tests {
 
         sender.send(Command::Shutdown).unwrap();
         handle.join().unwrap();
+    }
+
+    #[test]
+    fn stuck_subscribers_are_dropped_instead_of_buffering_forever() {
+        let (stuck_tx, _stuck_rx) = mpsc::sync_channel(2);
+        let (live_tx, live_rx) = mpsc::sync_channel(SUBSCRIBER_QUEUE);
+        let mut subscribers = vec![stuck_tx, live_tx];
+        for _ in 0..5 {
+            broadcast(&mut subscribers, Event::Dial { clockwise: true });
+            while live_rx.try_recv().is_ok() {}
+        }
+        assert_eq!(subscribers.len(), 1);
     }
 }
