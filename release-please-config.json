@@ -1,0 +1,4 @@
+{
+  "release-type": "rust",
+  "packages": { ".": { "package-name": "corsair-keyboard" } }
+}

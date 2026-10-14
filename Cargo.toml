@@ -1,0 +1,18 @@
+[workspace]
+resolver = "3"
+members = ["crates/bragi"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+rust-version = "1.85"
+repository = "https://github.com/Garulf/corsair-keyboard"
+
+[workspace.dependencies]
+bragi = { path = "crates/bragi" }
+k100 = { path = "crates/k100" }
+thiserror = "2.0"
+hidapi = { version = "2.6", default-features = false }
+clap = { version = "4.6", features = ["derive"] }
+ctrlc = "3.5"
