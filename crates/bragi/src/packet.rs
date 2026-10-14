@@ -110,11 +110,7 @@ impl Response {
         if transport_error != 0 {
             return Err(ResponseError::Transport(transport_error));
         }
-        Ok(Self {
-            command: bytes[1],
-            status: bytes[2],
-            payload: bytes[3..].to_vec(),
-        })
+        Ok(Self { command: bytes[1], status: bytes[2], payload: bytes[3..].to_vec() })
     }
 
     pub fn command_byte(&self) -> u8 {

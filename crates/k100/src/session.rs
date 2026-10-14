@@ -34,21 +34,10 @@ impl<T: Transport> Session<T> {
     pub fn start(transport: T, model: &'static Model) -> Result<Self, DeviceError> {
         let mut device = Device::new(transport);
         let info = read_info(&mut device)?;
-        let mut session = Self {
-            device,
-            model,
-            info,
-            released: false,
-        };
-        session
-            .device
-            .set_property(PropertyId::OPERATING_MODE, OperatingMode::Software.raw())?;
-        session
-            .device
-            .open_file(LIGHTING_HANDLE, FileId::REAL_TIME_LIGHTINGS_BUFFER)?;
-        session
-            .device
-            .open_file(INDICATION_HANDLE, FileId::INDICATION_REAL_TIME_LIGHTINGS_BUFFER)?;
+        let mut session = Self { device, model, info, released: false };
+        session.device.set_property(PropertyId::OPERATING_MODE, OperatingMode::Software.raw())?;
+        session.device.open_file(LIGHTING_HANDLE, FileId::REAL_TIME_LIGHTINGS_BUFFER)?;
+        session.device.open_file(INDICATION_HANDLE, FileId::INDICATION_REAL_TIME_LIGHTINGS_BUFFER)?;
         Ok(session)
     }
 
@@ -61,11 +50,7 @@ impl<T: Transport> Session<T> {
     }
 
     pub fn write_frame(&mut self, frame: &Frame) -> Result<(), DeviceError> {
-        self.write_lighting(
-            LIGHTING_HANDLE,
-            FileId::REAL_TIME_LIGHTINGS_BUFFER,
-            &encode_frame(frame),
-        )
+        self.write_lighting(LIGHTING_HANDLE, FileId::REAL_TIME_LIGHTINGS_BUFFER, &encode_frame(frame))
     }
 
     pub fn write_indicators(&mut self, records: &[IndicatorRecord]) -> Result<(), DeviceError> {
@@ -141,14 +126,7 @@ pub fn restore<T: Transport>(device: &mut Device<T>, key_count: usize) -> Result
 
 fn unbind_if_bound<T: Transport>(device: &mut Device<T>, handle: u8) -> Result<(), DeviceError> {
     match device.unbind(handle) {
-        Err(error)
-            if matches!(
-                error.status(),
-                Some(Status::InvalidDeviceAddress | Status::InvalidState)
-            ) =>
-        {
-            Ok(())
-        }
+        Err(error) if matches!(error.status(), Some(Status::InvalidDeviceAddress | Status::InvalidState)) => Ok(()),
         other => other,
     }
 }
@@ -160,24 +138,13 @@ fn read_info<T: Transport>(device: &mut Device<T>) -> Result<DeviceInfo, DeviceE
     let max_polling_rate =
         optional(device.get_property(PropertyId::MAXIMUM_POLLING_RATE))?.and_then(PollingRate::from_raw);
     let protocol_version = optional(device.get_property(PropertyId::BRAGI_PROTOCOL_VERSION))?;
-    Ok(DeviceInfo {
-        pid,
-        firmware,
-        layout,
-        max_polling_rate,
-        protocol_version,
-    })
+    Ok(DeviceInfo { pid, firmware, layout, max_polling_rate, protocol_version })
 }
 
 fn optional(result: Result<u32, DeviceError>) -> Result<Option<u32>, DeviceError> {
     match result {
         Ok(value) => Ok(Some(value)),
-        Err(error)
-            if matches!(
-                error.status(),
-                Some(Status::PropertyNotSupported | Status::InvalidArgument)
-            ) =>
-        {
+        Err(error) if matches!(error.status(), Some(Status::PropertyNotSupported | Status::InvalidArgument)) => {
             Ok(None)
         }
         Err(error) => Err(error),
@@ -227,16 +194,7 @@ mod tests {
         assert_eq!(session.info().max_polling_rate, Some(PollingRate::Hz8000));
         assert_eq!(
             commands(&log),
-            [
-                (0x02, 0x13),
-                (0x02, 0x12),
-                (0x02, 0x41),
-                (0x02, 0x96),
-                (0x02, 0x05),
-                (0x01, 0x03),
-                (0x0D, 0),
-                (0x0D, 1)
-            ]
+            [(0x02, 0x13), (0x02, 0x12), (0x02, 0x41), (0x02, 0x96), (0x02, 0x05), (0x01, 0x03), (0x0D, 0), (0x0D, 1)]
         );
         let set_mode = log.lock().unwrap()[5].clone();
         assert_eq!(&set_mode[4..8], &[2, 0, 0, 0]);
@@ -265,10 +223,7 @@ mod tests {
         log.lock().unwrap().clear();
         session.write_frame(&[Rgb::new(9, 8, 7); LED_COUNT]).unwrap();
         let log = log.lock().unwrap();
-        assert_eq!(
-            &log[0][..10],
-            &[0x08, 0x06, LIGHTING_HANDLE, 0x45, 0x02, 0x00, 0x00, 0x12, 0x00, 9]
-        );
+        assert_eq!(&log[0][..10], &[0x08, 0x06, LIGHTING_HANDLE, 0x45, 0x02, 0x00, 0x00, 0x12, 0x00, 9]);
     }
 
     #[test]
@@ -311,9 +266,7 @@ mod tests {
         let log = fake.log();
         let mut session = Session::start(fake, k100()).unwrap();
         log.lock().unwrap().clear();
-        session
-            .set_key_mappings(&KeyMappings::all_normal(k100().key_count))
-            .unwrap();
+        session.set_key_mappings(&KeyMappings::all_normal(k100().key_count)).unwrap();
         let log = log.lock().unwrap();
         assert_eq!(&log[0][..5], &[0x08, 0x0D, KEYMAP_HANDLE, 0x02, 0x00]);
         assert_eq!(log[1][1], 0x06);
@@ -330,17 +283,7 @@ mod tests {
         session.release().unwrap();
         let log = log.lock().unwrap();
         let tail: Vec<(u8, u8)> = log.iter().map(|r| (r[1], r[2])).collect();
-        assert_eq!(
-            tail,
-            [
-                (0x0D, KEYMAP_HANDLE),
-                (0x06, KEYMAP_HANDLE),
-                (0x05, 1),
-                (0x05, 1),
-                (0x05, 1),
-                (0x01, 0x03)
-            ]
-        );
+        assert_eq!(tail, [(0x0D, KEYMAP_HANDLE), (0x06, KEYMAP_HANDLE), (0x05, 1), (0x05, 1), (0x05, 1), (0x01, 0x03)]);
         assert_eq!(&log[5][4..8], &[1, 0, 0, 0]);
     }
 
@@ -368,11 +311,7 @@ mod tests {
             }]
         });
         let mut session = Session::start(fake, k100()).unwrap();
-        assert!(
-            !session
-                .try_set_property(PropertyId::KEY_PRESS_NOTIFICATIONS_REPORTING, 1)
-                .unwrap()
-        );
+        assert!(!session.try_set_property(PropertyId::KEY_PRESS_NOTIFICATIONS_REPORTING, 1).unwrap());
         assert!(session.try_set_property(PropertyId::BRIGHTNESS, 500).unwrap());
     }
 
@@ -381,11 +320,7 @@ mod tests {
     }
 
     fn info_or_ok(request: &[u8]) -> Vec<u8> {
-        if request[1] == 0x02 {
-            value_reply(request, 1)
-        } else {
-            ok_reply(request)
-        }
+        if request[1] == 0x02 { value_reply(request, 1) } else { ok_reply(request) }
     }
 
     #[test]
@@ -403,11 +338,7 @@ mod tests {
     #[test]
     fn start_restores_hardware_mode_when_opening_lighting_fails() {
         let fake = FakeTransport::with_responder(|request| {
-            vec![if request[1] == 0x0D && request[3] == 0x22 {
-                status_reply(request, 3)
-            } else {
-                info_or_ok(request)
-            }]
+            vec![if request[1] == 0x0D && request[3] == 0x22 { status_reply(request, 3) } else { info_or_ok(request) }]
         });
         let log = fake.log();
         assert!(Session::start(fake, k100()).is_err());
@@ -429,31 +360,21 @@ mod tests {
         let mut session = Session::start(fake, k100()).unwrap();
         assert!(session.release().is_err());
         drop(session);
-        let restores = log
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|r| set_mode_value(r) == Some(1))
-            .count();
+        let restores = log.lock().unwrap().iter().filter(|r| set_mode_value(r) == Some(1)).count();
         assert_eq!(restores, 2);
     }
 
     #[test]
     fn lighting_writes_are_not_retried_after_a_timeout() {
-        let fake = FakeTransport::with_responder(|request| {
-            if request[1] == 0x06 {
-                vec![]
-            } else {
-                vec![info_or_ok(request)]
-            }
-        });
+        let fake = FakeTransport::with_responder(
+            |request| {
+                if request[1] == 0x06 { vec![] } else { vec![info_or_ok(request)] }
+            },
+        );
         let log = fake.log();
         let mut session = Session::start(fake, k100()).unwrap();
         log.lock().unwrap().clear();
-        assert!(matches!(
-            session.write_frame(&[Rgb::BLACK; LED_COUNT]),
-            Err(DeviceError::Timeout(_))
-        ));
+        assert!(matches!(session.write_frame(&[Rgb::BLACK; LED_COUNT]), Err(DeviceError::Timeout(_))));
         let begins = log.lock().unwrap().iter().filter(|r| r[1] == 0x06).count();
         assert_eq!(begins, 1);
     }
@@ -461,11 +382,7 @@ mod tests {
     #[test]
     fn restore_attempts_every_step_even_when_the_keymap_fails() {
         let fake = FakeTransport::with_responder(|request| {
-            vec![if request[1] == 0x0D {
-                status_reply(request, 3)
-            } else {
-                ok_reply(request)
-            }]
+            vec![if request[1] == 0x0D { status_reply(request, 3) } else { ok_reply(request) }]
         });
         let log = fake.log();
         let mut device = Device::new(fake);

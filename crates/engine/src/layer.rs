@@ -74,14 +74,7 @@ pub struct LayerConfig {
 
 impl LayerConfig {
     pub fn new(name: &str, zone: Zone, effect: EffectConfig) -> Self {
-        Self {
-            name: name.to_owned(),
-            zone,
-            effect,
-            opacity: 1.0,
-            blend: BlendMode::Normal,
-            enabled: true,
-        }
+        Self { name: name.to_owned(), zone, effect, opacity: 1.0, blend: BlendMode::Normal, enabled: true }
     }
 }
 
@@ -117,11 +110,7 @@ impl Compositor {
     }
 
     pub fn render(&mut self, time: Duration, presses: &[KeyPress]) -> Frame {
-        let ctx = FrameCtx {
-            time,
-            layout: &self.layout,
-            presses,
-        };
+        let ctx = FrameCtx { time, layout: &self.layout, presses };
         let mut out = [Rgb::BLACK; LED_COUNT];
         let mut scratch = [Rgb::BLACK; LED_COUNT];
         for layer in &mut self.layers {
@@ -151,10 +140,7 @@ mod tests {
     fn upper_layers_cover_lower_layers_only_inside_their_zone() {
         let red = Rgb::new(255, 0, 0);
         let blue = Rgb::new(0, 0, 255);
-        let layers = [
-            solid(Zone::Named(NamedZone::All), red),
-            solid(Zone::Named(NamedZone::Wasd), blue),
-        ];
+        let layers = [solid(Zone::Named(NamedZone::All), red), solid(Zone::Named(NamedZone::Wasd), blue)];
         let mut compositor = Compositor::new(Layout::ansi(), &layers);
         let frame = compositor.render(Duration::ZERO, &[]);
         assert_eq!(frame[26], blue, "W");

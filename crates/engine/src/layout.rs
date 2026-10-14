@@ -111,14 +111,7 @@ impl Layout {
             let mut x = 0.0;
             for &(index, label, width, height) in cells {
                 if index != GAP {
-                    leds.push(key(
-                        index,
-                        label,
-                        MAIN_X + x * UNIT,
-                        MAIN_Y + row_y * UNIT,
-                        width * UNIT,
-                        height * UNIT,
-                    ));
+                    leds.push(key(index, label, MAIN_X + x * UNIT, MAIN_Y + row_y * UNIT, width * UNIT, height * UNIT));
                 }
                 x += width;
             }
@@ -126,36 +119,24 @@ impl Layout {
         leds.extend(top_row());
         leds.extend(g_keys());
         leds.extend(dial());
-        leds.extend(strip(
-            LedKind::LightBar,
-            led::LIGHT_BAR_FIRST..=led::LIGHT_BAR_LAST,
-            |i, n| Rect {
-                x: 250.0 + i * (2150.0 / n),
-                y: 10.0,
-                w: 2150.0 / n - 10.0,
-                h: 20.0,
-            },
-        ));
-        leds.extend(strip(
-            LedKind::Underglow,
-            led::LEFT_UNDERGLOW_FIRST..=led::LEFT_UNDERGLOW_LAST,
-            |i, n| Rect {
-                x: 0.0,
-                y: 230.0 + i * (610.0 / n),
-                w: 10.0,
-                h: 610.0 / n - 5.0,
-            },
-        ));
-        leds.extend(strip(
-            LedKind::Underglow,
-            led::RIGHT_UNDERGLOW_FIRST..=led::RIGHT_UNDERGLOW_LAST,
-            |i, n| Rect {
-                x: 2490.0,
-                y: 230.0 + i * (610.0 / n),
-                w: 10.0,
-                h: 610.0 / n - 5.0,
-            },
-        ));
+        leds.extend(strip(LedKind::LightBar, led::LIGHT_BAR_FIRST..=led::LIGHT_BAR_LAST, |i, n| Rect {
+            x: 250.0 + i * (2150.0 / n),
+            y: 10.0,
+            w: 2150.0 / n - 10.0,
+            h: 20.0,
+        }));
+        leds.extend(strip(LedKind::Underglow, led::LEFT_UNDERGLOW_FIRST..=led::LEFT_UNDERGLOW_LAST, |i, n| Rect {
+            x: 0.0,
+            y: 230.0 + i * (610.0 / n),
+            w: 10.0,
+            h: 610.0 / n - 5.0,
+        }));
+        leds.extend(strip(LedKind::Underglow, led::RIGHT_UNDERGLOW_FIRST..=led::RIGHT_UNDERGLOW_LAST, |i, n| Rect {
+            x: 2490.0,
+            y: 230.0 + i * (610.0 / n),
+            w: 10.0,
+            h: 610.0 / n - 5.0,
+        }));
         leds.extend(strip(LedKind::Logo, led::LOGO_FIRST..=led::LOGO_LAST, |i, _| Rect {
             x: 1170.0 + i * 55.0,
             y: 50.0,
@@ -170,12 +151,7 @@ impl Layout {
         for (position, geometry) in leds.iter().enumerate() {
             by_index[geometry.index as usize] = Some(position);
         }
-        let bounds = leds.iter().map(|g| g.rect).reduce(union).unwrap_or(Rect {
-            x: 0.0,
-            y: 0.0,
-            w: 1.0,
-            h: 1.0,
-        });
+        let bounds = leds.iter().map(|g| g.rect).reduce(union).unwrap_or(Rect { x: 0.0, y: 0.0, w: 1.0, h: 1.0 });
         Self { leds, by_index, bounds }
     }
 
@@ -184,11 +160,7 @@ impl Layout {
     }
 
     pub fn get(&self, index: u8) -> Option<&LedGeometry> {
-        self.by_index
-            .get(index as usize)
-            .copied()
-            .flatten()
-            .map(|position| &self.leds[position])
+        self.by_index.get(index as usize).copied().flatten().map(|position| &self.leds[position])
     }
 
     pub fn bounds(&self) -> Rect {
@@ -202,12 +174,7 @@ impl Layout {
 }
 
 fn key(index: u8, label: &'static str, x: f32, y: f32, w: f32, h: f32) -> LedGeometry {
-    LedGeometry {
-        index,
-        kind: LedKind::Key,
-        label,
-        rect: Rect { x, y, w, h },
-    }
+    LedGeometry { index, kind: LedKind::Key, label, rect: Rect { x, y, w, h } }
 }
 
 fn top_row() -> Vec<LedGeometry> {
@@ -228,12 +195,7 @@ fn top_row() -> Vec<LedGeometry> {
         index,
         kind: LedKind::Indicator,
         label,
-        rect: Rect {
-            x,
-            y: y - 25.0,
-            w: 20.0,
-            h: 10.0,
-        },
+        rect: Rect { x, y: y - 25.0, w: 20.0, h: 10.0 },
     };
     leds.push(indicator(led::MACRO_RECORDING_INDICATOR, "Recording", MAIN_X + 30.0));
     leds.push(indicator(led::MUTE_INDICATOR, "Muted", MAIN_X + 17.25 * UNIT + 30.0));
@@ -260,12 +222,7 @@ fn dial() -> Vec<LedGeometry> {
             index,
             kind: LedKind::DialRing,
             label: "Ring",
-            rect: Rect {
-                x: cx + radius * angle.cos() - 8.0,
-                y: cy + radius * angle.sin() - 8.0,
-                w: 16.0,
-                h: 16.0,
-            },
+            rect: Rect { x: cx + radius * angle.cos() - 8.0, y: cy + radius * angle.sin() - 8.0, w: 16.0, h: 16.0 },
         });
     }
     leds
@@ -273,26 +230,13 @@ fn dial() -> Vec<LedGeometry> {
 
 fn strip(kind: LedKind, indices: std::ops::RangeInclusive<u8>, place: impl Fn(f32, f32) -> Rect) -> Vec<LedGeometry> {
     let count = indices.clone().count() as f32;
-    indices
-        .enumerate()
-        .map(|(i, index)| LedGeometry {
-            index,
-            kind,
-            label: "",
-            rect: place(i as f32, count),
-        })
-        .collect()
+    indices.enumerate().map(|(i, index)| LedGeometry { index, kind, label: "", rect: place(i as f32, count) }).collect()
 }
 
 fn union(a: Rect, b: Rect) -> Rect {
     let x = a.x.min(b.x);
     let y = a.y.min(b.y);
-    Rect {
-        x,
-        y,
-        w: (a.x + a.w).max(b.x + b.w) - x,
-        h: (a.y + a.h).max(b.y + b.h) - y,
-    }
+    Rect { x, y, w: (a.x + a.w).max(b.x + b.w) - x, h: (a.y + a.h).max(b.y + b.h) - y }
 }
 
 #[cfg(test)]
@@ -324,10 +268,7 @@ mod tests {
             assert!(layout.get(index).is_some(), "missing {index}");
         }
         assert_eq!(layout.get(led::DIAL_RING_FIRST).unwrap().kind, LedKind::DialRing);
-        assert_eq!(
-            layout.get(led::MACRO_RECORDING_INDICATOR).unwrap().kind,
-            LedKind::Indicator
-        );
+        assert_eq!(layout.get(led::MACRO_RECORDING_INDICATOR).unwrap().kind, LedKind::Indicator);
         assert!(layout.get(100).is_none(), "ISO key on an ANSI layout");
     }
 

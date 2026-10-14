@@ -54,9 +54,7 @@ impl<T: Transport> Device<T> {
                 Err(ResponseError::NotAReply | ResponseError::TooShort(_)) => continue,
                 Err(error) => return Err(error.into()),
             };
-            response
-                .status()
-                .map_err(|status| DeviceError::Status { command, status })?;
+            response.status().map_err(|status| DeviceError::Status { command, status })?;
             return Ok(response);
         }
         Err(DeviceError::Timeout(command))
@@ -122,10 +120,7 @@ mod tests {
     #[test]
     fn drains_stale_replies_before_writing() {
         let mut fake = FakeTransport::with_responder(|request| vec![value_reply(request, 2)]);
-        fake.push_unsolicited(value_reply(
-            &Request::get_property(PropertyId::OPERATING_MODE).as_bytes()[..],
-            1,
-        ));
+        fake.push_unsolicited(value_reply(&Request::get_property(PropertyId::OPERATING_MODE).as_bytes()[..], 1));
         let mut device = Device::new(fake);
         assert_eq!(device.get_property(PropertyId::OPERATING_MODE).unwrap(), 2);
     }

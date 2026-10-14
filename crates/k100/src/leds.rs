@@ -86,9 +86,8 @@ impl<'de> serde::Deserialize<'de> for Rgb {
         let text = <std::borrow::Cow<'de, str>>::deserialize(deserializer)?;
         let hex = text.trim_start_matches('#');
         let value = (hex.len() == 6).then(|| u32::from_str_radix(hex, 16).ok()).flatten();
-        let [_, r, g, b] = value
-            .ok_or_else(|| serde::de::Error::custom(format!("expected #rrggbb, got {text:?}")))?
-            .to_be_bytes();
+        let [_, r, g, b] =
+            value.ok_or_else(|| serde::de::Error::custom(format!("expected #rrggbb, got {text:?}")))?.to_be_bytes();
         Ok(Rgb::new(r, g, b))
     }
 }
@@ -111,21 +110,10 @@ mod tests {
     #[test]
     fn indicators_are_five_byte_records() {
         let records = [
-            IndicatorRecord {
-                led: led::DIAL_RING_FIRST,
-                color: Rgb::new(255, 0, 0),
-                alpha: 0xFF,
-            },
-            IndicatorRecord {
-                led: led::WIN_LOCK,
-                color: Rgb::new(0, 0, 9),
-                alpha: 0,
-            },
+            IndicatorRecord { led: led::DIAL_RING_FIRST, color: Rgb::new(255, 0, 0), alpha: 0xFF },
+            IndicatorRecord { led: led::WIN_LOCK, color: Rgb::new(0, 0, 9), alpha: 0 },
         ];
-        assert_eq!(
-            encode_indicators(&records),
-            vec![0x2B, 0x00, 182, 255, 0, 0, 0xFF, 114, 0, 0, 9, 0]
-        );
+        assert_eq!(encode_indicators(&records), vec![0x2B, 0x00, 182, 255, 0, 0, 0xFF, 114, 0, 0, 9, 0]);
     }
 }
 
@@ -140,10 +128,7 @@ mod serde_tests {
 
     #[test]
     fn rgb_round_trips_as_hex() {
-        let text = toml::to_string(&Wrapper {
-            color: Rgb::new(255, 128, 0),
-        })
-        .unwrap();
+        let text = toml::to_string(&Wrapper { color: Rgb::new(255, 128, 0) }).unwrap();
         assert_eq!(text.trim(), "color = \"#ff8000\"");
         let back: Wrapper = toml::from_str("color = \"00ff7f\"").unwrap();
         assert_eq!(back.color, Rgb::new(0, 255, 127));

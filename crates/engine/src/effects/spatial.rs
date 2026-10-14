@@ -147,11 +147,7 @@ mod tests {
         let layout = Layout::ansi();
         let mut effect = config.build();
         let mut out = [Rgb::BLACK; LED_COUNT];
-        let ctx = FrameCtx {
-            time: Duration::from_secs_f32(seconds),
-            layout: &layout,
-            presses: &[],
-        };
+        let ctx = FrameCtx { time: Duration::from_secs_f32(seconds), layout: &layout, presses: &[] };
         effect.render(&ctx, &mut out);
         out
     }
@@ -171,51 +167,23 @@ mod tests {
 
     #[test]
     fn horizontal_gradient_runs_left_to_right() {
-        let frame = render(
-            EffectConfig::Gradient {
-                from: RED,
-                to: BLUE,
-                angle: 0.0,
-            },
-            0.0,
-        );
+        let frame = render(EffectConfig::Gradient { from: RED, to: BLUE, angle: 0.0 }, 0.0);
         assert!(frame[LEFT_KEY].r > frame[LEFT_KEY].b);
         assert!(frame[RIGHT_KEY].b > frame[RIGHT_KEY].r);
-        let vertical = render(
-            EffectConfig::Gradient {
-                from: RED,
-                to: BLUE,
-                angle: 90.0,
-            },
-            0.0,
-        );
+        let vertical = render(EffectConfig::Gradient { from: RED, to: BLUE, angle: 90.0 }, 0.0);
         assert!(vertical[41].r > vertical[44].r, "Esc row redder than space row");
     }
 
     #[test]
     fn rainbow_wave_moves_with_time() {
-        let config = EffectConfig::RainbowWave {
-            speed: 0.5,
-            angle: 0.0,
-            wavelength: 1.0,
-        };
+        let config = EffectConfig::RainbowWave { speed: 0.5, angle: 0.0, wavelength: 1.0 };
         assert_ne!(render(config.clone(), 0.0)[4], render(config.clone(), 0.3)[4]);
-        assert_eq!(
-            render(config.clone(), 0.0)[4],
-            render(config, 2.0)[4],
-            "period is 1/speed"
-        );
+        assert_eq!(render(config.clone(), 0.0)[4], render(config, 2.0)[4], "period is 1/speed");
     }
 
     #[test]
     fn color_wave_band_passes_over_keys() {
-        let config = EffectConfig::ColorWave {
-            color: RED,
-            background: BLUE,
-            speed: 0.5,
-            width: 0.2,
-            angle: 0.0,
-        };
+        let config = EffectConfig::ColorWave { color: RED, background: BLUE, speed: 0.5, width: 0.2, angle: 0.0 };
         let lit_early = render(config.clone(), 0.2)[LEFT_KEY];
         let lit_late = render(config, 1.6)[LEFT_KEY];
         assert!(lit_early.r > lit_late.r, "band near the left early, gone later");
@@ -229,51 +197,22 @@ mod tests {
 
     #[test]
     fn visor_bounces() {
-        let config = EffectConfig::Visor {
-            color: RED,
-            background: Rgb::BLACK,
-            speed: 0.5,
-            width: 0.2,
-        };
+        let config = EffectConfig::Visor { color: RED, background: Rgb::BLACK, speed: 0.5, width: 0.2 };
         let left_edge = k100::led::LEFT_UNDERGLOW_FIRST as usize;
         let right_edge = k100::led::RIGHT_UNDERGLOW_FIRST as usize;
-        assert!(
-            render(config.clone(), 0.0)[left_edge].r > 200,
-            "starts at the left edge"
-        );
-        assert!(
-            render(config.clone(), 1.0)[right_edge].r > 200,
-            "half a period later at the right"
-        );
-        assert!(
-            render(config.clone(), 1.0)[left_edge].r < 50,
-            "left edge dark meanwhile"
-        );
+        assert!(render(config.clone(), 0.0)[left_edge].r > 200, "starts at the left edge");
+        assert!(render(config.clone(), 1.0)[right_edge].r > 200, "half a period later at the right");
+        assert!(render(config.clone(), 1.0)[left_edge].r < 50, "left edge dark meanwhile");
         assert!(render(config, 2.0)[left_edge].r > 200, "back at the left");
     }
 
     #[test]
     fn huge_times_stay_finite() {
         for config in [
-            EffectConfig::RainbowWave {
-                speed: 0.5,
-                angle: 0.0,
-                wavelength: 1.0,
-            },
-            EffectConfig::ColorWave {
-                color: RED,
-                background: BLUE,
-                speed: 3.0,
-                width: 0.2,
-                angle: 45.0,
-            },
+            EffectConfig::RainbowWave { speed: 0.5, angle: 0.0, wavelength: 1.0 },
+            EffectConfig::ColorWave { color: RED, background: BLUE, speed: 3.0, width: 0.2, angle: 45.0 },
             EffectConfig::SpiralRainbow { speed: 2.0 },
-            EffectConfig::Visor {
-                color: RED,
-                background: BLUE,
-                speed: 1.0,
-                width: 0.2,
-            },
+            EffectConfig::Visor { color: RED, background: BLUE, speed: 1.0, width: 0.2 },
         ] {
             let frame = render(config, 36_000_000.0);
             assert!(frame.iter().any(|&c| c != Rgb::BLACK));

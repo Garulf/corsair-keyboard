@@ -34,9 +34,7 @@ impl OperatingMode {
     }
 
     pub fn from_raw(raw: u32) -> Option<Self> {
-        [Self::Hardware, Self::Software]
-            .into_iter()
-            .find(|mode| mode.raw() == raw)
+        [Self::Hardware, Self::Software].into_iter().find(|mode| mode.raw() == raw)
     }
 }
 
@@ -53,15 +51,8 @@ pub enum PollingRate {
 }
 
 impl PollingRate {
-    pub const ALL: [Self; 7] = [
-        Self::Hz125,
-        Self::Hz250,
-        Self::Hz500,
-        Self::Hz1000,
-        Self::Hz2000,
-        Self::Hz4000,
-        Self::Hz8000,
-    ];
+    pub const ALL: [Self; 7] =
+        [Self::Hz125, Self::Hz250, Self::Hz500, Self::Hz1000, Self::Hz2000, Self::Hz4000, Self::Hz8000];
 
     pub fn raw(self) -> u32 {
         self as u32

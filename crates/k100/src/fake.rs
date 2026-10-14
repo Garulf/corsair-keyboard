@@ -20,11 +20,7 @@ impl FakeTransport {
     }
 
     pub fn with_responder(respond: impl FnMut(&[u8]) -> Vec<Vec<u8>> + Send + 'static) -> Self {
-        Self {
-            log: Arc::default(),
-            pending: VecDeque::new(),
-            respond: Box::new(respond),
-        }
+        Self { log: Arc::default(), pending: VecDeque::new(), respond: Box::new(respond) }
     }
 
     pub fn log(&self) -> Arc<Mutex<Vec<Vec<u8>>>> {
@@ -61,9 +57,7 @@ pub struct FakeInput {
 
 impl FakeInput {
     pub fn new(reports: Vec<Vec<u8>>) -> Self {
-        Self {
-            reports: reports.into(),
-        }
+        Self { reports: reports.into() }
     }
 }
 

@@ -57,12 +57,7 @@ pub fn run(command: Diag) -> Result<()> {
     ctrlc::set_handler(move || flag.store(true, Ordering::SeqCst))?;
 
     let OpenedDevice { commands, input, model } = open_device()?;
-    println!(
-        "found {} (pid {:04x}){}",
-        model.name,
-        model.pid,
-        if model.tested { "" } else { " [untested]" }
-    );
+    println!("found {} (pid {:04x}){}", model.name, model.pid, if model.tested { "" } else { " [untested]" });
     match command {
         Diag::Info => info(commands),
         Diag::Release => release(commands, model.key_count),
@@ -79,28 +74,21 @@ pub fn run(command: Diag) -> Result<()> {
 fn info(commands: HidTransport) -> Result<()> {
     let mut device = Device::new(commands);
     let mut read = |property| device.get_property(property).map_err(describe);
-    println!(
-        "firmware:         {}",
-        read(PropertyId::FIRMWARE_VERSION).map(format_version)?
-    );
+    println!("firmware:         {}", read(PropertyId::FIRMWARE_VERSION).map(format_version)?);
     println!("pid:              {:04x?}", read(PropertyId::USB_PID));
     println!("layout:           {:?}", read(PropertyId::PHYSICAL_KEYBOARD_LAYOUT));
     println!("protocol version: {:?}", read(PropertyId::BRAGI_PROTOCOL_VERSION));
     let mode = read(PropertyId::OPERATING_MODE).map(|raw| OperatingMode::from_raw(raw).ok_or(raw));
     println!("operating mode:   {mode:?}");
     println!("brightness:       {:?}", read(PropertyId::BRIGHTNESS));
-    for (name, property) in [
-        ("polling rate:", PropertyId::POLLING_RATE),
-        ("max polling:", PropertyId::MAXIMUM_POLLING_RATE),
-    ] {
+    for (name, property) in
+        [("polling rate:", PropertyId::POLLING_RATE), ("max polling:", PropertyId::MAXIMUM_POLLING_RATE)]
+    {
         let rate = read(property).map(|raw| PollingRate::from_raw(raw).map(PollingRate::hz).ok_or(raw));
         println!("{name:<17} {rate:?}");
     }
     println!("winlock:          {:?}", read(PropertyId::WIN_LOCK_ENABLED));
-    println!(
-        "key reporting:    {:?}",
-        read(PropertyId::KEY_PRESS_NOTIFICATIONS_REPORTING)
-    );
+    println!("key reporting:    {:?}", read(PropertyId::KEY_PRESS_NOTIFICATIONS_REPORTING));
     let enabled = read(PropertyId::PRESS_DEBOUNCE_ENABLED);
     let timeout = read(PropertyId::PRESS_DEBOUNCE_TIMEOUT);
     println!("press debounce:   {enabled:?} / {timeout:?}");
@@ -114,9 +102,7 @@ fn describe(error: DeviceError) -> String {
 fn release(commands: HidTransport, key_count: usize) -> Result<()> {
     let mut device = Device::new(commands);
     let result = k100::restore(&mut device, key_count);
-    let mode = device
-        .get_property(PropertyId::OPERATING_MODE)
-        .map(OperatingMode::from_raw);
+    let mode = device.get_property(PropertyId::OPERATING_MODE).map(OperatingMode::from_raw);
     println!("restore: {result:?}; operating mode now {mode:?}");
     Ok(result?)
 }
@@ -138,11 +124,7 @@ fn indicators(mut session: Session<HidTransport>) -> Result<()> {
     session.write_frame(&[Rgb::new(0, 0, 40); LED_COUNT])?;
     for alpha in [0xFF, 0x00] {
         let records: Vec<IndicatorRecord> = (led::DIAL_RING_FIRST..=led::DIAL_RING_LAST)
-            .map(|led| IndicatorRecord {
-                led,
-                color: Rgb::new(255, 0, 0),
-                alpha,
-            })
+            .map(|led| IndicatorRecord { led, color: Rgb::new(255, 0, 0), alpha })
             .collect();
         session.write_indicators(&records)?;
         println!("dial ring red with alpha {alpha:#04x} (rest of keyboard dim blue)");
@@ -163,10 +145,7 @@ fn fps(mut session: Session<HidTransport>, frames: u32, stop: &AtomicBool) -> Re
     }
     let elapsed = started.elapsed();
     let rate = f64::from(sent) / elapsed.as_secs_f64();
-    println!(
-        "{sent} frames in {elapsed:?}: {rate:.1} fps, {:?} per frame",
-        elapsed / sent.max(1)
-    );
+    println!("{sent} frames in {elapsed:?}: {rate:.1} fps, {:?} per frame", elapsed / sent.max(1));
     Ok(session.release()?)
 }
 
@@ -206,9 +185,7 @@ fn watch(mut session: Session<HidTransport>, mut input: HidInput, seconds: u64, 
         let Some(report) = input.read(Duration::from_millis(100))? else {
             continue;
         };
-        let events = Notification::parse(&report)
-            .map(|n| tracker.update(&n))
-            .unwrap_or_default();
+        let events = Notification::parse(&report).map(|n| tracker.update(&n)).unwrap_or_default();
         println!("raw {:02x?} -> {events:?}", &report[..report.len().min(24)]);
     }
     Ok(session.release()?)

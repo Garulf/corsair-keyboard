@@ -1,11 +1,7 @@
 use k100::Rgb;
 
 pub fn hsv(hue_degrees: f32, saturation: f32, value: f32) -> Rgb {
-    let hue = if hue_degrees.is_finite() {
-        hue_degrees.rem_euclid(360.0) / 60.0
-    } else {
-        0.0
-    };
+    let hue = if hue_degrees.is_finite() { hue_degrees.rem_euclid(360.0) / 60.0 } else { 0.0 };
     let chroma = value * saturation;
     let x = chroma * (1.0 - ((hue % 2.0) - 1.0).abs());
     let m = value - chroma;

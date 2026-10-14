@@ -20,11 +20,7 @@ impl KeyStateTracker {
         match notification {
             Notification::KeyPressStateChange { bitmap } => self.diff(bitmap),
             Notification::RelativePropertyChange { property, delta } if *property == PropertyId::DIAL_RING_ROTATION => {
-                let step = if *delta > 0 {
-                    InputEvent::DialCw
-                } else {
-                    InputEvent::DialCcw
-                };
+                let step = if *delta > 0 { InputEvent::DialCw } else { InputEvent::DialCcw };
                 vec![step; delta.unsigned_abs() as usize]
             }
             _ => Vec::new(),
@@ -39,11 +35,7 @@ impl KeyStateTracker {
             let is = bit(bitmap, key);
             if was != is {
                 let key = key as u8;
-                events.push(if is {
-                    InputEvent::KeyDown(key)
-                } else {
-                    InputEvent::KeyUp(key)
-                });
+                events.push(if is { InputEvent::KeyDown(key) } else { InputEvent::KeyUp(key) });
             }
         }
         self.pressed = bitmap.to_vec();
@@ -71,18 +63,9 @@ mod tests {
     #[test]
     fn reports_presses_and_releases_lsb_first() {
         let mut tracker = KeyStateTracker::default();
-        assert_eq!(
-            tracker.update(&bitmap_with(&[4, 131])),
-            [InputEvent::KeyDown(4), InputEvent::KeyDown(131)]
-        );
-        assert_eq!(
-            tracker.update(&bitmap_with(&[131, 137])),
-            [InputEvent::KeyUp(4), InputEvent::KeyDown(137)]
-        );
-        assert_eq!(
-            tracker.update(&bitmap_with(&[])),
-            [InputEvent::KeyUp(131), InputEvent::KeyUp(137)]
-        );
+        assert_eq!(tracker.update(&bitmap_with(&[4, 131])), [InputEvent::KeyDown(4), InputEvent::KeyDown(131)]);
+        assert_eq!(tracker.update(&bitmap_with(&[131, 137])), [InputEvent::KeyUp(4), InputEvent::KeyDown(137)]);
+        assert_eq!(tracker.update(&bitmap_with(&[])), [InputEvent::KeyUp(131), InputEvent::KeyUp(137)]);
     }
 
     #[test]
@@ -95,16 +78,10 @@ mod tests {
     #[test]
     fn dial_deltas_expand_to_steps() {
         let mut tracker = KeyStateTracker::default();
-        let turn = |delta| Notification::RelativePropertyChange {
-            property: PropertyId::DIAL_RING_ROTATION,
-            delta,
-        };
+        let turn = |delta| Notification::RelativePropertyChange { property: PropertyId::DIAL_RING_ROTATION, delta };
         assert_eq!(tracker.update(&turn(2)), [InputEvent::DialCw, InputEvent::DialCw]);
         assert_eq!(tracker.update(&turn(-1)), [InputEvent::DialCcw]);
-        let other = Notification::RelativePropertyChange {
-            property: PropertyId::BRIGHTNESS,
-            delta: 3,
-        };
+        let other = Notification::RelativePropertyChange { property: PropertyId::BRIGHTNESS, delta: 3 };
         assert!(tracker.update(&other).is_empty());
     }
 }

@@ -28,9 +28,7 @@ pub struct KeyMappings {
 
 impl KeyMappings {
     pub fn all_normal(key_count: usize) -> Self {
-        Self {
-            bytes: vec![Mapping::NORMAL.0; key_count],
-        }
+        Self { bytes: vec![Mapping::NORMAL.0; key_count] }
     }
 
     pub fn set(&mut self, key: u8, mapping: Mapping) {

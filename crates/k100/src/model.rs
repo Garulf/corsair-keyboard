@@ -14,24 +14,9 @@ pub struct Model {
 }
 
 pub const MODELS: &[Model] = &[
-    Model {
-        pid: 0x1BC5,
-        name: "K100 RGB Optical-Mechanical",
-        tested: true,
-        key_count: K100_KEY_COUNT,
-    },
-    Model {
-        pid: 0x1B7C,
-        name: "K100 RGB Optical-Mechanical (OPX)",
-        tested: false,
-        key_count: K100_KEY_COUNT,
-    },
-    Model {
-        pid: 0x1B7D,
-        name: "K100 RGB Mechanical",
-        tested: false,
-        key_count: K100_KEY_COUNT,
-    },
+    Model { pid: 0x1BC5, name: "K100 RGB Optical-Mechanical", tested: true, key_count: K100_KEY_COUNT },
+    Model { pid: 0x1B7C, name: "K100 RGB Optical-Mechanical (OPX)", tested: false, key_count: K100_KEY_COUNT },
+    Model { pid: 0x1B7D, name: "K100 RGB Mechanical", tested: false, key_count: K100_KEY_COUNT },
 ];
 
 pub fn model_for_pid(pid: u16) -> Option<&'static Model> {

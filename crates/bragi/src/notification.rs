@@ -20,17 +20,12 @@ impl Notification {
                 property: property_at(payload)?,
                 value: u32::from_le_bytes(payload.get(2..6)?.try_into().ok()?),
             },
-            KEY_PRESS_STATE_CHANGE => Self::KeyPressStateChange {
-                bitmap: payload.to_vec(),
-            },
+            KEY_PRESS_STATE_CHANGE => Self::KeyPressStateChange { bitmap: payload.to_vec() },
             RELATIVE_PROPERTY_CHANGE => Self::RelativePropertyChange {
                 property: property_at(payload)?,
                 delta: i16::from_le_bytes(payload.get(2..4)?.try_into().ok()?),
             },
-            id => Self::Other {
-                id,
-                payload: payload.to_vec(),
-            },
+            id => Self::Other { id, payload: payload.to_vec() },
         })
     }
 }
@@ -59,10 +54,7 @@ mod tests {
         let report = [0x00, 0x05, 0x60, 0x00, 0xFF, 0xFF];
         assert_eq!(
             Notification::parse(&report),
-            Some(Notification::RelativePropertyChange {
-                property: PropertyId::DIAL_RING_ROTATION,
-                delta: -1
-            })
+            Some(Notification::RelativePropertyChange { property: PropertyId::DIAL_RING_ROTATION, delta: -1 })
         );
     }
 
@@ -71,22 +63,13 @@ mod tests {
         let report = [0x00, 0x01, 0x02, 0x00, 0xE8, 0x03, 0x00, 0x00];
         assert_eq!(
             Notification::parse(&report),
-            Some(Notification::PropertyValueChange {
-                property: PropertyId::BRIGHTNESS,
-                value: 1000
-            })
+            Some(Notification::PropertyValueChange { property: PropertyId::BRIGHTNESS, value: 1000 })
         );
     }
 
     #[test]
     fn unknown_and_truncated() {
-        assert_eq!(
-            Notification::parse(&[0x00, 0x09, 0x01]),
-            Some(Notification::Other {
-                id: 9,
-                payload: vec![0x01]
-            })
-        );
+        assert_eq!(Notification::parse(&[0x00, 0x09, 0x01]), Some(Notification::Other { id: 9, payload: vec![0x01] }));
         assert_eq!(Notification::parse(&[0x00]), None);
         assert_eq!(Notification::parse(&[0x00, 0x05, 0x60]), None);
     }
