@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/bragi", "crates/k100", "crates/engine", "crates/cli"]
+members = ["crates/bragi", "crates/k100", "crates/engine", "crates/ipc", "crates/cli"]
 
 [workspace.package]
 version = "0.1.0"
@@ -13,6 +13,14 @@ repository = "https://github.com/Garulf/corsair-keyboard"
 bragi = { path = "crates/bragi" }
 k100 = { path = "crates/k100" }
 engine = { path = "crates/engine" }
+ipc = { path = "crates/ipc" }
+daemon = { path = "crates/daemon" }
+interprocess = "2.4"
+serde_json = "1.0"
+sysinfo = { version = "0.39", default-features = false, features = ["system"] }
+directories = "6"
+notify = "8.2"
+tempfile = "3"
 serde = { version = "1.0", features = ["derive"] }
 toml = "1.1"
 thiserror = "2.0"
