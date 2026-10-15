@@ -96,8 +96,8 @@ mod tests {
         assert_eq!(members(Zone::Named(NamedZone::Wasd)), [4, 7, 22, 26]);
         assert_eq!(members(Zone::Named(NamedZone::GKeys)), (131..=136).collect::<Vec<u8>>());
         assert_eq!(members(Zone::Named(NamedZone::Arrows)), [79, 80, 81, 82]);
-        assert_eq!(members(Zone::Named(NamedZone::All)).len(), 175, "everything except the two indicator LEDs");
-        assert_eq!(members(Zone::Named(NamedZone::Keys)).len(), 104 + 6 + 9 + 1);
+        assert_eq!(members(Zone::Named(NamedZone::All)).len(), 173, "everything except the three indicator LEDs");
+        assert_eq!(members(Zone::Named(NamedZone::Keys)).len(), 104 + 6 + 7 + 1);
     }
 
     #[test]

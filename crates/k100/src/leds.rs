@@ -23,6 +23,7 @@ pub type Frame = [Rgb; LED_COUNT];
 pub mod led {
     pub const MACRO_RECORDING_INDICATOR: u8 = 0;
     pub const MUTE_INDICATOR: u8 = 1;
+    pub const WIN_LOCK_INDICATOR: u8 = 2;
     pub const MUTE: u8 = 102;
     pub const BRIGHTNESS: u8 = 113;
     pub const WIN_LOCK: u8 = 114;

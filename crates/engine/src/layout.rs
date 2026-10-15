@@ -181,10 +181,8 @@ fn top_row() -> Vec<LedGeometry> {
     let y = MAIN_Y - UNIT;
     let button = |index, label, x_units: f32| key(index, label, MAIN_X + x_units * UNIT, y, 0.8 * UNIT, 0.8 * UNIT);
     let mut leds = vec![
-        button(led::MACRO_RECORD, "MR", 0.0),
-        button(led::PROFILE, "Profile", 1.0),
-        button(led::BRIGHTNESS, "Light", 13.25),
-        button(led::WIN_LOCK, "Lock", 14.25),
+        key(led::PROFILE, "Profile", 20.0, y, 60.0, 60.0),
+        key(led::WIN_LOCK, "Lock", 270.0, y, 60.0, 60.0),
         button(led::MUTE, "Mute", 17.25),
         button(led::MEDIA_STOP, "Stop", 18.5),
         button(led::MEDIA_PREVIOUS, "Prev", 19.5),
@@ -195,10 +193,11 @@ fn top_row() -> Vec<LedGeometry> {
         index,
         kind: LedKind::Indicator,
         label,
-        rect: Rect { x, y: y - 25.0, w: 20.0, h: 10.0 },
+        rect: Rect { x, y: 67.0, w: 18.0, h: 10.0 },
     };
-    leds.push(indicator(led::MACRO_RECORDING_INDICATOR, "Recording", MAIN_X + 30.0));
-    leds.push(indicator(led::MUTE_INDICATOR, "Muted", MAIN_X + 17.25 * UNIT + 30.0));
+    leds.push(indicator(led::MACRO_RECORDING_INDICATOR, "Recording", 1080.0));
+    leds.push(indicator(led::MUTE_INDICATOR, "Muted", 1105.0));
+    leds.push(indicator(led::WIN_LOCK_INDICATOR, "Win locked", 1130.0));
     leds
 }
 
@@ -214,7 +213,7 @@ fn g_keys() -> Vec<LedGeometry> {
 }
 
 fn dial() -> Vec<LedGeometry> {
-    let (cx, cy, radius) = (70.0, 160.0, 55.0);
+    let (cx, cy, radius) = (190.0, 150.0, 55.0);
     let mut leds = vec![key(led::DIAL_KEY, "Dial", cx - 30.0, cy - 30.0, 60.0, 60.0)];
     for (i, index) in (led::DIAL_RING_FIRST..=led::DIAL_RING_LAST).enumerate() {
         let angle = std::f32::consts::TAU * i as f32 / 8.0 - std::f32::consts::FRAC_PI_2;
@@ -258,7 +257,7 @@ mod tests {
             );
             assert!((geometry.index as usize) < k100::LED_COUNT);
         }
-        assert_eq!(layout.leds().len(), 177);
+        assert_eq!(layout.leds().len(), 176);
     }
 
     #[test]
@@ -270,6 +269,9 @@ mod tests {
         assert_eq!(layout.get(led::DIAL_RING_FIRST).unwrap().kind, LedKind::DialRing);
         assert_eq!(layout.get(led::MACRO_RECORDING_INDICATOR).unwrap().kind, LedKind::Indicator);
         assert!(layout.get(100).is_none(), "ISO key on an ANSI layout");
+        assert!(layout.get(led::BRIGHTNESS).is_none(), "the K100 has no brightness key");
+        assert!(layout.get(led::MACRO_RECORD).is_none(), "the K100 has no MR key");
+        assert_eq!(layout.get(led::WIN_LOCK_INDICATOR).unwrap().kind, LedKind::Indicator);
     }
 
     #[test]
@@ -281,6 +283,8 @@ mod tests {
         assert!(y(20) < y(4) && y(4) < y(29), "Q above A above Z");
         assert!(x(83) > x(42), "numpad right of backspace");
         assert!(x(131) < x(41), "G-keys left of Esc");
+        assert!(x(128) < x(137) && x(137) < x(114), "Profile, dial, WinLock left to right");
+        assert!(y(137) < y(41), "dial above the function row");
         assert_eq!(layout.get(44).unwrap().rect.w, 625.0, "6.25u space bar");
     }
 

@@ -3,7 +3,7 @@ pub const VENDOR_USAGE_PAGE: u16 = 0xFF42;
 pub const COMMAND_USAGE: u16 = 0x01;
 pub const INPUT_USAGE: u16 = 0x02;
 
-const K100_KEY_COUNT: usize = 146;
+const K100_KEY_COUNT: usize = 138;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Model {
@@ -32,5 +32,6 @@ mod tests {
         assert!(model_for_pid(0x1BC5).unwrap().tested);
         assert!(!model_for_pid(0x1B7C).unwrap().tested);
         assert!(model_for_pid(0x1BAB).is_none());
+        assert_eq!(model_for_pid(0x1BC5).unwrap().key_count, 138, "iCUE writes one byte per K100 key index 0..=137");
     }
 }

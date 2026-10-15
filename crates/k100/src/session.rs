@@ -386,7 +386,7 @@ mod tests {
         });
         let log = fake.log();
         let mut device = Device::new(fake);
-        assert!(restore(&mut device, 146).is_err());
+        assert!(restore(&mut device, 138).is_err());
         let log = log.lock().unwrap();
         let unbound: Vec<u8> = log.iter().filter(|r| r[1] == 0x05).map(|r| r[3]).collect();
         assert_eq!(unbound, [2, 0, 1]);
@@ -403,6 +403,6 @@ mod tests {
             }]
         });
         let mut device = Device::new(fake);
-        restore(&mut device, 146).unwrap();
+        restore(&mut device, 138).unwrap();
     }
 }

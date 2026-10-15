@@ -48,11 +48,11 @@ mod tests {
 
     #[test]
     fn defaults_to_normal_and_sets_bits() {
-        let mut mappings = KeyMappings::all_normal(146);
+        let mut mappings = KeyMappings::all_normal(138);
         mappings.set(0x47, Mapping::NO_REPORT);
         mappings.set(4, Mapping::WITH_CTRL | Mapping::WITH_SHIFT);
         let bytes = mappings.as_bytes();
-        assert_eq!(bytes.len(), 146);
+        assert_eq!(bytes.len(), 138);
         assert_eq!(bytes[0x47], 0x00);
         assert_eq!(bytes[4], 0x28);
         assert_eq!(bytes[5], 0x01);
