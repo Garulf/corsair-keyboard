@@ -20,6 +20,10 @@ fn sixty() -> u32 {
     60
 }
 
+fn full_brightness() -> u8 {
+    100
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Settings {
@@ -33,6 +37,8 @@ pub struct Settings {
     pub polling_rate_hz: Option<u32>,
     #[serde(default)]
     pub ignore_conflicts: Vec<String>,
+    #[serde(default = "full_brightness")]
+    pub brightness: u8,
 }
 
 impl Default for Settings {
@@ -43,6 +49,7 @@ impl Default for Settings {
             fps: 60,
             polling_rate_hz: None,
             ignore_conflicts: Vec::new(),
+            brightness: 100,
         }
     }
 }
@@ -51,7 +58,6 @@ pub fn default_profile() -> Profile {
     Profile {
         version: 1,
         name: default_profile_name(),
-        brightness: 100,
         apps: Vec::new(),
         layers: vec![LayerConfig::new(
             "rainbow",
@@ -275,5 +281,12 @@ mod tests {
         std::fs::write(config.profiles_dir().join("default.toml"), "name = ").unwrap();
         config.ensure_default_profile().unwrap();
         assert_eq!(std::fs::read_to_string(config.profiles_dir().join("default.toml")).unwrap(), "name = ");
+    }
+
+    #[test]
+    fn brightness_lives_in_settings() {
+        assert_eq!(Settings::default().brightness, 100);
+        let settings: Settings = toml::from_str("brightness = 35").unwrap();
+        assert_eq!(settings.brightness, 35);
     }
 }

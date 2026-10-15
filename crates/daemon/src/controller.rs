@@ -92,7 +92,7 @@ impl Controller {
             device: self.device.clone(),
             active_profile: self.active.clone(),
             profiles: self.profiles.keys().cloned().collect(),
-            brightness: self.active_profile().brightness,
+            brightness: self.settings.brightness.min(100),
             polling_rate_hz: self.settings.polling_rate_hz,
             config_errors,
         }
@@ -162,11 +162,7 @@ impl Controller {
                 self.activate(name);
                 Reply::Done
             }
-            Request::SetBrightness { percent } => {
-                let mut profile = self.active_profile().clone();
-                profile.brightness = percent.min(100);
-                self.save_profile(profile, config)
-            }
+            Request::SetBrightness { percent } => self.set_brightness(percent, config),
             Request::SetPollingRate { hz } => self.set_polling_rate(hz, config),
             Request::Release => self.release(),
             Request::Reacquire => {
@@ -200,7 +196,11 @@ impl Controller {
             Ok(settings) => {
                 self.settings_error = None;
                 let polling_changed = settings.polling_rate_hz != self.settings.polling_rate_hz;
+                let brightness_changed = settings.brightness != self.settings.brightness;
                 self.settings = settings;
+                if brightness_changed {
+                    let _ = self.apply_brightness();
+                }
                 if let (true, Some(hz)) = (polling_changed, self.settings.polling_rate_hz) {
                     self.device_warning = self.apply_polling_rate(hz).err();
                 }
@@ -227,7 +227,6 @@ impl Controller {
         let changed = name != self.active;
         self.active = name;
         self.compositor = Compositor::new(Layout::ansi(), &self.active_profile().layers);
-        let _ = self.apply_brightness();
         if changed {
             self.events.push(Event::ProfileChanged { name: self.active.clone() });
         }
@@ -295,8 +294,21 @@ impl Controller {
         }
     }
 
+    fn set_brightness(&mut self, percent: u8, config: &ConfigDir) -> Reply {
+        let mut on_disk = config.load_settings().unwrap_or_else(|_| self.settings.clone());
+        on_disk.brightness = percent.min(100);
+        if let Err(failure) = config.save_settings(&on_disk) {
+            return error(format!("saving settings: {failure}"));
+        }
+        self.settings = on_disk;
+        match self.apply_brightness() {
+            Ok(()) => Reply::Done,
+            Err(failure) => error(format!("keyboard rejected the brightness: {failure}")),
+        }
+    }
+
     fn apply_brightness(&mut self) -> Result<(), DeviceError> {
-        let value = u32::from(self.active_profile().brightness.min(100)) * BRIGHTNESS_SCALE;
+        let value = u32::from(self.settings.brightness.min(100)) * BRIGHTNESS_SCALE;
         self.with_link(|link| link.set_property(PropertyId::BRIGHTNESS, value))
     }
 
@@ -386,15 +398,15 @@ mod tests {
         LinkInfo { model: "K100".into(), firmware: "1.15.61".into(), max_polling_rate }
     }
 
-    fn profile(name: &str, brightness: u8) -> Profile {
-        Profile { name: name.into(), brightness, ..default_profile() }
+    fn profile(name: &str) -> Profile {
+        Profile { name: name.into(), ..default_profile() }
     }
 
     fn controller() -> (Controller, Arc<Mutex<Log>>, tempfile::TempDir, ConfigDir) {
         let temp = tempfile::tempdir().unwrap();
         let config = ConfigDir::new(temp.path().to_path_buf());
-        let mut controller =
-            Controller::new(Settings::default(), vec![profile("default", 80), profile("games", 30)], vec![]);
+        let settings = Settings { brightness: 80, ..Settings::default() };
+        let mut controller = Controller::new(settings, vec![profile("default"), profile("games")], vec![]);
         let log = Arc::new(Mutex::new(Log::default()));
         controller.attach(Box::new(FakeLink(log.clone())), info(Some(PollingRate::Hz8000)), Duration::ZERO);
         (controller, log, temp, config)
@@ -433,13 +445,14 @@ mod tests {
     }
 
     #[test]
-    fn switching_profiles_applies_brightness_and_announces() {
+    fn switching_profiles_keeps_the_device_brightness_and_announces() {
         let (mut controller, log, _temp, config) = controller();
         controller.take_events();
+        let writes_before = log.lock().unwrap().properties.len();
         let reply = controller.handle(Request::SetActiveProfile { name: "games".into() }, &config);
         assert_eq!(reply, Reply::Done);
         assert_eq!(controller.state().active_profile, "games");
-        assert_eq!(log.lock().unwrap().properties.last(), Some(&(0x02, 300)));
+        assert_eq!(log.lock().unwrap().properties.len(), writes_before, "brightness is not per profile");
         assert_eq!(controller.take_events(), [Event::ProfileChanged { name: "games".into() }]);
         let missing = controller.handle(Request::SetActiveProfile { name: "nope".into() }, &config);
         assert!(matches!(missing, Reply::Error { .. }));
@@ -451,7 +464,8 @@ mod tests {
         assert_eq!(controller.handle(Request::SetBrightness { percent: 140 }, &config), Reply::Done);
         assert_eq!(log.lock().unwrap().properties.last(), Some(&(0x02, 1000)));
         assert_eq!(controller.state().brightness, 100);
-        assert_eq!(config.load_profiles().0[0].brightness, 100);
+        assert_eq!(config.load_settings().unwrap().brightness, 100);
+        assert!(config.load_profiles().0.is_empty(), "brightness changes do not rewrite profiles");
         assert_eq!(controller.handle(Request::SetPollingRate { hz: 4000 }, &config), Reply::Done);
         assert_eq!(log.lock().unwrap().properties.last(), Some(&(0x01, 6)));
         assert_eq!(config.load_settings().unwrap().polling_rate_hz, Some(4000));
@@ -481,9 +495,8 @@ mod tests {
         let (mut controller, _log, _temp, config) = controller();
         controller.handle(Request::SetActiveProfile { name: "games".into() }, &config);
         controller.take_events();
-        controller.reload(vec![profile("default", 50)], vec!["games.toml: broken".into()], vec!["games.toml".into()]);
+        controller.reload(vec![profile("default")], vec!["games.toml: broken".into()], vec!["games.toml".into()]);
         assert_eq!(controller.state().active_profile, "games");
-        assert_eq!(controller.state().brightness, 30);
         assert_eq!(controller.state().config_errors, ["games.toml: broken"]);
         assert!(controller.take_events().is_empty(), "no profile change announced");
     }
@@ -492,9 +505,9 @@ mod tests {
     fn the_chosen_profile_returns_when_its_file_comes_back() {
         let (mut controller, _log, _temp, config) = controller();
         controller.handle(Request::SetActiveProfile { name: "games".into() }, &config);
-        controller.reload(vec![profile("default", 50)], vec![], vec![]);
+        controller.reload(vec![profile("default")], vec![], vec![]);
         assert_eq!(controller.state().active_profile, "default");
-        controller.reload(vec![profile("default", 50), profile("games", 30)], vec![], vec![]);
+        controller.reload(vec![profile("default"), profile("games")], vec![], vec![]);
         assert_eq!(controller.state().active_profile, "games");
     }
 
@@ -520,7 +533,7 @@ mod tests {
     fn polling_above_the_keyboard_maximum_is_refused() {
         let temp = tempfile::tempdir().unwrap();
         let config = ConfigDir::new(temp.path().to_path_buf());
-        let mut controller = Controller::new(Settings::default(), vec![profile("default", 80)], vec![]);
+        let mut controller = Controller::new(Settings::default(), vec![profile("default")], vec![]);
         let log = Arc::new(Mutex::new(Log::default()));
         controller.attach(Box::new(FakeLink(log.clone())), info(Some(PollingRate::Hz1000)), Duration::ZERO);
         let reply = controller.handle(Request::SetPollingRate { hz: 8000 }, &config);
@@ -542,5 +555,13 @@ mod tests {
         assert_eq!(controller.handle(Request::SetPollingRate { hz: 500 }, &config), Reply::Done);
         let saved = config.load_settings().unwrap();
         assert_eq!((saved.fps, saved.polling_rate_hz), (30, Some(500)));
+    }
+
+    #[test]
+    fn a_settings_reload_with_new_brightness_reaches_the_keyboard() {
+        let (mut controller, log, _temp, _config) = controller();
+        controller.reload_settings(Ok(Settings { brightness: 25, ..Settings::default() }));
+        assert_eq!(log.lock().unwrap().properties.last(), Some(&(0x02, 250)));
+        assert_eq!(controller.state().brightness, 25);
     }
 }

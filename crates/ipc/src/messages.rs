@@ -64,18 +64,12 @@ fn version_one() -> u32 {
     1
 }
 
-fn full_brightness() -> u8 {
-    100
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Profile {
     #[serde(default = "version_one")]
     pub version: u32,
     pub name: String,
-    #[serde(default = "full_brightness")]
-    pub brightness: u8,
     #[serde(default)]
     pub apps: Vec<String>,
     #[serde(default)]
@@ -98,7 +92,6 @@ mod tests {
     fn profile_defaults_fill_missing_fields() {
         let profile: Profile = serde_json::from_str(r#"{"name":"plain"}"#).unwrap();
         assert_eq!(profile.version, 1);
-        assert_eq!(profile.brightness, 100);
         assert!(profile.layers.is_empty() && profile.apps.is_empty());
     }
 
@@ -106,5 +99,10 @@ mod tests {
     fn profile_typos_are_rejected() {
         let error = serde_json::from_str::<Profile>(r#"{"name":"plain","brightnes":5}"#).unwrap_err();
         assert!(error.to_string().contains("brightnes"), "{error}");
+    }
+
+    #[test]
+    fn brightness_is_not_a_profile_field() {
+        assert!(serde_json::from_str::<Profile>(r#"{"name":"plain","brightness":40}"#).is_err());
     }
 }

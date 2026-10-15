@@ -1,5 +1,4 @@
 name = "demo"
-brightness = 60
 
 [[layers]]
 name = "rainbow"
