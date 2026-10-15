@@ -175,7 +175,8 @@ fn mask(mut session: Session<HidTransport>, key: u8, seconds: u64, stop: &Atomic
     let mut mappings = KeyMappings::all_normal(session.model().key_count);
     mappings.set(key, Mapping::NO_REPORT);
     session.set_key_mappings(&mappings)?;
-    println!("key {key:#04x} suppressed for {seconds}s; press it now, it should do nothing");
+    session.write_frame(&highlight_frame(Some(key)))?;
+    println!("key {key:#04x} (lit red) suppressed for {seconds}s; press it now, it should do nothing");
     sleep_unless_stopped(Duration::from_secs(seconds), stop);
     Ok(session.release()?)
 }
@@ -184,6 +185,7 @@ fn watch(mut session: Session<HidTransport>, mut input: HidInput, seconds: u64, 
     if !session.try_set_property(PropertyId::KEY_PRESS_NOTIFICATIONS_REPORTING, 1)? {
         println!("key press reporting property not supported; showing whatever the keyboard sends");
     }
+    session.write_frame(&highlight_frame(None))?;
     let mut tracker = KeyStateTracker::default();
     let deadline = Instant::now() + Duration::from_secs(seconds);
     let mut last_ping = Instant::now();
@@ -287,6 +289,14 @@ pub fn format_version(raw: u32) -> String {
     format!("{major}.{minor}.{}", u16::from_le_bytes([build_lo, build_hi]))
 }
 
+pub fn highlight_frame(key: Option<u8>) -> [Rgb; LED_COUNT] {
+    let mut frame = [Rgb::new(60, 60, 60); LED_COUNT];
+    if let Some(key) = key.filter(|&key| usize::from(key) < LED_COUNT) {
+        frame[usize::from(key)] = Rgb::new(255, 0, 0);
+    }
+    frame
+}
+
 pub fn rainbow_frame(step: u32) -> [Rgb; LED_COUNT] {
     std::array::from_fn(|i| hue((i as u32 * 7 + step * 4) % 360))
 }
@@ -354,5 +364,13 @@ mod tests {
     fn example_layer_file_parses() {
         let text = include_str!("../../../examples/layers/rainbow-wasd.toml");
         assert!(load_layers(text).unwrap().len() >= 3);
+    }
+
+    #[test]
+    fn highlight_frame_is_dim_white_with_one_red_key() {
+        let frame = highlight_frame(Some(29));
+        assert_eq!(frame[29], Rgb::new(255, 0, 0));
+        assert_eq!(frame[4], Rgb::new(60, 60, 60));
+        assert!(highlight_frame(None).iter().all(|&c| c == Rgb::new(60, 60, 60)));
     }
 }
