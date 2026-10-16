@@ -20,3 +20,7 @@ pub use sink::{Axis, InputSink, NullSink, RecordingSink, SinkError, SinkEvent};
 mod worker;
 
 pub use worker::{OutputCommand, OutputHandle, spawn};
+
+mod platform;
+
+pub use platform::platform_sink;
