@@ -511,6 +511,7 @@ impl Controller {
     }
 
     fn drop_link(&mut self) {
+        self.last_frame = None;
         if self.link.take().is_some() {
             self.output.send(OutputCommand::CancelAll);
             self.dispatcher.forget_held_keys();
@@ -592,9 +593,7 @@ impl Controller {
         let Ok(mut on_disk) = config.load_settings() else { return };
         self.brightness_changed_at = None;
         on_disk.brightness = self.settings.brightness;
-        if config.save_settings(&on_disk).is_ok() {
-            self.settings = on_disk;
-        }
+        let _ = config.save_settings(&on_disk);
     }
 
     fn save_macro(&mut self, key: Key, steps: Vec<MacroStep>, config: &ConfigDir) {
@@ -789,6 +788,7 @@ impl Controller {
         self.cancel_recording();
         self.winlock = None;
         self.winlock_check = None;
+        self.last_frame = None;
         let result = self.link.take().map_or(Ok(()), |mut link| link.release());
         self.set_state(DeviceState::Released);
         match result {
@@ -1194,6 +1194,19 @@ mod tests {
         assert!(rig.controller.last_frame().is_none());
         rig.controller.tick(ms(16), &[], &rig.config);
         assert!(rig.controller.last_frame().is_some());
+    }
+
+    #[test]
+    fn a_lost_or_released_keyboard_leaves_no_stale_frame_behind() {
+        let mut lost = rig(vec![profile("default")]);
+        lost.controller.tick(ms(16), &[], &lost.config);
+        lost.controller.set_device_state(DeviceState::Disconnected);
+        assert!(lost.controller.last_frame().is_none());
+
+        let mut released = rig(vec![profile("default")]);
+        released.controller.tick(ms(16), &[], &released.config);
+        assert_eq!(released.controller.handle(Request::Release, &released.config), Reply::Done);
+        assert!(released.controller.last_frame().is_none());
     }
 
     #[test]
@@ -1897,5 +1910,18 @@ mod tests {
         rig.config.save_settings(&edited).unwrap();
         rig.controller.reload_settings(rig.config.load_settings());
         assert_eq!(rig.controller.state().brightness, 70);
+    }
+
+    #[test]
+    fn a_settled_dial_brightness_save_keeps_a_direct_polling_edit_pending() {
+        let mut rig = rig(vec![profile("default")]);
+        rig.controller.input(InputEvent::DialCw, ms(0), &rig.config);
+        let edited = Settings { polling_rate_hz: Some(500), ..Settings::default() };
+        rig.config.save_settings(&edited).unwrap();
+        rig.controller.tick(ms(1100), &[], &rig.config);
+        assert_eq!(rig.config.load_settings().unwrap().brightness, 84);
+        rig.log.lock().unwrap().properties.clear();
+        rig.controller.reload_settings(rig.config.load_settings());
+        assert!(rig.log.lock().unwrap().properties.contains(&(0x01, 3)));
     }
 }
