@@ -489,6 +489,8 @@ impl Controller {
             self.cancel_recording();
             self.indicators.profile_switched(self.now);
             self.events.push(Event::ProfileChanged { name: self.active.clone() });
+        } else {
+            self.events.push(Event::ProfileEdited { name: self.active.clone() });
         }
         self.show_continuous_dial();
         self.write_key_mappings();
@@ -1472,6 +1474,29 @@ mod tests {
         tap_key(&mut rig, 57, 20, 30);
         let press = OutputCommand::Press { source: 57, program: actions::Program::remap(key("space"), &[]) };
         assert_eq!(rig.output.take(), [press, OutputCommand::Release { source: 57 }]);
+    }
+
+    #[test]
+    fn a_content_only_change_to_the_active_profile_announces_an_edit() {
+        let mut rig = rig(vec![caps_to_escape()]);
+        rig.controller.take_events();
+        rig.controller.reload(vec![caps_to_escape()], vec![], vec![]);
+        assert_eq!(rig.controller.take_events(), []);
+        let changed = assigned("default", "caps_lock", Action::Remap { key: key("space"), modifiers: vec![] });
+        rig.controller.reload(vec![changed.clone()], vec![], vec![]);
+        assert_eq!(rig.controller.take_events(), [Event::ProfileEdited { name: "default".into() }]);
+        let saved = Profile { apps: vec!["game.exe".into()], ..changed };
+        assert_eq!(rig.controller.handle(Request::SaveProfile { profile: saved }, &rig.config), Reply::Done);
+        assert_eq!(rig.controller.take_events(), [Event::ProfileEdited { name: "default".into() }]);
+    }
+
+    #[test]
+    fn editing_an_inactive_profile_announces_nothing() {
+        let (mut controller, _log, _temp, config) = controller();
+        controller.take_events();
+        let other = Profile { apps: vec!["game.exe".into()], ..profile("games") };
+        assert_eq!(controller.handle(Request::SaveProfile { profile: other }, &config), Reply::Done);
+        assert_eq!(controller.take_events(), []);
     }
 
     #[test]

@@ -47,6 +47,7 @@ pub enum Reply {
 pub enum Event {
     DeviceState { state: DeviceState },
     ProfileChanged { name: String },
+    ProfileEdited { name: String },
     Key { led: u8, pressed: bool },
     Dial { clockwise: bool },
     WinLock { enabled: bool },
@@ -152,6 +153,12 @@ mod tests {
         let old_state = r#"{"device":{"state":"released"},"active_profile":"a","profiles":[],"brightness":5,"polling_rate_hz":null,"config_errors":[]}"#;
         let state: DaemonState = serde_json::from_str(old_state).unwrap();
         assert_eq!((state.winlock, state.dial_mode.as_str()), (None, ""));
+    }
+
+    #[test]
+    fn profile_edited_events_serialize_with_the_profile_name() {
+        let event = Event::ProfileEdited { name: "games".into() };
+        assert_eq!(serde_json::to_string(&event).unwrap(), r#"{"type":"profile_edited","name":"games"}"#);
     }
 
     #[test]
