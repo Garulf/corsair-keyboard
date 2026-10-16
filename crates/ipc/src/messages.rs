@@ -22,6 +22,7 @@ pub enum Request {
     SetSettings { patch: SettingsPatch },
     StartRecording,
     CancelRecording,
+    SetAutostart { enabled: bool },
     Release,
     Reacquire,
     Subscribe,
@@ -90,6 +91,8 @@ pub struct DaemonState {
     pub dial_mode: String,
     #[serde(default)]
     pub recording: actions::RecorderState,
+    #[serde(default)]
+    pub autostart: bool,
 }
 
 fn version_one() -> u32 {

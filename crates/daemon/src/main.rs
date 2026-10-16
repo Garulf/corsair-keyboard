@@ -79,6 +79,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     };
     let (output, output_thread) = actions::spawn(sink);
     let mut controller = Controller::new(settings, profiles, errors, Box::new(output));
+    controller.set_autostart(autostart_port());
     if let Some(warning) = sink_warning {
         eprintln!("k100d: {warning}");
         controller.add_warning(warning);
@@ -92,4 +93,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     drop(instance);
     eprintln!("k100d: stopped");
     Ok(())
+}
+
+fn autostart_port() -> Box<dyn install::Autostart> {
+    let k100 = match ipc::launcher::sibling_binary("k100") {
+        Ok(path) if path.exists() => path,
+        _ => return Box::new(install::Unavailable("k100 was not found next to k100d".into())),
+    };
+    install::platform(k100).unwrap_or_else(|failure| Box::new(install::Unavailable(failure.to_string())))
 }

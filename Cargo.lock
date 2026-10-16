@@ -193,6 +193,7 @@ dependencies = [
  "ctrlc",
  "directories",
  "engine",
+ "install",
  "interprocess",
  "ipc",
  "k100",
@@ -378,6 +379,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "install"
+version = "0.1.0"
+dependencies = [
+ "directories",
+ "tempfile",
+ "winreg",
+]
+
+[[package]]
 name = "interprocess"
 version = "2.4.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -437,6 +447,7 @@ dependencies = [
  "clap",
  "ctrlc",
  "engine",
+ "install",
  "ipc",
  "k100",
  "serde",
@@ -1147,6 +1158,16 @@ name = "winnow"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "23b97319f7b8343df12cc98938e5c3eb436064524c8d2b4e30a1d3a36eecdf81"
+
+[[package]]
+name = "winreg"
+version = "0.56.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d6f32a0ff4a9f6f01231eb2059cc85479330739333e0e58cadf03b6af2cca10"
+dependencies = [
+ "cfg-if",
+ "windows-sys 0.61.2",
+]
 
 [[package]]
 name = "wyz"

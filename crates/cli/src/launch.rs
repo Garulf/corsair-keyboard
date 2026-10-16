@@ -17,3 +17,26 @@ pub fn daemon(foreground: bool, args: &[String]) -> Result<()> {
     }
     Ok(())
 }
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+pub enum AutostartAction {
+    On,
+    Off,
+    Status,
+}
+
+pub fn autostart(action: AutostartAction) -> Result<()> {
+    let entry = install::platform(std::env::current_exe()?)?;
+    match action {
+        AutostartAction::On => {
+            entry.enable()?;
+            println!("k100d will start at login");
+        }
+        AutostartAction::Off => {
+            entry.disable()?;
+            println!("k100d will no longer start at login");
+        }
+        AutostartAction::Status => println!("autostart: {}", if entry.is_enabled()? { "on" } else { "off" }),
+    }
+    Ok(())
+}

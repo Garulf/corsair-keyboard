@@ -132,6 +132,7 @@ pub struct Controller {
     now: Duration,
     events: Vec<Event>,
     last_frame: Option<Frame>,
+    autostart: Box<dyn install::Autostart>,
 }
 
 impl Controller {
@@ -181,7 +182,12 @@ impl Controller {
             now: Duration::ZERO,
             events: Vec::new(),
             last_frame: None,
+            autostart: Box::new(install::Unavailable("autostart is not configured".into())),
         }
+    }
+
+    pub fn set_autostart(&mut self, autostart: Box<dyn install::Autostart>) {
+        self.autostart = autostart;
     }
 
     pub fn add_warning(&mut self, warning: String) {
@@ -210,6 +216,7 @@ impl Controller {
             winlock: self.winlock,
             dial_mode: self.dispatcher.dial_mode().label(),
             recording: self.dispatcher.recorder_state(),
+            autostart: self.autostart.is_enabled().unwrap_or(false),
         }
     }
 
@@ -329,6 +336,13 @@ impl Controller {
             Request::CancelRecording => {
                 self.cancel_recording();
                 Reply::Done
+            }
+            Request::SetAutostart { enabled } => {
+                let result = if enabled { self.autostart.enable() } else { self.autostart.disable() };
+                match result {
+                    Ok(()) => Reply::Done,
+                    Err(failure) => error(format!("autostart: {failure}")),
+                }
             }
             Request::SetWinLock { enabled } => {
                 if self.link.is_none() {
@@ -854,6 +868,7 @@ fn works_without_output(action: &Action) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::io;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
 
@@ -1676,6 +1691,43 @@ mod tests {
         assert_eq!(rig.controller.state().recording, RecorderState::Idle);
         tap_key(&mut rig, led::G1, 0, 10);
         assert_eq!(rig.controller.state().recording, RecorderState::Idle);
+    }
+
+    #[derive(Clone, Default)]
+    struct FakeAutostart(Arc<AtomicBool>);
+
+    impl install::Autostart for FakeAutostart {
+        fn enable(&self) -> io::Result<()> {
+            self.0.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+        fn disable(&self) -> io::Result<()> {
+            self.0.store(false, Ordering::SeqCst);
+            Ok(())
+        }
+        fn is_enabled(&self) -> io::Result<bool> {
+            Ok(self.0.load(Ordering::SeqCst))
+        }
+    }
+
+    #[test]
+    fn autostart_is_toggled_and_reported() {
+        let mut rig = rig(vec![profile("default")]);
+        let fake = FakeAutostart::default();
+        rig.controller.set_autostart(Box::new(fake.clone()));
+        assert!(!rig.controller.state().autostart);
+        assert_eq!(rig.controller.handle(Request::SetAutostart { enabled: true }, &rig.config), Reply::Done);
+        assert!(rig.controller.state().autostart);
+        assert_eq!(rig.controller.handle(Request::SetAutostart { enabled: false }, &rig.config), Reply::Done);
+        assert!(!fake.0.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn autostart_failures_are_reported_to_the_client() {
+        let mut rig = rig(vec![profile("default")]);
+        rig.controller.set_autostart(Box::new(install::Unavailable("k100 not found".into())));
+        let reply = rig.controller.handle(Request::SetAutostart { enabled: true }, &rig.config);
+        assert!(matches!(reply, Reply::Error { message } if message.contains("k100 not found")));
     }
 
     #[test]

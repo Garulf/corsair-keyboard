@@ -103,6 +103,7 @@ pub fn format_state(state: &DaemonState) -> String {
     };
     lines.push(format!("winlock:    {winlock}"));
     lines.push(format!("dial:       {}", state.dial_mode));
+    lines.push(format!("autostart:  {}", if state.autostart { "on" } else { "off" }));
     match state.recording {
         actions::RecorderState::Idle => {}
         actions::RecorderState::AwaitingKey => lines.push("recording:  press a G key to choose the macro key".into()),
@@ -147,6 +148,7 @@ mod tests {
             winlock: Some(true),
             dial_mode: "brightness".into(),
             recording: actions::RecorderState::Idle,
+            autostart: true,
         };
         let text = format_state(&state);
         assert!(text.contains("connected: K100 RGB (firmware 1.15.61)"), "{text}");
@@ -156,6 +158,7 @@ mod tests {
         assert!(text.contains("broken.toml: oops"), "{text}");
         assert!(text.contains("winlock:    on"), "{text}");
         assert!(text.contains("dial:       brightness"), "{text}");
+        assert!(text.contains("autostart:  on"), "{text}");
         assert!(!text.contains("recording"), "{text}");
         let recording = DaemonState { recording: actions::RecorderState::Recording { key: 131 }, ..state.clone() };
         assert!(format_state(&recording).contains("recording:  into g1"));

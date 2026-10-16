@@ -41,6 +41,11 @@ enum Command {
         #[arg(long)]
         color: Option<String>,
     },
+    /// Start k100d at login (on), stop doing so (off) or show the setting (status)
+    Autostart {
+        #[arg(value_enum)]
+        action: launch::AutostartAction,
+    },
     /// Turn WinLock on or off
     Winlock {
         #[arg(value_enum)]
@@ -72,6 +77,7 @@ fn main() {
         Command::Reacquire => remote::simple(Request::Reacquire),
         Command::Daemon { foreground, args } => launch::daemon(foreground, &args),
         Command::Effect { name, color } => effect::run(&name, color.as_deref()),
+        Command::Autostart { action } => launch::autostart(action),
         Command::Winlock { state } => remote::simple(Request::SetWinLock { enabled: matches!(state, Switch::On) }),
         Command::Keys => {
             println!("{}", remote::key_list());
@@ -110,5 +116,13 @@ mod tests {
         let cli = Cli::try_parse_from(["k100", "effect", "solid", "--color", "#ff0000"]).unwrap();
         let Command::Effect { name, color } = cli.command else { panic!("expected effect") };
         assert_eq!((name.as_str(), color.as_deref()), ("solid", Some("#ff0000")));
+    }
+
+    #[test]
+    fn autostart_takes_on_off_or_status() {
+        for word in ["on", "off", "status"] {
+            assert!(Cli::try_parse_from(["k100", "autostart", word]).is_ok(), "{word}");
+        }
+        assert!(Cli::try_parse_from(["k100", "autostart", "maybe"]).is_err());
     }
 }
