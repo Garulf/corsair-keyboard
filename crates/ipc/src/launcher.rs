@@ -82,14 +82,15 @@ pub fn ensure_running_watched(
     if reachable() {
         return Ok(Launched::AlreadyRunning);
     }
-    let watch = start()?;
+    let mut watch = start()?;
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
         if reachable() {
             return Ok(Launched::Started);
         }
         match &watch {
-            Some(watch) => match watch.recv_timeout(PROBE_INTERVAL) {
+            Some(exits) => match exits.recv_timeout(PROBE_INTERVAL) {
+                Ok(status) if lost_the_lock_race(status) => watch = None,
                 Ok(status) => {
                     return if reachable() { Ok(Launched::Started) } else { Err(LaunchError::Exited(status)) };
                 }
@@ -99,6 +100,10 @@ pub fn ensure_running_watched(
         }
     }
     if reachable() { Ok(Launched::Started) } else { Err(LaunchError::Timeout(timeout)) }
+}
+
+fn lost_the_lock_race(status: ExitStatus) -> bool {
+    status.code() == Some(i32::from(crate::ALREADY_RUNNING))
 }
 
 pub fn daemon_reachable() -> bool {
@@ -230,11 +235,43 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn already_running_watch() -> Result<Option<ExitWatch>, LaunchError> {
+        use std::os::unix::process::ExitStatusExt;
+
+        let (exits, watch) = mpsc::channel();
+        exits.send(ExitStatus::from_raw(i32::from(crate::ALREADY_RUNNING) << 8)).unwrap();
+        Ok(Some(watch))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_child_that_lost_the_lock_race_waits_for_the_winner_to_answer() {
+        let probes = Cell::new(0);
+        let outcome = ensure_running_watched(
+            already_running_watch,
+            || {
+                probes.set(probes.get() + 1);
+                probes.get() > 4
+            },
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        assert_eq!(outcome, Launched::Started);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_child_that_lost_the_lock_race_times_out_when_the_winner_never_answers() {
+        let error = ensure_running_watched(already_running_watch, || false, Duration::from_millis(300)).unwrap_err();
+        assert!(matches!(error, LaunchError::Timeout(_)), "{error}");
+    }
+
+    #[cfg(unix)]
     #[test]
     fn spawning_works_from_a_folder_with_a_space_in_its_name() {
         let folder = tempfile::Builder::new().prefix("k100 spaced ").tempdir().unwrap();
         let program = folder.path().join("true");
-        std::fs::copy("/bin/true", &program).unwrap();
+        std::os::unix::fs::symlink("/bin/true", &program).unwrap();
         let exit = spawn_detached(&program, &[]).unwrap().recv_timeout(Duration::from_secs(5)).unwrap();
         assert!(exit.success());
     }
