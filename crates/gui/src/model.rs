@@ -62,6 +62,7 @@ pub enum Inbox {
     Connected,
     Disconnected(String),
     LaunchFailed(String),
+    LaunchFinished,
     RequestFailed(Box<Request>, String),
     Reply(Box<(Request, Reply)>),
     Event(Event),
@@ -370,6 +371,7 @@ impl Model {
                 self.starting_daemon = false;
                 self.toast(message);
             }
+            Inbox::LaunchFinished => self.starting_daemon = false,
             Inbox::RequestFailed(request, message) => self.request_failed(*request, message),
             Inbox::Reply(pair) => {
                 let (request, reply) = *pair;
@@ -604,6 +606,18 @@ mod tests {
         assert_eq!(model.take_effects(), [Effect::StartDaemon]);
         model.apply(Inbox::Connected);
         assert!(!model.starting_daemon);
+    }
+
+    #[test]
+    fn the_start_button_comes_back_when_the_launcher_finishes_without_a_connection() {
+        let mut model = Model::new();
+        model.apply(Inbox::Disconnected("refused".into()));
+        model.request_start_daemon();
+        model.take_effects();
+        model.apply(Inbox::LaunchFinished);
+        assert!(!model.starting_daemon);
+        model.request_start_daemon();
+        assert_eq!(model.take_effects(), [Effect::StartDaemon]);
     }
 
     #[test]

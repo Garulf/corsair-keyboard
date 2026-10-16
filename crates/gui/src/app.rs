@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Color32};
 use ipc::Client;
+use ipc::launcher::{LaunchError, Launched};
 
 use crate::io::{Backend, Connector, RETRY_INTERVAL};
 use crate::model::{Connection, Effect, Inbox, Model, Pane, device_text};
@@ -55,7 +56,7 @@ impl App {
         for effect in self.model.take_effects() {
             match effect {
                 Effect::Send(request) => self.backend.send(request),
-                Effect::StartDaemon => start_daemon(self.backend.injector()),
+                Effect::StartDaemon => start_daemon(self.backend.injector(), || ipc::launcher::ensure_daemon(&[])),
             }
         }
     }
@@ -70,11 +71,13 @@ impl eframe::App for App {
     }
 }
 
-fn start_daemon(inbox: Sender<Inbox>) {
+fn start_daemon(inbox: Sender<Inbox>, launch: impl FnOnce() -> Result<Launched, LaunchError> + Send + 'static) {
     thread::spawn(move || {
-        if let Err(failure) = ipc::launcher::ensure_daemon(&[]) {
-            let _ = inbox.send(Inbox::LaunchFailed(failure.to_string()));
-        }
+        let outcome = match launch() {
+            Ok(_) => Inbox::LaunchFinished,
+            Err(failure) => Inbox::LaunchFailed(failure.to_string()),
+        };
+        let _ = inbox.send(outcome);
     });
 }
 
@@ -256,6 +259,17 @@ mod tests {
         assert_eq!(harness.state_mut().take_effects(), [Effect::StartDaemon]);
         let button = harness.get_by_label("Starting k100d...");
         assert!(button.accesskit_node().is_disabled());
+    }
+
+    #[test]
+    fn the_launcher_thread_always_reports_back() {
+        let (inbox, messages) = std::sync::mpsc::channel();
+        start_daemon(inbox.clone(), || Ok(Launched::Started));
+        let finished = messages.recv_timeout(Duration::from_secs(5));
+        assert_eq!(finished, Ok(Inbox::LaunchFinished));
+        start_daemon(inbox, || Err(LaunchError::Missing("k100d".into())));
+        let failed = messages.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(matches!(failed, Inbox::LaunchFailed(message) if message.contains("k100d")));
     }
 
     #[test]
