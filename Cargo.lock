@@ -3,6 +3,16 @@
 version = 4
 
 [[package]]
+name = "actions"
+version = "0.1.0"
+dependencies = [
+ "k100",
+ "serde",
+ "thiserror",
+ "toml",
+]
+
+[[package]]
 name = "anstream"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
