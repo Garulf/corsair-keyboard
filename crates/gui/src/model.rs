@@ -89,6 +89,20 @@ impl Inbox {
 pub enum Effect {
     Send(Request),
     StartDaemon,
+    CloseWindow,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Closing {
+    #[default]
+    Open,
+    Asking,
+    SavingThenClose,
+    Confirmed,
+}
+
+pub fn close_allowed(closing: Closing, unsaved: bool) -> bool {
+    !unsaved || closing == Closing::Confirmed
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -115,6 +129,10 @@ impl Draft {
 
     pub fn dirty(&self) -> bool {
         self.profile != self.saved
+    }
+
+    pub fn refused(&self) -> bool {
+        self.rejected.as_ref() == Some(&self.profile)
     }
 }
 
@@ -202,6 +220,7 @@ pub struct Model {
     pub profiles_form: ProfilesForm,
     pub pending_rename: Option<PendingRename>,
     pending_macro: Option<String>,
+    pub closing: Closing,
     effects: Vec<Effect>,
 }
 
@@ -235,6 +254,7 @@ impl Model {
             profiles_form: ProfilesForm::default(),
             pending_rename: None,
             pending_macro: None,
+            closing: Closing::Open,
             effects: Vec::new(),
         }
     }
@@ -307,6 +327,46 @@ impl Model {
         true
     }
 
+    pub fn allow_close(&mut self) -> bool {
+        let unsaved = self.draft.as_ref().is_some_and(Draft::dirty);
+        if close_allowed(self.closing, unsaved) {
+            return true;
+        }
+        if self.closing == Closing::Open {
+            self.closing = Closing::Asking;
+        }
+        false
+    }
+
+    pub fn save_and_close(&mut self) {
+        if self.draft.as_ref().is_some_and(Draft::refused) {
+            return;
+        }
+        if self.apply_draft() {
+            self.closing = Closing::SavingThenClose;
+        }
+    }
+
+    pub fn close_without_saving(&mut self) {
+        self.closing = Closing::Confirmed;
+        self.effects.push(Effect::CloseWindow);
+    }
+
+    pub fn cancel_close(&mut self) {
+        self.closing = Closing::Open;
+    }
+
+    fn save_ended(&mut self, saved: bool) {
+        if self.closing != Closing::SavingThenClose {
+            return;
+        }
+        if saved && !self.draft.as_ref().is_some_and(Draft::dirty) {
+            self.close_without_saving();
+        } else {
+            self.closing = Closing::Asking;
+        }
+    }
+
     pub fn keep_edits(&mut self) {
         self.stale = None;
     }
@@ -336,7 +396,7 @@ impl Model {
             draft.edited_at = now;
         }
         let quiet = now.saturating_sub(draft.edited_at) >= AUTO_APPLY_QUIET;
-        let refused = draft.rejected.as_ref() == Some(&draft.profile);
+        let refused = draft.refused();
         if self.auto_apply && quiet && !refused && self.can_save().is_ok() {
             self.apply_draft();
         }
@@ -366,6 +426,7 @@ impl Model {
                 if let Some(draft) = self.draft.as_mut() {
                     draft.saving = false;
                 }
+                self.save_ended(false);
             }
             Inbox::LaunchFailed(message) => {
                 self.starting_daemon = false;
@@ -393,6 +454,7 @@ impl Model {
                     self.pending_rename = None;
                 } else if let Some(draft) = self.drafted(&profile.name) {
                     draft.saving = false;
+                    self.save_ended(false);
                 }
             }
             Request::SetBrightness { .. } => self.device_form.brightness = None,
@@ -409,6 +471,7 @@ impl Model {
                 if let Some(draft) = self.drafted(&profile.name) {
                     draft.saving = false;
                     draft.rejected = Some(profile);
+                    self.save_ended(false);
                 }
                 self.toast(message);
             }
@@ -475,6 +538,7 @@ impl Model {
             draft.saved = profile;
             draft.saving = false;
             draft.rejected = None;
+            self.save_ended(true);
         }
         if self.draft.as_ref().is_some_and(|draft| !draft.dirty()) {
             self.stale = None;
@@ -1129,6 +1193,111 @@ mod tests {
         echoed.name_edit = typing();
         echoed.apply(Inbox::reply(get_profile("default"), Reply::Profile { profile: profile("default") }));
         assert_eq!(echoed.name_edit, typing(), "an unchanged reload keeps what is being typed");
+    }
+
+    fn closes(model: &mut Model) -> bool {
+        model.take_effects().contains(&Effect::CloseWindow)
+    }
+
+    #[test]
+    fn the_window_only_asks_before_closing_over_unsaved_edits() {
+        for closing in [Closing::Open, Closing::Asking, Closing::SavingThenClose, Closing::Confirmed] {
+            assert!(close_allowed(closing, false), "{closing:?}");
+        }
+        assert!(!close_allowed(Closing::Open, true));
+        assert!(!close_allowed(Closing::Asking, true));
+        assert!(!close_allowed(Closing::SavingThenClose, true));
+        assert!(close_allowed(Closing::Confirmed, true));
+    }
+
+    #[test]
+    fn closing_a_clean_window_needs_no_prompt() {
+        let mut model = online("default", &["default"]);
+        assert!(model.allow_close());
+        assert_eq!(model.closing, Closing::Open);
+    }
+
+    #[test]
+    fn closing_over_unsaved_edits_asks_and_cancel_stays_open() {
+        let mut model = online("default", &["default"]);
+        edit(&mut model);
+        assert!(!model.allow_close());
+        assert_eq!(model.closing, Closing::Asking);
+        model.cancel_close();
+        assert_eq!(model.closing, Closing::Open);
+        assert!(!closes(&mut model));
+    }
+
+    #[test]
+    fn save_and_close_closes_once_the_daemon_confirms_the_save() {
+        let mut model = online("default", &["default"]);
+        edit(&mut model);
+        assert!(!model.allow_close());
+        model.save_and_close();
+        assert_eq!(model.closing, Closing::SavingThenClose);
+        let requests = sent(&mut model);
+        let [save @ Request::SaveProfile { .. }] = requests.as_slice() else { panic!("expected a save: {requests:?}") };
+        assert!(!model.allow_close(), "still saving");
+        model.apply(Inbox::reply(save.clone(), Reply::Done));
+        assert_eq!(model.closing, Closing::Confirmed);
+        assert!(closes(&mut model));
+        assert!(model.allow_close());
+    }
+
+    #[test]
+    fn a_save_that_fails_while_closing_asks_again() {
+        let mut refused = online("default", &["default"]);
+        edit(&mut refused);
+        refused.allow_close();
+        refused.save_and_close();
+        let [save] = sent(&mut refused).try_into().unwrap();
+        refused.apply(Inbox::reply(save, Reply::Error { message: "disk full".into() }));
+        assert_eq!(refused.closing, Closing::Asking);
+        assert!(!closes(&mut refused));
+
+        let mut lost = online("default", &["default"]);
+        edit(&mut lost);
+        lost.allow_close();
+        lost.save_and_close();
+        let [save] = sent(&mut lost).try_into().unwrap();
+        lost.apply(Inbox::request_failed(save, "cannot reach k100d"));
+        assert_eq!(lost.closing, Closing::Asking);
+
+        let mut dropped = online("default", &["default"]);
+        edit(&mut dropped);
+        dropped.allow_close();
+        dropped.save_and_close();
+        dropped.apply(Inbox::Disconnected("gone".into()));
+        assert_eq!(dropped.closing, Closing::Asking);
+        assert!(!closes(&mut dropped));
+    }
+
+    #[test]
+    fn save_and_close_does_nothing_when_the_draft_cannot_be_saved() {
+        let mut model = online("default", &["default"]);
+        edit(&mut model);
+        model.allow_close();
+        model.stale = Some(Stale::changed_outside("default"));
+        model.save_and_close();
+        assert_eq!(model.closing, Closing::Asking);
+        assert!(model.take_effects().is_empty());
+
+        model.stale = None;
+        let draft = model.draft.as_mut().unwrap();
+        draft.rejected = Some(draft.profile.clone());
+        model.save_and_close();
+        assert_eq!(model.closing, Closing::Asking);
+        assert!(model.take_effects().is_empty(), "the daemon already refused exactly these edits");
+    }
+
+    #[test]
+    fn closing_without_saving_closes_right_away() {
+        let mut model = online("default", &["default"]);
+        edit(&mut model);
+        model.allow_close();
+        model.close_without_saving();
+        assert!(closes(&mut model));
+        assert!(model.allow_close());
     }
 
     #[test]

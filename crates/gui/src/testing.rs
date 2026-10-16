@@ -44,7 +44,7 @@ pub fn sent(model: &mut Model) -> Vec<Request> {
         .into_iter()
         .filter_map(|effect| match effect {
             Effect::Send(request) => Some(request),
-            Effect::StartDaemon => None,
+            Effect::StartDaemon | Effect::CloseWindow => None,
         })
         .collect()
 }

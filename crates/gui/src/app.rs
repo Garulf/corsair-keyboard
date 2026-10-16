@@ -8,7 +8,7 @@ use ipc::Client;
 use ipc::launcher::{LaunchError, Launched};
 
 use crate::io::{Backend, Connector, RETRY_INTERVAL};
-use crate::model::{Connection, Effect, Inbox, Model, Pane, device_text};
+use crate::model::{Closing, Connection, Draft, Effect, Inbox, Model, Pane, device_text};
 
 const REPAINT_EVERY: Duration = Duration::from_millis(100);
 
@@ -44,18 +44,22 @@ impl App {
         Self { model: Model::new(), backend, started: Instant::now() }
     }
 
-    fn pump(&mut self) {
+    fn pump(&mut self, ctx: &egui::Context) {
         for message in self.backend.drain() {
             self.model.apply(message);
         }
         self.model.tick(self.started.elapsed());
-        self.flush();
+        if ctx.input(|input| input.viewport().close_requested()) && !self.model.allow_close() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        }
+        self.flush(ctx);
     }
 
-    fn flush(&mut self) {
+    fn flush(&mut self, ctx: &egui::Context) {
         for effect in self.model.take_effects() {
             match effect {
                 Effect::Send(request) => self.backend.send(request),
+                Effect::CloseWindow => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
                 Effect::StartDaemon => start_daemon(self.backend.injector(), || ipc::launcher::ensure_daemon(&[])),
             }
         }
@@ -64,9 +68,10 @@ impl App {
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        self.pump();
+        let ctx = ui.ctx().clone();
+        self.pump(&ctx);
         root(ui, &mut self.model);
-        self.flush();
+        self.flush(&ctx);
         ui.ctx().request_repaint_after(REPAINT_EVERY);
     }
 }
@@ -82,6 +87,7 @@ fn start_daemon(inbox: Sender<Inbox>, launch: impl FnOnce() -> Result<Launched, 
 }
 
 pub fn root(ui: &mut egui::Ui, model: &mut Model) {
+    close_prompt(ui, model);
     egui::Panel::bottom("status").show(ui, |ui| status_bar(ui, model));
     if model.connection != Connection::Online {
         egui::CentralPanel::default().show(ui, |ui| offline(ui, model));
@@ -159,6 +165,36 @@ fn status_bar(ui: &mut egui::Ui, model: &mut Model) {
     if let Some(index) = dismissed {
         model.toasts.remove(index);
     }
+}
+
+pub fn close_prompt(ui: &mut egui::Ui, model: &mut Model) {
+    if !matches!(model.closing, Closing::Asking | Closing::SavingThenClose) {
+        return;
+    }
+    let refused = model.draft.as_ref().is_some_and(Draft::refused);
+    let blocker = match model.can_save() {
+        Err(reason) => Some(reason),
+        Ok(()) if refused => Some("k100d refused these edits; change them or close without saving.".to_owned()),
+        Ok(()) => None,
+    };
+    egui::Modal::new(egui::Id::unique("close-prompt")).show(ui.ctx(), |ui| {
+        ui.heading("Close K100?");
+        ui.label("The edited profile has changes that are not saved yet.");
+        if let Some(reason) = &blocker {
+            ui.weak(reason);
+        }
+        ui.horizontal(|ui| {
+            if ui.add_enabled(blocker.is_none(), egui::Button::new("Save and close")).clicked() {
+                model.save_and_close();
+            }
+            if ui.button("Close without saving").clicked() {
+                model.close_without_saving();
+            }
+            if ui.button("Cancel").clicked() {
+                model.cancel_close();
+            }
+        });
+    });
 }
 
 pub fn stale_banner(ui: &mut egui::Ui, model: &mut Model) {
@@ -361,6 +397,50 @@ mod tests {
         harness.run();
         assert!(harness.state().stale.is_none());
         assert!(!harness.get_by_label("Apply").accesskit_node().is_disabled());
+    }
+
+    fn closing(model: Model) -> egui_kittest::Harness<'static, Model> {
+        let mut harness = harness(model, close_prompt);
+        harness.run();
+        harness
+    }
+
+    fn asking() -> Model {
+        let mut model = online("games", &["games"]);
+        model.draft.as_mut().unwrap().profile.apps.push("x.exe".into());
+        assert!(!model.allow_close());
+        model
+    }
+
+    #[test]
+    fn the_close_prompt_offers_save_discard_or_cancel() {
+        let mut harness = closing(asking());
+        harness.get_by_label_contains("not saved");
+        harness.get_by_label("Save and close").click();
+        harness.run();
+        assert_eq!(harness.state().closing, crate::model::Closing::SavingThenClose);
+        assert!(harness.get_by_label("Save and close").accesskit_node().is_disabled());
+
+        let mut harness = closing(asking());
+        harness.get_by_label("Close without saving").click();
+        harness.run();
+        assert!(harness.state_mut().take_effects().contains(&Effect::CloseWindow));
+
+        let mut harness = closing(asking());
+        harness.get_by_label("Cancel").click();
+        harness.run();
+        assert_eq!(harness.state().closing, crate::model::Closing::Open);
+        assert!(harness.query_by_label("Save and close").is_none());
+    }
+
+    #[test]
+    fn the_close_prompt_only_offers_to_save_a_draft_that_can_be_saved() {
+        let mut model = asking();
+        model.draft.as_mut().unwrap().profile.name = String::new();
+        let harness = closing(model);
+        assert!(harness.get_by_label("Save and close").accesskit_node().is_disabled());
+        harness.get_by_label_contains("needs a name");
+        assert!(!harness.get_by_label("Close without saving").accesskit_node().is_disabled());
     }
 
     #[test]
