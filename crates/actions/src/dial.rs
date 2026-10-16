@@ -44,6 +44,10 @@ impl Dial {
         &self.modes[self.index]
     }
 
+    pub fn holds_alt(&self) -> bool {
+        self.alt_release_at.is_some()
+    }
+
     pub fn press(&mut self, now: Duration) -> Vec<Intent> {
         self.pressed_at = Some(now);
         self.long_fired = false;
@@ -266,10 +270,13 @@ mod tests {
     fn switch_apps_holds_alt_until_the_dial_rests() {
         let mut dial = dial_with(&[DialModeKind::SwitchApps]);
         let mut recorder = Recorder::default();
+        assert!(!dial.holds_alt());
         assert_eq!(dial.rotate(true, ms(0)), [alt_press(), tab_tap(&[])]);
+        assert!(dial.holds_alt());
         assert_eq!(dial.rotate(false, ms(300)), [tab_tap(&[key("left_shift")])]);
         assert!(dial.poll(ms(1099), &mut recorder).is_empty());
         assert_eq!(dial.poll(ms(1100), &mut recorder), [alt_release()]);
+        assert!(!dial.holds_alt());
         assert!(dial.poll(ms(1200), &mut recorder).is_empty());
     }
 

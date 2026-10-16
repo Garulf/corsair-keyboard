@@ -31,6 +31,10 @@ impl Player {
         Self { typematic, tasks: Vec::new() }
     }
 
+    pub fn is_idle(&self) -> bool {
+        self.tasks.is_empty()
+    }
+
     pub fn is_playing(&self, source: u8) -> bool {
         self.find(source).is_some()
     }
@@ -207,13 +211,16 @@ mod tests {
     fn remaps_hold_and_repeat_like_a_keyboard() {
         let mut player = Player::new(true);
         let remap = Program::remap(key("a"), &[key("left_shift")]);
+        assert!(player.is_idle());
         assert_eq!(player.press(1, remap, ms(0)), [down("left_shift"), down("a")]);
+        assert!(!player.is_idle());
         assert_eq!(player.next_deadline(), Some(ms(500)));
         assert!(player.poll(ms(499)).is_empty());
         assert_eq!(player.poll(ms(500)), [down("a")]);
         assert_eq!(player.poll(ms(533)), [down("a")]);
         assert_eq!(player.release(1, ms(540)), [up("a"), up("left_shift")]);
         assert_eq!(player.next_deadline(), None);
+        assert!(player.is_idle());
     }
 
     #[test]

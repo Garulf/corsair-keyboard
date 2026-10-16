@@ -38,6 +38,14 @@ impl Dispatcher {
         self.firing.clear();
     }
 
+    pub fn is_busy(&self) -> bool {
+        !self.firing.is_empty() || self.dial.holds_alt()
+    }
+
+    pub fn cancel_recording(&mut self) -> bool {
+        self.recorder.cancel()
+    }
+
     pub fn recorder_state(&self) -> RecorderState {
         self.recorder.state()
     }
@@ -292,6 +300,31 @@ mod tests {
         assert_eq!(dispatcher.handle(&InputEvent::DialCw, ms(0)), [Intent::Brightness(BrightnessChange::Up)]);
         let property = InputEvent::Property { property: bragi::PropertyId::WIN_LOCK_ENABLED, value: 1 };
         assert!(dispatcher.handle(&property, ms(0)).is_empty());
+    }
+
+    #[test]
+    fn busy_while_an_action_key_is_held_or_the_dial_holds_alt() {
+        let mut dispatcher = Dispatcher::new(&[escape_on_caps()], &DialConfig::default());
+        assert!(!dispatcher.is_busy());
+        dispatcher.handle(&InputEvent::KeyDown(57), ms(0));
+        assert!(dispatcher.is_busy());
+        dispatcher.handle(&InputEvent::KeyUp(57), ms(10));
+        assert!(!dispatcher.is_busy());
+        let switcher = DialConfig { modes: vec![DialMode::builtin(DialModeKind::SwitchApps)] };
+        let mut dial = Dispatcher::new(&[], &switcher);
+        dial.handle(&InputEvent::DialCw, ms(0));
+        assert!(dial.is_busy());
+        dial.poll(ms(1000));
+        assert!(!dial.is_busy());
+    }
+
+    #[test]
+    fn cancel_recording_reports_whether_one_was_active() {
+        let mut dispatcher = Dispatcher::new(&[], &macro_dial());
+        assert!(!dispatcher.cancel_recording());
+        arm(&mut dispatcher, 0);
+        assert!(dispatcher.cancel_recording());
+        assert_eq!(dispatcher.recorder_state(), RecorderState::Idle);
     }
 
     #[test]

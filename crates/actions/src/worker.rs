@@ -1,3 +1,5 @@
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -19,21 +21,28 @@ pub enum OutputCommand {
 #[derive(Clone)]
 pub struct OutputHandle {
     sender: Sender<OutputCommand>,
+    busy: Arc<AtomicBool>,
 }
 
 impl OutputHandle {
     pub fn send(&self, command: OutputCommand) {
         let _ = self.sender.send(command);
     }
+
+    pub fn is_busy(&self) -> bool {
+        self.busy.load(Ordering::Acquire)
+    }
 }
 
 pub fn spawn(sink: Box<dyn InputSink>) -> (OutputHandle, JoinHandle<()>) {
     let (sender, receiver) = mpsc::channel();
-    let thread = thread::spawn(move || run(sink, receiver));
-    (OutputHandle { sender }, thread)
+    let busy = Arc::new(AtomicBool::new(false));
+    let worker_busy = busy.clone();
+    let thread = thread::spawn(move || run(sink, receiver, &worker_busy));
+    (OutputHandle { sender, busy }, thread)
 }
 
-fn run(mut sink: Box<dyn InputSink>, commands: Receiver<OutputCommand>) {
+fn run(mut sink: Box<dyn InputSink>, commands: Receiver<OutputCommand>, busy: &AtomicBool) {
     let started = Instant::now();
     let mut player = Player::new(sink.needs_typematic());
     loop {
@@ -47,11 +56,13 @@ fn run(mut sink: Box<dyn InputSink>, commands: Receiver<OutputCommand>) {
             Err(RecvTimeoutError::Timeout) => Vec::new(),
             Err(RecvTimeoutError::Disconnected) => {
                 deliver(sink.as_mut(), &player.cancel_all());
+                busy.store(false, Ordering::Release);
                 return;
             }
         };
         events.extend(player.poll(now));
         deliver(sink.as_mut(), &events);
+        busy.store(!player.is_idle(), Ordering::Release);
     }
 }
 
@@ -144,6 +155,31 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         events
+    }
+
+    fn wait_until(within: Duration, condition: impl Fn() -> bool) -> bool {
+        let deadline = Instant::now() + within;
+        while Instant::now() < deadline {
+            if condition() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        condition()
+    }
+
+    #[test]
+    fn reports_busy_while_a_macro_plays() {
+        let sink = RecordingSink::default();
+        let (handle, thread) = spawn(Box::new(sink.clone()));
+        assert!(!handle.is_busy());
+        let steps = [MacroStep::Tap(key("a")), MacroStep::Delay(300), MacroStep::Tap(key("b"))];
+        handle.send(OutputCommand::Press { source: 1, program: Program::macro_steps(&steps, RepeatMode::Once) });
+        assert!(wait_until(Duration::from_secs(5), || handle.is_busy()), "busy while the delay runs");
+        assert!(wait_until(Duration::from_secs(5), || !handle.is_busy()), "idle once the macro ends");
+        assert_eq!(sink.take(), [down("a"), up("a"), down("b"), up("b")]);
+        drop(handle);
+        thread.join().unwrap();
     }
 
     #[test]
