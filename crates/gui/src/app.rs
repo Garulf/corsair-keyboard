@@ -97,6 +97,7 @@ pub fn root(ui: &mut egui::Ui, model: &mut Model) {
             Pane::Keys => crate::assignments::keys(ui, model),
             Pane::Dial => crate::dial::dial(ui, model),
             Pane::Device => crate::device::device(ui, model),
+            Pane::Profiles => crate::profiles::profiles(ui, model),
         }
     });
 }
@@ -354,6 +355,18 @@ mod tests {
         harness.get_by_label("Apply debounce");
         assert!(harness.query_by_label("Unsaved changes").is_none());
         assert!(harness.state().draft.as_ref().unwrap().dirty());
+    }
+
+    #[test]
+    fn the_profiles_pane_is_in_the_navigation_and_edits_the_profile() {
+        assert!(Pane::Profiles.edits_profile());
+        let mut harness = harness(online("games", &["games"]), root);
+        harness.run();
+        harness.get_by_label("Profiles").click();
+        harness.run();
+        assert_eq!(harness.state().pane, Pane::Profiles);
+        harness.get_by_label("Editing games");
+        harness.get_by_label("Add program");
     }
 
     #[test]

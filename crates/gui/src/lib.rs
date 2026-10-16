@@ -8,6 +8,7 @@ mod dial;
 mod io;
 mod layers;
 mod model;
+mod profiles;
 
 #[cfg(test)]
 mod testing;

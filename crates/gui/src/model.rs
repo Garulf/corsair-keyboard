@@ -8,6 +8,7 @@ use k100::{Frame, Rgb};
 
 use crate::canvas::CanvasState;
 use crate::device::DeviceForm;
+use crate::profiles::{PendingRename, ProfilesForm};
 
 pub const AUTO_APPLY_QUIET: Duration = Duration::from_millis(400);
 const MAX_TOASTS: usize = 4;
@@ -27,10 +28,11 @@ pub enum Pane {
     Keys,
     Dial,
     Device,
+    Profiles,
 }
 
 impl Pane {
-    pub const ALL: &[Pane] = &[Pane::Overview, Pane::Lighting, Pane::Keys, Pane::Dial, Pane::Device];
+    pub const ALL: &[Pane] = &[Pane::Overview, Pane::Lighting, Pane::Keys, Pane::Dial, Pane::Device, Pane::Profiles];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -39,6 +41,7 @@ impl Pane {
             Pane::Keys => "Keys",
             Pane::Dial => "Dial",
             Pane::Device => "Device",
+            Pane::Profiles => "Profiles",
         }
     }
 
@@ -49,6 +52,7 @@ impl Pane {
             Pane::Keys => true,
             Pane::Dial => true,
             Pane::Device => false,
+            Pane::Profiles => true,
         }
     }
 }
@@ -156,6 +160,8 @@ pub struct Model {
     pub name_edit: Option<(String, String)>,
     pub paint: Rgb,
     pub device_form: DeviceForm,
+    pub profiles_form: ProfilesForm,
+    pub pending_rename: Option<PendingRename>,
     effects: Vec<Effect>,
 }
 
@@ -186,6 +192,8 @@ impl Model {
             name_edit: None,
             paint: Rgb::new(255, 255, 255),
             device_form: DeviceForm::default(),
+            profiles_form: ProfilesForm::default(),
+            pending_rename: None,
             effects: Vec::new(),
         }
     }
@@ -225,7 +233,7 @@ impl Model {
     }
 
     pub fn apply_draft(&mut self) -> bool {
-        if self.recording() || self.draft_problem().is_some() {
+        if self.recording() || self.renaming() || self.draft_problem().is_some() {
             return false;
         }
         let Some(draft) = self.draft.as_mut() else { return false };
@@ -281,6 +289,7 @@ impl Model {
                 self.connection = Connection::Offline(reason);
                 self.state = None;
                 self.frame = None;
+                self.pending_rename = None;
                 if let Some(draft) = self.draft.as_mut() {
                     draft.saving = false;
                 }
@@ -298,6 +307,9 @@ impl Model {
     }
 
     fn reply(&mut self, request: Request, reply: Reply) {
+        if self.settle_rename(&request, &reply) {
+            return;
+        }
         match (request, reply) {
             (Request::SaveProfile { profile }, Reply::Error { message }) => {
                 if let Some(draft) = self.draft.as_mut() {
