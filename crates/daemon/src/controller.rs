@@ -2,7 +2,8 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use actions::{
-    Action, Assignment, BrightnessChange, Dispatcher, Intent, Key, MacroStep, OutputCommand, ProfileTarget, RepeatMode,
+    Action, Assignment, BrightnessChange, Dispatcher, Intent, Key, MacroStep, OutputCommand, ProfileTarget,
+    RecorderState, RepeatMode,
 };
 use bragi::{PollingRate, PropertyId};
 use engine::{Compositor, KeyPress, Layout};
@@ -10,7 +11,7 @@ use ipc::{DaemonState, DeviceState, Event, PROTOCOL_VERSION, Profile, Reply, Req
 use k100::{DeviceError, Frame, IndicatorRecord, InputEvent, KeyMappings, Session, Transport, led};
 
 use crate::config::{ConfigDir, Settings, default_profile, profile_file_name};
-use crate::indicators::Indicators;
+use crate::indicators::{DialRing, Indicators};
 
 const BRIGHTNESS_SCALE: u32 = 10;
 const BRIGHTNESS_STEP: u8 = 4;
@@ -19,11 +20,16 @@ const WINLOCK_SETTLE: Duration = Duration::from_millis(150);
 
 pub trait OutputPort: Send {
     fn send(&mut self, command: OutputCommand);
+    fn is_busy(&self) -> bool;
 }
 
 impl OutputPort for actions::OutputHandle {
     fn send(&mut self, command: OutputCommand) {
         actions::OutputHandle::send(self, command);
+    }
+
+    fn is_busy(&self) -> bool {
+        actions::OutputHandle::is_busy(self)
     }
 }
 
@@ -31,6 +37,10 @@ pub struct DiscardOutput;
 
 impl OutputPort for DiscardOutput {
     fn send(&mut self, _command: OutputCommand) {}
+
+    fn is_busy(&self) -> bool {
+        false
+    }
 }
 
 pub trait DeviceLink: Send {
@@ -98,9 +108,11 @@ pub struct Controller {
     chosen: Option<String>,
     foreground: Option<String>,
     manual_override: bool,
+    focus_pending: bool,
     compositor: Compositor,
     dispatcher: Dispatcher,
     output: Box<dyn OutputPort>,
+    output_available: bool,
     indicators: Indicators,
     link: Option<Box<dyn DeviceLink>>,
     max_polling_rate: Option<PollingRate>,
@@ -143,9 +155,11 @@ impl Controller {
             chosen: None,
             foreground: None,
             manual_override: false,
+            focus_pending: false,
             compositor,
             dispatcher,
             output,
+            output_available: true,
             indicators,
             link: None,
             max_polling_rate: None,
@@ -165,6 +179,11 @@ impl Controller {
 
     pub fn add_warning(&mut self, warning: String) {
         self.warnings.push(warning);
+    }
+
+    pub fn set_output_available(&mut self, available: bool) {
+        self.output_available = available;
+        self.write_key_mappings();
     }
 
     pub fn state(&self) -> DaemonState {
@@ -209,6 +228,7 @@ impl Controller {
             self.device_warning = Some(message);
         }
         self.indicators.reset();
+        self.show_continuous_dial();
         self.write_key_mappings();
         if let Some(enabled) = self.read_winlock() {
             self.set_winlock_state(enabled, false);
@@ -242,6 +262,9 @@ impl Controller {
         self.now = now;
         let intents = self.dispatcher.poll(now);
         self.apply_all(intents, config);
+        if self.focus_pending && !self.output_busy() {
+            self.apply_focus();
+        }
         if self.winlock_check.is_some_and(|due| now >= due) {
             self.winlock_check = None;
             self.resolve_winlock();
@@ -351,10 +374,24 @@ impl Controller {
             self.manual_override = false;
         }
         self.foreground = exe;
-        if self.settings.auto_switch {
-            let target = self.preferred_profile();
-            self.activate(target);
+        if !self.settings.auto_switch {
+            return;
         }
+        if self.output_busy() {
+            self.focus_pending = true;
+        } else {
+            self.apply_focus();
+        }
+    }
+
+    fn output_busy(&self) -> bool {
+        self.dispatcher.is_busy() || self.output.is_busy()
+    }
+
+    fn apply_focus(&mut self) {
+        self.focus_pending = false;
+        let target = self.preferred_profile();
+        self.activate(target);
     }
 
     fn preferred_profile(&self) -> String {
@@ -394,16 +431,33 @@ impl Controller {
         self.dispatcher.reconfigure(&profile.assignments, &profile.dial);
         self.applied = profile;
         if changed {
+            self.cancel_recording();
             self.indicators.profile_switched(self.now);
             self.events.push(Event::ProfileChanged { name: self.active.clone() });
         }
+        self.show_continuous_dial();
         self.write_key_mappings();
+    }
+
+    fn show_continuous_dial(&mut self) {
+        if self.settings.dial_ring == DialRing::Continuous {
+            let color = self.dispatcher.dial_mode().color();
+            self.indicators.dial_mode(color, self.now);
+        }
+    }
+
+    fn cancel_recording(&mut self) {
+        if self.dispatcher.cancel_recording() {
+            self.indicators.recording(RecorderState::Idle);
+            self.events.push(Event::Recording { state: RecorderState::Idle });
+        }
     }
 
     fn drop_link(&mut self) {
         if self.link.take().is_some() {
             self.output.send(OutputCommand::CancelAll);
             self.dispatcher.forget_held_keys();
+            self.cancel_recording();
             self.winlock = None;
             self.winlock_check = None;
         }
@@ -475,7 +529,7 @@ impl Controller {
 
     fn save_brightness_when_settled(&mut self, config: &ConfigDir) {
         let settled = self.brightness_changed_at.is_some_and(|at| self.now.saturating_sub(at) >= BRIGHTNESS_SAVE_DELAY);
-        if !settled {
+        if !settled || self.settings_error.is_some() {
             return;
         }
         self.brightness_changed_at = None;
@@ -535,7 +589,10 @@ impl Controller {
     }
 
     fn write_key_mappings(&mut self) {
-        let assignments = self.active_profile().assignments.clone();
+        let mut assignments = self.active_profile().assignments.clone();
+        if !self.output_available {
+            assignments.retain(|assignment| works_without_output(&assignment.action));
+        }
         let result = self.with_link(|link| {
             let mappings: KeyMappings = actions::key_mappings(&assignments, link.key_count());
             link.set_key_mappings(&mappings)
@@ -606,6 +663,7 @@ impl Controller {
     fn release(&mut self) -> Reply {
         self.output.send(OutputCommand::CancelAll);
         self.dispatcher.forget_held_keys();
+        self.cancel_recording();
         self.winlock = None;
         self.winlock_check = None;
         let result = self.link.take().map_or(Ok(()), |mut link| link.release());
@@ -669,8 +727,23 @@ fn error(message: String) -> Reply {
     Reply::Error { message }
 }
 
+fn works_without_output(action: &Action) -> bool {
+    matches!(
+        action,
+        Action::Disable
+            | Action::SwitchProfile { .. }
+            | Action::NextProfile
+            | Action::PreviousProfile
+            | Action::LightingTrigger { .. }
+            | Action::BrightnessUp
+            | Action::BrightnessDown
+            | Action::SetBrightness { .. }
+    )
+}
+
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
 
     use actions::{Action, Assignment, Key, MacroStep, OutputCommand, RecorderState, RepeatMode};
@@ -756,17 +829,28 @@ mod tests {
     }
 
     #[derive(Clone, Default)]
-    struct FakeOutput(Arc<Mutex<Vec<OutputCommand>>>);
+    struct FakeOutput {
+        commands: Arc<Mutex<Vec<OutputCommand>>>,
+        busy: Arc<AtomicBool>,
+    }
 
     impl FakeOutput {
         fn take(&self) -> Vec<OutputCommand> {
-            std::mem::take(&mut *self.0.lock().unwrap())
+            std::mem::take(&mut *self.commands.lock().unwrap())
+        }
+
+        fn set_busy(&self, busy: bool) {
+            self.busy.store(busy, Ordering::SeqCst);
         }
     }
 
     impl OutputPort for FakeOutput {
         fn send(&mut self, command: OutputCommand) {
-            self.0.lock().unwrap().push(command);
+            self.commands.lock().unwrap().push(command);
+        }
+
+        fn is_busy(&self) -> bool {
+            self.busy.load(Ordering::SeqCst)
         }
     }
 
@@ -779,9 +863,12 @@ mod tests {
     }
 
     fn rig(profiles: Vec<Profile>) -> Rig {
+        rig_with(Settings { brightness: 80, ..Settings::default() }, profiles)
+    }
+
+    fn rig_with(settings: Settings, profiles: Vec<Profile>) -> Rig {
         let temp = tempfile::tempdir().unwrap();
         let config = ConfigDir::new(temp.path().to_path_buf());
-        let settings = Settings { brightness: 80, ..Settings::default() };
         let output = FakeOutput::default();
         let mut controller = Controller::new(settings, profiles, vec![], Box::new(output.clone()));
         let log = Arc::new(Mutex::new(Log::default()));
@@ -1283,5 +1370,112 @@ mod tests {
         rig.controller.attach(Box::new(FakeLink(fresh)), info(None), ms(32));
         rig.controller.input(InputEvent::KeyDown(57), ms(40), &rig.config);
         assert!(matches!(rig.output.take().as_slice(), [OutputCommand::Press { source: 57, .. }]));
+    }
+
+    fn linked_games(games: Profile) -> Rig {
+        let games = Profile { apps: vec!["game.exe".into()], ..games };
+        let mut rig = rig(vec![profile("default"), games]);
+        rig.controller.focus(Some(r"C:\Games\game.exe".into()));
+        assert_eq!(rig.controller.state().active_profile, "games");
+        rig.output.take();
+        rig
+    }
+
+    #[test]
+    fn focus_switches_wait_while_output_is_busy() {
+        let mut rig = linked_games(profile("games"));
+        rig.output.set_busy(true);
+        rig.controller.focus(Some(r"C:\Windows\notepad.exe".into()));
+        assert_eq!(rig.controller.state().active_profile, "games");
+        assert!(rig.output.take().is_empty(), "nothing cancelled while busy");
+        rig.controller.tick(ms(16), &[], &rig.config);
+        assert_eq!(rig.controller.state().active_profile, "games");
+        rig.output.set_busy(false);
+        rig.controller.tick(ms(32), &[], &rig.config);
+        assert_eq!(rig.controller.state().active_profile, "default");
+        assert_eq!(rig.output.take(), [OutputCommand::CancelAll]);
+    }
+
+    #[test]
+    fn focus_switches_wait_for_a_held_action_key() {
+        let remap = Action::Remap { key: key("escape"), modifiers: vec![] };
+        let mut rig = linked_games(assigned("games", "caps_lock", remap));
+        rig.controller.input(InputEvent::KeyDown(57), ms(0), &rig.config);
+        rig.controller.focus(Some(r"C:\Windows\notepad.exe".into()));
+        assert_eq!(rig.controller.state().active_profile, "games");
+        rig.controller.input(InputEvent::KeyUp(57), ms(10), &rig.config);
+        assert!(!rig.output.take().contains(&OutputCommand::CancelAll));
+        rig.controller.tick(ms(16), &[], &rig.config);
+        assert_eq!(rig.controller.state().active_profile, "default");
+    }
+
+    #[test]
+    fn without_an_input_sink_only_output_free_keys_are_suppressed() {
+        let remap = Action::Remap { key: key("escape"), modifiers: vec![] };
+        let profile = Profile {
+            assignments: vec![
+                Assignment { key: key("caps_lock"), action: remap, pass_through: vec![] },
+                Assignment { key: key("g1"), action: Action::NextProfile, pass_through: vec![] },
+            ],
+            ..profile("default")
+        };
+        let mut rig = rig(vec![profile]);
+        rig.controller.set_output_available(false);
+        let log = rig.log.lock().unwrap();
+        let bytes = log.mappings.last().unwrap();
+        assert_eq!((bytes[57], bytes[131]), (0x01, 0x00));
+    }
+
+    fn arm_recording(rig: &mut Rig) {
+        tap_key(rig, led::DIAL_KEY, 0, 50);
+        rig.controller.input(InputEvent::KeyDown(led::DIAL_KEY), ms(100), &rig.config);
+        rig.controller.tick(ms(700), &[], &rig.config);
+        rig.controller.input(InputEvent::KeyUp(led::DIAL_KEY), ms(750), &rig.config);
+        assert_eq!(rig.controller.state().recording, RecorderState::AwaitingKey);
+        rig.controller.take_events();
+    }
+
+    #[test]
+    fn switching_profiles_cancels_a_recording() {
+        let mut rig = rig(vec![profile("default"), profile("games")]);
+        arm_recording(&mut rig);
+        rig.controller.handle(Request::SetActiveProfile { name: "games".into() }, &rig.config);
+        assert_eq!(rig.controller.state().recording, RecorderState::Idle);
+        assert!(rig.controller.take_events().contains(&Event::Recording { state: RecorderState::Idle }));
+    }
+
+    #[test]
+    fn dropping_the_link_cancels_a_recording() {
+        let mut rig = rig(vec![profile("default")]);
+        arm_recording(&mut rig);
+        rig.controller.set_device_state(DeviceState::Disconnected);
+        assert_eq!(rig.controller.state().recording, RecorderState::Idle);
+        assert!(rig.controller.take_events().contains(&Event::Recording { state: RecorderState::Idle }));
+    }
+
+    #[test]
+    fn brightness_is_not_saved_over_a_broken_settings_file() {
+        let mut rig = rig(vec![profile("default")]);
+        let path = rig.config.root().join("settings.toml");
+        std::fs::write(&path, "brightness = [").unwrap();
+        rig.controller.reload_settings(rig.config.load_settings());
+        rig.controller.input(InputEvent::DialCw, ms(0), &rig.config);
+        rig.controller.tick(ms(1100), &[], &rig.config);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "brightness = [");
+        assert_eq!(rig.controller.state().brightness, 84);
+        std::fs::write(&path, "fps = 30\n").unwrap();
+        rig.controller.reload_settings(rig.config.load_settings());
+        rig.controller.tick(ms(1200), &[], &rig.config);
+        let saved = rig.config.load_settings().unwrap();
+        assert_eq!((saved.brightness, saved.fps), (84, 30));
+    }
+
+    #[test]
+    fn a_continuous_dial_ring_lights_from_the_start() {
+        let settings = Settings { dial_ring: DialRing::Continuous, ..Settings::default() };
+        let mut rig = rig_with(settings, vec![profile("default")]);
+        rig.controller.tick(ms(16), &[], &rig.config);
+        let brightness_blue = IndicatorRecord { led: led::DIAL_KEY, color: Rgb::new(0, 0xBF, 0xFF), alpha: 0xFF };
+        assert!(rig.log.lock().unwrap().indicators.contains(&brightness_blue));
     }
 }

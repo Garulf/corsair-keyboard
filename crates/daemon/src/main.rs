@@ -72,16 +72,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let server_sender = sender.clone();
     thread::spawn(move || server::serve(listener, server_sender));
 
-    let mut warnings = Vec::new();
-    let sink = actions::platform_sink().unwrap_or_else(|failure| {
-        warnings.push(format!("key actions unavailable: {failure}"));
-        Box::new(actions::NullSink)
-    });
+    let (sink, sink_warning): (Box<dyn actions::InputSink>, _) = match actions::platform_sink() {
+        Ok(sink) => (sink, None),
+        Err(failure) => (Box::new(actions::NullSink), Some(format!("key actions unavailable: {failure}"))),
+    };
     let (output, output_thread) = actions::spawn(sink);
     let mut controller = Controller::new(settings, profiles, errors, Box::new(output));
-    for warning in warnings {
+    if let Some(warning) = sink_warning {
         eprintln!("k100d: {warning}");
         controller.add_warning(warning);
+        controller.set_output_available(false);
     }
 
     eprintln!("k100d: config in {}", config.root().display());
