@@ -113,34 +113,37 @@ fn release_all(held: &mut Vec<SinkEvent>) -> Vec<SinkEvent> {
 
 fn advance(task: &mut Task, now: Duration, out: &mut Vec<SinkEvent>) -> bool {
     let Task { held, due, body, .. } = task;
-    let Some(mut at) = *due else { return false };
+    let Some(scheduled) = *due else { return false };
     match body {
         Body::Hold { repeat } => {
             out.extend(repeat.clone());
-            let next = at + TYPEMATIC_INTERVAL;
+            let next = scheduled + TYPEMATIC_INTERVAL;
             *due = Some(if next > now { next } else { now + TYPEMATIC_INTERVAL });
             false
         }
-        Body::Macro { steps, mode, position } => loop {
-            let Some(step) = steps.get(*position) else {
-                if *mode == RepeatMode::Once {
-                    return true;
-                }
-                *position = 0;
-                *due = Some(at + LOOP_GAP);
-                return false;
-            };
-            *position += 1;
-            if let MacroStep::Delay(ms) = step {
-                at += Duration::from_millis(u64::from(*ms));
-                if at > now {
-                    *due = Some(at);
+        Body::Macro { steps, mode, position } => {
+            let mut at = if now > scheduled + LOOP_GAP { now } else { scheduled };
+            loop {
+                let Some(step) = steps.get(*position) else {
+                    if *mode == RepeatMode::Once {
+                        return true;
+                    }
+                    *position = 0;
+                    *due = Some(at + LOOP_GAP);
                     return false;
+                };
+                *position += 1;
+                if let MacroStep::Delay(ms) = step {
+                    at += Duration::from_millis(u64::from(*ms));
+                    if at > now {
+                        *due = Some(at);
+                        return false;
+                    }
+                } else {
+                    apply_step(step, held, out);
                 }
-            } else {
-                apply_step(step, held, out);
             }
-        },
+        }
     }
 }
 
@@ -292,6 +295,33 @@ mod tests {
         );
         assert_eq!(player.next_deadline(), Some(LOOP_GAP));
         assert_eq!(player.poll(ms(10)), [down("a"), up("a")]);
+    }
+
+    #[test]
+    fn a_late_loop_runs_one_iteration_and_resyncs() {
+        let mut player = Player::new(false);
+        player.press(9, program(vec![MacroStep::Tap(key("a"))], RepeatMode::WhileHeld), ms(0));
+        assert_eq!(player.poll(ms(1010)), [down("a"), up("a")]);
+        assert_eq!(player.next_deadline(), Some(ms(1010) + LOOP_GAP));
+        assert!(player.poll(ms(1010)).is_empty(), "no burst of missed iterations");
+    }
+
+    #[test]
+    fn a_late_macro_keeps_its_remaining_delays() {
+        let steps = vec![
+            MacroStep::Tap(key("a")),
+            MacroStep::Delay(100),
+            MacroStep::Tap(key("b")),
+            MacroStep::Delay(100),
+            MacroStep::Tap(key("c")),
+        ];
+        let mut player = Player::new(false);
+        assert_eq!(player.press(7, program(steps, RepeatMode::Once), ms(0)), [down("a"), up("a")]);
+        assert_eq!(player.poll(ms(1100)), [down("b"), up("b")]);
+        assert_eq!(player.next_deadline(), Some(ms(1200)));
+        assert!(player.poll(ms(1100)).is_empty());
+        assert_eq!(player.poll(ms(1200)), [down("c"), up("c")]);
+        assert!(!player.is_playing(7));
     }
 
     #[test]
