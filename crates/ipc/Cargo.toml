@@ -7,8 +7,12 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+actions.workspace = true
 engine.workspace = true
 interprocess.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+toml.workspace = true

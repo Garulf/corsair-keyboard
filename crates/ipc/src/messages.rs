@@ -74,6 +74,25 @@ pub struct Profile {
     pub apps: Vec<String>,
     #[serde(default)]
     pub layers: Vec<engine::LayerConfig>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub assignments: Vec<actions::Assignment>,
+    #[serde(default, skip_serializing_if = "actions::DialConfig::is_default")]
+    pub dial: actions::DialConfig,
+}
+
+impl Profile {
+    pub fn validate(&self) -> Result<(), String> {
+        actions::validate(&self.assignments, &self.dial)?;
+        let dial_actions = self.dial.modes.iter().flat_map(|mode| mode.actions());
+        for action in self.assignments.iter().map(|assignment| &assignment.action).chain(dial_actions) {
+            if let actions::Action::LightingTrigger { layer, .. } = action
+                && !self.layers.iter().any(|existing| existing.name == *layer)
+            {
+                return Err(format!("lighting trigger names the unknown layer {layer:?}"));
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -104,5 +123,29 @@ mod tests {
     #[test]
     fn brightness_is_not_a_profile_field() {
         assert!(serde_json::from_str::<Profile>(r#"{"name":"plain","brightness":40}"#).is_err());
+    }
+
+    #[test]
+    fn profiles_carry_assignments_and_validate_trigger_layers() {
+        let text = r##"
+name = "work"
+
+[[layers]]
+name = "alert"
+zone = "keys"
+enabled = false
+effect = { type = "solid", color = "#ff0000" }
+
+[[assignments]]
+key = "g1"
+action = { type = "lighting_trigger", layer = "alert" }
+"##;
+        let mut profile: Profile = toml::from_str(text).unwrap();
+        profile.validate().unwrap();
+        assert!(profile.dial.is_default());
+        profile.layers.clear();
+        assert!(profile.validate().unwrap_err().contains("alert"));
+        let remap_to_g2 = "name = \"x\"\n[[assignments]]\nkey = \"g1\"\naction = { type = \"remap\", key = \"g2\" }\n";
+        assert!(toml::from_str::<Profile>(remap_to_g2).unwrap().validate().is_err());
     }
 }

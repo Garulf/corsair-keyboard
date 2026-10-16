@@ -236,6 +236,9 @@ impl Controller {
         if profile.name.trim().is_empty() {
             return error("profile name must not be empty".into());
         }
+        if let Err(problem) = profile.validate() {
+            return error(problem);
+        }
         if let Err(failure) = config.save_profile(&profile) {
             return error(format!("saving profile: {failure}"));
         }
@@ -563,5 +566,19 @@ mod tests {
         controller.reload_settings(Ok(Settings { brightness: 25, ..Settings::default() }));
         assert_eq!(log.lock().unwrap().properties.last(), Some(&(0x02, 250)));
         assert_eq!(controller.state().brightness, 25);
+    }
+
+    #[test]
+    fn saving_an_invalid_profile_is_refused() {
+        let (mut controller, _log, _temp, config) = controller();
+        let mut bad = profile("bad");
+        bad.assignments = vec![actions::Assignment {
+            key: actions::Key::named("g1").unwrap(),
+            action: actions::Action::Remap { key: actions::Key::named("g2").unwrap(), modifiers: vec![] },
+            pass_through: vec![],
+        }];
+        let reply = controller.handle(Request::SaveProfile { profile: bad }, &config);
+        assert!(matches!(reply, Reply::Error { ref message } if message.contains("g2")), "{reply:?}");
+        assert!(config.load_profiles().0.is_empty());
     }
 }

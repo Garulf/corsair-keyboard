@@ -173,6 +173,7 @@ dependencies = [
 name = "daemon"
 version = "0.1.0"
 dependencies = [
+ "actions",
  "bragi",
  "ctrlc",
  "directories",
@@ -360,11 +361,13 @@ dependencies = [
 name = "ipc"
 version = "0.1.0"
 dependencies = [
+ "actions",
  "engine",
  "interprocess",
  "serde",
  "serde_json",
  "thiserror",
+ "toml",
 ]
 
 [[package]]

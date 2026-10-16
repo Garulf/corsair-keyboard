@@ -64,6 +64,8 @@ pub fn default_profile() -> Profile {
             Zone::Named(NamedZone::All),
             EffectConfig::RainbowWave { speed: 0.3, angle: 0.0, wavelength: 1.0 },
         )],
+        assignments: Vec::new(),
+        dial: actions::DialConfig::default(),
     }
 }
 
@@ -132,7 +134,8 @@ impl ConfigDir {
         for path in paths.into_iter().filter(|p| p.extension().is_some_and(|ext| ext == "toml")) {
             let parsed = std::fs::read_to_string(&path)
                 .map_err(|error| error.to_string())
-                .and_then(|text| toml::from_str::<Profile>(&text).map_err(|error| error.to_string()));
+                .and_then(|text| toml::from_str::<Profile>(&text).map_err(|error| error.to_string()))
+                .and_then(|profile| profile.validate().map(|()| profile));
             let expected = parsed.as_ref().ok().map(|profile| profile_file_name(&profile.name));
             let actual = path.file_name().map(|name| name.to_string_lossy().into_owned());
             match parsed {
@@ -288,5 +291,17 @@ mod tests {
         assert_eq!(Settings::default().brightness, 100);
         let settings: Settings = toml::from_str("brightness = 35").unwrap();
         assert_eq!(settings.brightness, 35);
+    }
+
+    #[test]
+    fn profiles_with_invalid_assignments_are_rejected_like_parse_errors() {
+        let (_temp, config) = dir();
+        std::fs::create_dir_all(config.profiles_dir()).unwrap();
+        let text = "name = \"bad\"\n[[assignments]]\nkey = \"dial\"\naction = { type = \"next_profile\" }\n";
+        std::fs::write(config.profiles_dir().join("bad.toml"), text).unwrap();
+        let (profiles, errors, failed) = config.load_profile_set();
+        assert!(profiles.is_empty());
+        assert!(errors[0].contains("dial cannot be reassigned"), "{errors:?}");
+        assert_eq!(failed, ["bad.toml"]);
     }
 }
