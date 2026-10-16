@@ -28,3 +28,9 @@ pub use platform::platform_sink;
 mod recorder;
 
 pub use recorder::{Recorder, RecorderOutcome, RecorderState};
+
+mod dial;
+mod intent;
+
+pub use dial::{Dial, LONG_PRESS, SWITCH_APPS_HOLD};
+pub use intent::{BrightnessChange, Intent, ProfileTarget, action_intents, one_shot};
