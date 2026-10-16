@@ -3,7 +3,7 @@
 
 Run the Corsair K100 RGB keyboard without iCUE, on Windows and Linux.
 
-[![License](https://img.shields.io/github/license/Garulf/corsair-keyboard)](https://github.com/Garulf/corsair-keyboard/blob/main/LICENSE)
+[![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
 
 ## Installation
 
@@ -49,6 +49,8 @@ The tray icon is part of `k100d`. Its menu switches profiles, opens the GUI, rel
    install -Dm 644 packaging/linux/k100d.service ~/.config/systemd/user/k100d.service
    systemctl --user enable --now k100d
    ```
+
+   Enable only one of `k100 autostart on` and the systemd unit, and run `k100 autostart off` before you enable the unit.
 
 The tray icon needs GTK 3 and libayatana-appindicator, so it is only built when you ask for it. Install `libgtk-3-dev` and `libayatana-appindicator3-dev`, then build the daemon with `cargo build --release -p daemon --features tray`. Without that feature `k100d` runs with no tray icon.
 

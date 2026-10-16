@@ -4,4 +4,8 @@ project:
   repo: corsair-keyboard
   tagline: Run the Corsair K100 RGB keyboard without iCUE, on Windows and Linux.
 badges:
-  - license
+  - shield:
+      label: license
+      message: MIT OR Apache-2.0
+      color: blue
+      link: "#license"
