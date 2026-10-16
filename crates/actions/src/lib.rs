@@ -24,3 +24,7 @@ pub use worker::{OutputCommand, OutputHandle, spawn};
 mod platform;
 
 pub use platform::platform_sink;
+
+mod recorder;
+
+pub use recorder::{Recorder, RecorderOutcome, RecorderState};
