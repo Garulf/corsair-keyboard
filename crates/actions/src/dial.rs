@@ -12,6 +12,8 @@ use crate::worker::OutputCommand;
 
 pub const LONG_PRESS: Duration = Duration::from_millis(500);
 pub const SWITCH_APPS_HOLD: Duration = Duration::from_millis(800);
+const CLOCKWISE_SOURCE: u8 = 129;
+const COUNTER_CLOCKWISE_SOURCE: u8 = 130;
 
 pub struct Dial {
     modes: Vec<DialMode>,
@@ -96,8 +98,12 @@ impl Dial {
             }
             DialModeKind::Custom => {
                 let mode = self.mode();
-                let action = if clockwise { &mode.clockwise } else { &mode.counter_clockwise };
-                action.as_ref().map(|action| one_shot(action, led::DIAL_KEY)).unwrap_or_default()
+                let (action, source) = if clockwise {
+                    (&mode.clockwise, CLOCKWISE_SOURCE)
+                } else {
+                    (&mode.counter_clockwise, COUNTER_CLOCKWISE_SOURCE)
+                };
+                action.as_ref().map(|action| one_shot(action, source)).unwrap_or_default()
             }
         }
     }
@@ -151,7 +157,7 @@ fn key(name: &str) -> Key {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Action, DialConfig, DialMode, DialModeKind};
+    use crate::config::{Action, DialConfig, DialMode, DialModeKind, MacroStep, RepeatMode};
     use crate::intent::ProfileTarget;
     use crate::keys::Key;
 
@@ -295,13 +301,34 @@ mod tests {
         assert_eq!(
             dial.rotate(true, ms(0)),
             [
-                Intent::Output(OutputCommand::Press { source: 137, program: Program::remap(key("volume_up"), &[]) }),
-                Intent::Output(OutputCommand::Release { source: 137 }),
+                Intent::Output(OutputCommand::Press { source: 129, program: Program::remap(key("volume_up"), &[]) }),
+                Intent::Output(OutputCommand::Release { source: 129 }),
             ]
         );
         assert!(dial.rotate(false, ms(0)).is_empty());
         dial.press(ms(0));
         assert_eq!(dial.poll(ms(500), &mut recorder), [Intent::SwitchProfile(ProfileTarget::Next)]);
+    }
+
+    #[test]
+    fn custom_turns_and_presses_use_separate_sources() {
+        let toggle = Action::Macro { steps: vec![MacroStep::Tap(key("a"))], mode: RepeatMode::Toggle };
+        let mode = DialMode {
+            clockwise: Some(toggle.clone()),
+            counter_clockwise: Some(toggle.clone()),
+            press: Some(toggle),
+            ..DialMode::builtin(DialModeKind::Custom)
+        };
+        let mut dial = Dial::new(&DialConfig { modes: vec![mode] });
+        let mut recorder = Recorder::default();
+        let source = |intents: Vec<Intent>| match intents.first() {
+            Some(Intent::Output(OutputCommand::Press { source, .. })) => *source,
+            other => panic!("expected a press, got {other:?}"),
+        };
+        assert_eq!(source(dial.rotate(true, ms(0))), 129);
+        assert_eq!(source(dial.rotate(false, ms(0))), 130);
+        dial.press(ms(0));
+        assert_eq!(source(dial.poll(ms(500), &mut recorder)), led::DIAL_KEY);
     }
 
     #[test]
