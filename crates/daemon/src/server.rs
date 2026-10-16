@@ -1,24 +1,25 @@
 use std::io::{self, BufRead, BufReader, Read};
+use std::path::Path;
 use std::sync::mpsc::{self, Sender};
 use std::thread;
 
 use interprocess::local_socket::{Listener, ListenerOptions, Name, Stream, prelude::*};
-use ipc::{MAX_LINE, Reply, Request, write_message};
+use ipc::{InstanceLock, MAX_LINE, Reply, Request, write_message};
 
 use crate::runtime::{Command, SUBSCRIBER_QUEUE};
 
-pub fn bind() -> io::Result<Listener> {
-    let listener = bind_name(ipc::socket_name()?)?;
+pub fn bind(lock: &InstanceLock) -> io::Result<Listener> {
+    let listener = bind_name(ipc::socket_name()?, ipc::socket_path().as_deref(), lock)?;
     restrict_socket_permissions()?;
     Ok(listener)
 }
 
-pub fn bind_name(name: Name<'static>) -> io::Result<Listener> {
+pub fn bind_name(name: Name<'static>, stale_socket: Option<&Path>, _lock: &InstanceLock) -> io::Result<Listener> {
     if Stream::connect(name.borrow()).is_ok() {
         return Err(io::Error::new(io::ErrorKind::AlreadyExists, "k100d is already running"));
     }
     if name.is_path()
-        && let Some(path) = ipc::socket_path()
+        && let Some(path) = stale_socket
     {
         let _ = std::fs::remove_file(path);
     }
@@ -103,11 +104,18 @@ mod tests {
 
     use super::*;
 
-    fn start(name: &'static str) -> mpsc::Receiver<Command> {
-        let listener = bind_name(name.to_ns_name::<GenericNamespaced>().unwrap()).unwrap();
+    struct Instance {
+        _folder: tempfile::TempDir,
+        _lock: InstanceLock,
+    }
+
+    fn start(name: &'static str) -> (mpsc::Receiver<Command>, Instance) {
+        let folder = tempfile::tempdir().unwrap();
+        let lock = InstanceLock::acquire(&folder.path().join("k100d.lock")).unwrap();
+        let listener = bind_name(name.to_ns_name::<GenericNamespaced>().unwrap(), None, &lock).unwrap();
         let (sender, receiver) = mpsc::channel();
         std::thread::spawn(move || serve(listener, sender));
-        receiver
+        (receiver, Instance { _folder: folder, _lock: lock })
     }
 
     fn answer(receiver: &mpsc::Receiver<Command>, reply: Reply) {
@@ -119,7 +127,7 @@ mod tests {
 
     #[test]
     fn forwards_requests_and_replies() {
-        let receiver = start("k100d-server-test-forward");
+        let (receiver, _instance) = start("k100d-server-test-forward");
         let client = std::thread::spawn(|| {
             let name = "k100d-server-test-forward".to_ns_name::<GenericNamespaced>().unwrap();
             let mut client = Client::connect_to(name).unwrap();
@@ -132,7 +140,7 @@ mod tests {
 
     #[test]
     fn garbage_gets_an_error_and_the_connection_survives() {
-        let receiver = start("k100d-server-test-garbage");
+        let (receiver, _instance) = start("k100d-server-test-garbage");
         let stream = Stream::connect("k100d-server-test-garbage".to_ns_name::<GenericNamespaced>().unwrap()).unwrap();
         let mut reader = BufReader::new(stream);
         reader.get_mut().write_all(b"{nonsense}\n").unwrap();
@@ -146,7 +154,7 @@ mod tests {
 
     #[test]
     fn subscribers_receive_events() {
-        let receiver = start("k100d-server-test-events");
+        let (receiver, _instance) = start("k100d-server-test-events");
         let stream = Stream::connect("k100d-server-test-events".to_ns_name::<GenericNamespaced>().unwrap()).unwrap();
         let mut reader = BufReader::new(stream);
         reader.get_mut().write_all(b"{\"type\":\"subscribe\"}\n").unwrap();
@@ -165,7 +173,7 @@ mod tests {
 
     #[test]
     fn frame_subscribers_are_marked() {
-        let receiver = start("k100d-server-test-frames");
+        let (receiver, _instance) = start("k100d-server-test-frames");
         let stream = Stream::connect("k100d-server-test-frames".to_ns_name::<GenericNamespaced>().unwrap()).unwrap();
         let mut reader = BufReader::new(stream);
         reader.get_mut().write_all(b"{\"type\":\"subscribe_frames\"}\n").unwrap();
@@ -177,8 +185,29 @@ mod tests {
 
     #[test]
     fn a_second_daemon_cannot_bind() {
-        let _receiver = start("k100d-server-test-twice");
-        let error = bind_name("k100d-server-test-twice".to_ns_name::<GenericNamespaced>().unwrap()).unwrap_err();
+        let (_receiver, instance) = start("k100d-server-test-twice");
+        let name = "k100d-server-test-twice".to_ns_name::<GenericNamespaced>().unwrap();
+        let error = bind_name(name, None, &instance._lock).unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_refused_second_daemon_leaves_the_first_socket_alone() {
+        use interprocess::local_socket::GenericFilePath;
+
+        let folder = tempfile::tempdir().unwrap();
+        let socket = folder.path().join("k100d.sock");
+        let lock_file = folder.path().join("k100d.lock");
+        let name = || socket.clone().to_fs_name::<GenericFilePath>().unwrap();
+
+        let first = InstanceLock::acquire(&lock_file).unwrap();
+        let _listener = bind_name(name(), Some(&socket), &first).unwrap();
+
+        let refused = InstanceLock::acquire(&lock_file).unwrap_err();
+        assert_eq!(refused.kind(), std::io::ErrorKind::AlreadyExists);
+        assert!(refused.to_string().contains("already running"), "{refused}");
+        assert!(socket.exists());
+        assert!(Stream::connect(name()).is_ok());
     }
 }

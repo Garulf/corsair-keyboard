@@ -32,6 +32,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             other => return Err(format!("unknown argument {other:?}").into()),
         }
     }
+    let instance = ipc::InstanceLock::acquire(&ipc::lock_path())?;
     let config = match config_dir {
         Some(path) => ConfigDir::new(path),
         None => ConfigDir::default_location().ok_or("no home directory")?,
@@ -43,7 +44,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("k100d: config: {error}");
     }
 
-    let listener = server::bind()?;
+    let listener = server::bind(&instance)?;
     let (sender, receiver) = mpsc::channel();
 
     let released = ReleaseSignal::default();
@@ -88,6 +89,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     runtime::run(controller, config, receiver, sender, HidConnector);
     let _ = output_thread.join();
     released.notify();
+    drop(instance);
     eprintln!("k100d: stopped");
     Ok(())
 }

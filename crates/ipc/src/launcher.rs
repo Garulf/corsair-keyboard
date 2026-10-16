@@ -1,6 +1,7 @@
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
 use crate::{Client, ClientError};
@@ -20,6 +21,8 @@ pub enum LaunchError {
     Missing(PathBuf),
     #[error("cannot start k100d: {0}")]
     Spawn(#[from] io::Error),
+    #[error("k100d exited with {0}")]
+    Exited(ExitStatus),
     #[error("k100d did not answer within {0:?}")]
     Timeout(Duration),
 }
@@ -34,15 +37,20 @@ pub fn sibling_binary(base: &str) -> io::Result<PathBuf> {
     Ok(folder.join(binary_name(base)))
 }
 
-pub fn spawn_detached(program: &Path, args: &[String]) -> io::Result<()> {
+pub type ExitWatch = Receiver<ExitStatus>;
+
+pub fn spawn_detached(program: &Path, args: &[String]) -> io::Result<ExitWatch> {
     let mut command = Command::new(program);
     command.args(args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     detach(&mut command);
     let mut child = command.spawn()?;
+    let (exits, watch) = mpsc::channel();
     std::thread::spawn(move || {
-        let _ = child.wait();
+        if let Ok(status) = child.wait() {
+            let _ = exits.send(status);
+        }
     });
-    Ok(())
+    Ok(watch)
 }
 
 #[cfg(windows)]
@@ -60,19 +68,35 @@ fn detach(command: &mut Command) {
 
 pub fn ensure_running(
     start: impl FnOnce() -> Result<(), LaunchError>,
+    reachable: impl FnMut() -> bool,
+    timeout: Duration,
+) -> Result<Launched, LaunchError> {
+    ensure_running_watched(|| start().map(|()| None), reachable, timeout)
+}
+
+pub fn ensure_running_watched(
+    start: impl FnOnce() -> Result<Option<ExitWatch>, LaunchError>,
     mut reachable: impl FnMut() -> bool,
     timeout: Duration,
 ) -> Result<Launched, LaunchError> {
     if reachable() {
         return Ok(Launched::AlreadyRunning);
     }
-    start()?;
+    let watch = start()?;
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
         if reachable() {
             return Ok(Launched::Started);
         }
-        std::thread::sleep(PROBE_INTERVAL);
+        match &watch {
+            Some(watch) => match watch.recv_timeout(PROBE_INTERVAL) {
+                Ok(status) => {
+                    return if reachable() { Ok(Launched::Started) } else { Err(LaunchError::Exited(status)) };
+                }
+                Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => {}
+            },
+            None => std::thread::sleep(PROBE_INTERVAL),
+        }
     }
     if reachable() { Ok(Launched::Started) } else { Err(LaunchError::Timeout(timeout)) }
 }
@@ -83,12 +107,12 @@ pub fn daemon_reachable() -> bool {
 
 pub fn ensure_daemon(args: &[String]) -> Result<Launched, LaunchError> {
     let daemon = sibling_binary("k100d")?;
-    ensure_running(
+    ensure_running_watched(
         || {
             if !daemon.exists() {
                 return Err(LaunchError::Missing(daemon.clone()));
             }
-            Ok(spawn_detached(&daemon, args)?)
+            Ok(Some(spawn_detached(&daemon, args)?))
         },
         daemon_reachable,
         START_TIMEOUT,
@@ -166,5 +190,52 @@ mod tests {
     fn spawning_detaches_and_reports_missing_programs() {
         spawn_detached(Path::new("/bin/true"), &[]).unwrap();
         assert!(spawn_detached(Path::new("/definitely/not/here"), &[]).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_child_that_dies_at_startup_is_reported_before_the_deadline() {
+        let started = Instant::now();
+        let error = ensure_running_watched(
+            || Ok(Some(spawn_detached(Path::new("/bin/false"), &[])?)),
+            || false,
+            Duration::from_secs(10),
+        )
+        .unwrap_err();
+        assert!(matches!(error, LaunchError::Exited(status) if !status.success()), "{error}");
+        assert!(error.to_string().contains("exited"), "{error}");
+        assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_child_that_exits_because_another_daemon_answers_counts_as_started() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let probes = Cell::new(0);
+        let outcome = ensure_running_watched(
+            || {
+                let (exits, watch) = mpsc::channel();
+                exits.send(ExitStatus::from_raw(1 << 8)).unwrap();
+                Ok(Some(watch))
+            },
+            || {
+                probes.set(probes.get() + 1);
+                probes.get() > 1
+            },
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        assert_eq!(outcome, Launched::Started);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn spawning_works_from_a_folder_with_a_space_in_its_name() {
+        let folder = tempfile::Builder::new().prefix("k100 spaced ").tempdir().unwrap();
+        let program = folder.path().join("true");
+        std::fs::copy("/bin/true", &program).unwrap();
+        let exit = spawn_detached(&program, &[]).unwrap().recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(exit.success());
     }
 }

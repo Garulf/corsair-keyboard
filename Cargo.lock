@@ -400,6 +400,7 @@ dependencies = [
  "k100",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
  "toml",
 ]
