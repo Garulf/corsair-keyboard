@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=K100
+Comment=Configure the Corsair K100 keyboard
+Exec=k100 gui
+Icon=input-keyboard
+Terminal=false
+Categories=Settings;HardwareSettings;

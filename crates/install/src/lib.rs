@@ -4,3 +4,6 @@ pub use autostart::{Autostart, ENTRY_NAME, Unavailable, XdgEntry, desktop_entry,
 
 #[cfg(windows)]
 pub use autostart::RunKey;
+
+#[cfg(test)]
+mod packaging;
