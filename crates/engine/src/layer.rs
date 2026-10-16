@@ -79,11 +79,32 @@ impl LayerConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Forced {
+    No,
+    WhileHeld,
+    Until(Duration),
+}
+
 struct Layer {
+    name: String,
+    enabled: bool,
+    forced: Forced,
     effect: Box<dyn Effect>,
     mask: Mask,
     opacity: f32,
     blend: BlendMode,
+}
+
+impl Layer {
+    fn visible(&mut self, time: Duration) -> bool {
+        if let Forced::Until(end) = self.forced {
+            if time >= end {
+                self.forced = Forced::No;
+            }
+        }
+        self.enabled || self.forced != Forced::No
+    }
 }
 
 pub struct Compositor {
@@ -95,8 +116,10 @@ impl Compositor {
     pub fn new(layout: Layout, configs: &[LayerConfig]) -> Self {
         let layers = configs
             .iter()
-            .filter(|config| config.enabled)
             .map(|config| Layer {
+                name: config.name.clone(),
+                enabled: config.enabled,
+                forced: Forced::No,
                 effect: config.effect.build(),
                 mask: config.zone.mask(&layout),
                 opacity: config.opacity,
@@ -110,11 +133,29 @@ impl Compositor {
         &self.layout
     }
 
+    pub fn trigger_layer(&mut self, name: &str, until: Option<Duration>) -> bool {
+        let mut found = false;
+        for layer in self.layers.iter_mut().filter(|layer| layer.name == name) {
+            layer.forced = until.map_or(Forced::WhileHeld, Forced::Until);
+            found = true;
+        }
+        found
+    }
+
+    pub fn release_layer(&mut self, name: &str) {
+        for layer in self.layers.iter_mut().filter(|layer| layer.name == name && layer.forced == Forced::WhileHeld) {
+            layer.forced = Forced::No;
+        }
+    }
+
     pub fn render(&mut self, time: Duration, presses: &[KeyPress]) -> Frame {
         let ctx = FrameCtx { time, layout: &self.layout, presses };
         let mut out = [Rgb::BLACK; LED_COUNT];
         let mut scratch = [Rgb::BLACK; LED_COUNT];
         for layer in &mut self.layers {
+            if !layer.visible(time) {
+                continue;
+            }
             scratch.fill(Rgb::BLACK);
             layer.effect.render(&ctx, &mut scratch);
             for index in 0..LED_COUNT {
@@ -166,6 +207,26 @@ mod tests {
         layer.enabled = false;
         let frame = Compositor::new(Layout::ansi(), &[layer]).render(Duration::ZERO, &[]);
         assert!(frame.iter().all(|&c| c == Rgb::BLACK));
+    }
+
+    #[test]
+    fn triggered_layers_show_while_held_or_until_their_time() {
+        let red = Rgb::new(255, 0, 0);
+        let blue = Rgb::new(0, 0, 255);
+        let mut flash = LayerConfig::new("flash", Zone::Named(NamedZone::All), EffectConfig::Solid { color: blue });
+        flash.enabled = false;
+        let mut compositor = Compositor::new(Layout::ansi(), &[solid(Zone::Named(NamedZone::All), red), flash]);
+        let at = Duration::from_millis;
+        assert_eq!(compositor.render(at(0), &[])[4], red);
+        assert!(compositor.trigger_layer("flash", None));
+        assert_eq!(compositor.render(at(10), &[])[4], blue);
+        compositor.release_layer("flash");
+        assert_eq!(compositor.render(at(20), &[])[4], red);
+        compositor.trigger_layer("flash", Some(at(100)));
+        assert_eq!(compositor.render(at(50), &[])[4], blue);
+        assert_eq!(compositor.render(at(100), &[])[4], red);
+        assert_eq!(compositor.render(at(110), &[])[4], red);
+        assert!(!compositor.trigger_layer("nope", None));
     }
 
     #[test]
