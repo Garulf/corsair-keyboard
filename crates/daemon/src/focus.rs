@@ -36,12 +36,11 @@ pub fn spawn_watcher(mut source: Box<dyn ForegroundSource>, sender: Sender<Comma
     thread::spawn(move || {
         let mut last = None;
         loop {
-            let current = source.foreground_exe();
-            if current != last {
-                if sender.send(Command::Focus(current.clone())).is_err() {
+            if let Some(current) = source.foreground_exe().filter(|current| last.as_ref() != Some(current)) {
+                if sender.send(Command::Focus(Some(current.clone()))).is_err() {
                     return;
                 }
-                last = current;
+                last = Some(current);
             }
             thread::sleep(FOCUS_POLL);
         }
@@ -111,6 +110,32 @@ mod tests {
         assert!(!matches(r"D:\game.exe", r"C:\Games\game.exe"));
         assert!(!matches("gam", r"C:\Games\game.exe"));
         assert!(!matches("", r"C:\Games\game.exe"));
+    }
+
+    struct Readings(Vec<Option<String>>);
+
+    impl ForegroundSource for Readings {
+        fn foreground_exe(&mut self) -> Option<String> {
+            if self.0.len() > 1 { self.0.remove(0) } else { self.0[0].clone() }
+        }
+    }
+
+    #[test]
+    fn the_watcher_skips_transient_empty_readings() {
+        let (a, b) = (Some("a.exe".to_owned()), Some("b.exe".to_owned()));
+        let (sender, receiver) = std::sync::mpsc::channel();
+        spawn_watcher(Box::new(Readings(vec![a.clone(), None, a.clone(), b.clone()])), sender);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut sent = Vec::new();
+        while sent.len() < 2 {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            match receiver.recv_timeout(left) {
+                Ok(Command::Focus(exe)) => sent.push(exe),
+                Ok(_) => {}
+                Err(error) => panic!("watcher stopped sending: {error}, got {sent:?}"),
+            }
+        }
+        assert_eq!(sent, [a, b]);
     }
 
     #[test]
