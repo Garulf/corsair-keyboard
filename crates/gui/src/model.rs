@@ -141,6 +141,7 @@ pub struct Model {
     pub auto_apply: bool,
     pub canvas: CanvasState,
     pub layer: usize,
+    pub name_edit: Option<(String, String)>,
     pub paint: Rgb,
     effects: Vec<Effect>,
 }
@@ -168,6 +169,7 @@ impl Model {
             auto_apply: true,
             canvas: CanvasState::default(),
             layer: 0,
+            name_edit: None,
             paint: Rgb::new(255, 255, 255),
             effects: Vec::new(),
         }

@@ -176,6 +176,47 @@ pub fn rename_layer(profile: &mut Profile, index: usize, name: &str) {
     }
 }
 
+pub fn commit_name(profile: &mut Profile, original: &str, typed: &str) -> Result<(), String> {
+    let name = typed.trim();
+    let Some(index) = profile.layers.iter().position(|layer| layer.name == original) else { return Ok(()) };
+    if name.is_empty() || name == original {
+        return Ok(());
+    }
+    if profile.layers.iter().any(|layer| layer.name == name) {
+        return Err(format!("two layers are called {name:?}"));
+    }
+    rename_layer(profile, index, name);
+    Ok(())
+}
+
+fn name_row(
+    ui: &mut egui::Ui,
+    profile: &mut Profile,
+    edit: &mut Option<(String, String)>,
+    index: usize,
+) -> Option<String> {
+    let current = profile.layers[index].name.clone();
+    let mut problem = None;
+    if let Some((original, typed)) = edit.take_if(|(original, _)| *original != current) {
+        problem = commit_name(profile, &original, &typed).err();
+    }
+    let mut buffer = edit.as_ref().map_or_else(|| current.clone(), |(_, typed)| typed.clone());
+    let response = ui
+        .horizontal(|ui| {
+            ui.label("Name");
+            ui.text_edit_singleline(&mut buffer)
+        })
+        .inner;
+    if response.changed() {
+        *edit = Some((current.clone(), buffer.clone()));
+    }
+    if response.lost_focus() {
+        *edit = None;
+        problem = commit_name(profile, &current, &buffer).err().or(problem);
+    }
+    problem
+}
+
 pub fn paint_selection(keys: &mut Vec<KeyColor>, selection: &BTreeSet<u8>, color: Rgb) {
     for led in selection {
         match keys.iter_mut().find(|entry| entry.led == *led) {
@@ -252,13 +293,10 @@ fn layer_editor(ui: &mut egui::Ui, model: &mut Model) {
         return;
     }
     let index = model.layer.min(draft.profile.layers.len() - 1);
-    let mut name = draft.profile.layers[index].name.clone();
-    ui.horizontal(|ui| {
-        ui.label("Name");
-        if ui.text_edit_singleline(&mut name).changed() {
-            rename_layer(&mut draft.profile, index, &name);
-        }
-    });
+    if let Some(problem) = name_row(ui, &mut draft.profile, &mut model.name_edit, index) {
+        model.toast(problem);
+    }
+    let Some(draft) = model.draft.as_mut() else { return };
     let layer = &mut draft.profile.layers[index];
     ui.horizontal(|ui| {
         egui::ComboBox::from_label("Zone").selected_text(zone_label(&layer.zone)).show_ui(ui, |ui| {
@@ -406,15 +444,17 @@ pub fn effect_params(ui: &mut egui::Ui, effect: &mut EffectConfig, selection: &B
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
+    use std::time::Duration;
 
     use actions::{Action, Assignment, Key};
+    use eframe::egui::accesskit::Role;
     use egui_kittest::kittest::Queryable;
     use engine::effects::KeyColor;
     use engine::{EffectConfig, LayerConfig, NamedZone, Zone};
     use k100::Rgb;
 
     use super::*;
-    use crate::model::Model;
+    use crate::model::{AUTO_APPLY_QUIET, Model};
     use crate::testing::{harness, online, sent};
 
     fn solid(name: &str) -> LayerConfig {
@@ -563,8 +603,12 @@ mod tests {
         assert_eq!(names(harness.state()), ["same", "other", "other copy"]);
         assert_eq!(harness.state().layer, 2);
         harness.state_mut().draft.as_mut().unwrap().profile.layers[0].name = "other".into();
-        assert!(harness.state_mut().draft_problem().unwrap().contains("two layers"));
-        assert!(sent(harness.state_mut()).is_empty());
+        assert!(harness.state().draft_problem().unwrap().contains("two layers"));
+        let model = harness.state_mut();
+        model.tick(Duration::ZERO);
+        model.tick(AUTO_APPLY_QUIET * 3);
+        model.tick(AUTO_APPLY_QUIET * 6);
+        assert!(sent(model).is_empty());
     }
 
     #[test]
@@ -596,5 +640,77 @@ mod tests {
         };
         let painted = Rgb::new(9, 9, 9);
         assert_eq!(keys, &[KeyColor { led: 4, color: painted }, KeyColor { led: 26, color: painted }]);
+    }
+
+    fn alert_profile() -> Profile {
+        let mut profile = crate::testing::profile("p");
+        profile.layers = vec![solid("a"), solid("ab")];
+        profile.assignments = vec![Assignment {
+            key: Key::named("g1").unwrap(),
+            action: Action::LightingTrigger { layer: "ab".into(), duration_ms: None },
+            pass_through: vec![],
+        }];
+        profile
+    }
+
+    #[test]
+    fn committing_a_name_follows_triggers_and_ignores_empty_or_unchanged_names() {
+        let mut profile = alert_profile();
+        assert_eq!(commit_name(&mut profile, "ab", "  "), Ok(()));
+        assert_eq!(commit_name(&mut profile, "ab", "ab"), Ok(()));
+        assert_eq!(profile.layers[1].name, "ab");
+        assert_eq!(commit_name(&mut profile, "ab", " warn "), Ok(()));
+        assert_eq!(profile.layers[1].name, "warn");
+        let Action::LightingTrigger { layer, .. } = &profile.assignments[0].action else { panic!("not a trigger") };
+        assert_eq!(layer, "warn");
+    }
+
+    #[test]
+    fn committing_a_name_another_layer_has_is_refused() {
+        let mut profile = alert_profile();
+        let before = profile.clone();
+        let problem = commit_name(&mut profile, "a", "ab").unwrap_err();
+        assert!(problem.contains("two layers are called"));
+        assert_eq!(profile, before);
+    }
+
+    #[test]
+    fn typing_through_a_colliding_name_leaves_other_triggers_alone() {
+        let mut model = online("p", &["p"]);
+        model.draft = Some(crate::model::Draft::new(alert_profile()));
+        let mut harness = harness(model, lighting);
+        harness.run();
+        let field = harness.get_by_role(Role::TextInput);
+        field.click();
+        harness.run();
+        harness.get_by_role(Role::TextInput).type_text("b");
+        harness.run();
+        let profile = &harness.state().draft.as_ref().unwrap().profile;
+        assert_eq!(profile.layers[0].name, "a", "the name is only committed when the field loses focus");
+        assert_eq!(profile.assignments[0].action, Action::LightingTrigger { layer: "ab".into(), duration_ms: None });
+        harness.get_by_role(Role::TextInput).type_text("c");
+        harness.run();
+        harness.get_by_label("Name").click();
+        harness.run();
+        let profile = &harness.state().draft.as_ref().unwrap().profile;
+        assert_eq!(names(harness.state()), ["abc", "ab"]);
+        assert_eq!(profile.assignments[0].action, Action::LightingTrigger { layer: "ab".into(), duration_ms: None });
+        assert!(harness.state().toasts.is_empty());
+    }
+
+    #[test]
+    fn a_refused_name_is_reverted_and_reported() {
+        let mut model = online("p", &["p"]);
+        model.draft = Some(crate::model::Draft::new(alert_profile()));
+        let mut harness = harness(model, lighting);
+        harness.run();
+        harness.get_by_role(Role::TextInput).click();
+        harness.run();
+        harness.get_by_role(Role::TextInput).type_text("b");
+        harness.run();
+        harness.get_by_label("Name").click();
+        harness.run();
+        assert_eq!(names(harness.state()), ["a", "ab"]);
+        assert!(harness.state().toasts[0].contains("two layers are called"));
     }
 }
