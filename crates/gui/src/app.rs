@@ -95,6 +95,7 @@ pub fn root(ui: &mut egui::Ui, model: &mut Model) {
             Pane::Overview => overview(ui, model),
             Pane::Lighting => crate::layers::lighting(ui, model),
             Pane::Keys => crate::assignments::keys(ui, model),
+            Pane::Dial => crate::dial::dial(ui, model),
         }
     });
 }

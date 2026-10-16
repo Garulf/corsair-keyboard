@@ -24,16 +24,18 @@ pub enum Pane {
     Overview,
     Lighting,
     Keys,
+    Dial,
 }
 
 impl Pane {
-    pub const ALL: &[Pane] = &[Pane::Overview, Pane::Lighting, Pane::Keys];
+    pub const ALL: &[Pane] = &[Pane::Overview, Pane::Lighting, Pane::Keys, Pane::Dial];
 
     pub fn label(self) -> &'static str {
         match self {
             Pane::Overview => "Overview",
             Pane::Lighting => "Lighting",
             Pane::Keys => "Keys",
+            Pane::Dial => "Dial",
         }
     }
 
@@ -42,6 +44,7 @@ impl Pane {
             Pane::Overview => false,
             Pane::Lighting => true,
             Pane::Keys => true,
+            Pane::Dial => true,
         }
     }
 }
@@ -145,6 +148,7 @@ pub struct Model {
     pub auto_apply: bool,
     pub canvas: CanvasState,
     pub layer: usize,
+    pub dial: usize,
     pub name_edit: Option<(String, String)>,
     pub paint: Rgb,
     effects: Vec<Effect>,
@@ -173,6 +177,7 @@ impl Model {
             auto_apply: true,
             canvas: CanvasState::default(),
             layer: 0,
+            dial: 0,
             name_edit: None,
             paint: Rgb::new(255, 255, 255),
             effects: Vec::new(),
