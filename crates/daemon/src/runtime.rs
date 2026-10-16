@@ -22,6 +22,7 @@ pub enum Command {
     Subscribe(SyncSender<Reply>),
     Input(InputEvent),
     Reload,
+    Focus(Option<String>),
     Shutdown,
 }
 
@@ -106,6 +107,7 @@ pub fn run(
                 let (profiles, errors, failed) = config.load_profile_set();
                 controller.reload(profiles, errors, failed);
             }
+            Ok(Command::Focus(exe)) => controller.focus(exe),
             Err(RecvTimeoutError::Timeout) => {}
         }
 

@@ -18,6 +18,10 @@ fn default_profile_name() -> String {
     "default".into()
 }
 
+fn enabled() -> bool {
+    true
+}
+
 fn sixty() -> u32 {
     60
 }
@@ -45,6 +49,8 @@ pub struct Settings {
     pub winlock_disables: Option<Vec<WinLockShortcut>>,
     #[serde(default)]
     pub dial_ring: DialRing,
+    #[serde(default = "enabled")]
+    pub auto_switch: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -78,6 +84,7 @@ impl Default for Settings {
             brightness: 100,
             winlock_disables: None,
             dial_ring: DialRing::default(),
+            auto_switch: true,
         }
     }
 }

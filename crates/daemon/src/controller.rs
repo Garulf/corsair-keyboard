@@ -96,6 +96,7 @@ pub struct Controller {
     active: String,
     applied: Profile,
     chosen: Option<String>,
+    foreground: Option<String>,
     compositor: Compositor,
     dispatcher: Dispatcher,
     output: Box<dyn OutputPort>,
@@ -139,6 +140,7 @@ impl Controller {
             active,
             applied,
             chosen: None,
+            foreground: None,
             compositor,
             dispatcher,
             output,
@@ -311,7 +313,7 @@ impl Controller {
             return;
         }
         self.profiles = fresh;
-        let active = pick_active(&self.profiles, self.chosen.as_deref(), &self.settings.default_profile);
+        let active = self.preferred_profile();
         self.activate(active);
     }
 
@@ -339,6 +341,23 @@ impl Controller {
             }
             Err(message) => self.settings_error = Some(message),
         }
+    }
+
+    pub fn focus(&mut self, exe: Option<String>) {
+        self.foreground = exe;
+        if self.settings.auto_switch {
+            let target = self.preferred_profile();
+            self.activate(target);
+        }
+    }
+
+    fn preferred_profile(&self) -> String {
+        let focused = self
+            .foreground
+            .as_deref()
+            .filter(|_| self.settings.auto_switch)
+            .and_then(|exe| crate::focus::profile_for(self.profiles.values(), exe));
+        pick_active(&self.profiles, focused.as_deref().or(self.chosen.as_deref()), &self.settings.default_profile)
     }
 
     pub fn take_events(&mut self) -> Vec<Event> {
@@ -865,6 +884,32 @@ mod tests {
         let (mut controller, _log, _temp, config) = controller();
         let reply = controller.handle(Request::DeleteProfile { name: "default".into() }, &config);
         assert!(matches!(reply, Reply::Error { .. }));
+    }
+
+    #[test]
+    fn foreground_apps_pick_their_profile_and_fall_back() {
+        let games = Profile { apps: vec!["Game.exe".into()], ..profile("games") };
+        let mut rig = rig(vec![profile("default"), games, profile("other")]);
+        rig.controller.focus(Some(r"C:\Games\game.exe".into()));
+        assert_eq!(rig.controller.state().active_profile, "games");
+        rig.controller.focus(Some(r"C:\Windows\notepad.exe".into()));
+        assert_eq!(rig.controller.state().active_profile, "default");
+        rig.controller.handle(Request::SetActiveProfile { name: "other".into() }, &rig.config);
+        rig.controller.focus(Some(r"C:\Windows\explorer.exe".into()));
+        assert_eq!(rig.controller.state().active_profile, "other", "the manual choice is the fallback");
+        rig.controller.focus(Some(r"C:\Games\game.exe".into()));
+        assert_eq!(rig.controller.state().active_profile, "games");
+        rig.controller.focus(None);
+        assert_eq!(rig.controller.state().active_profile, "other");
+    }
+
+    #[test]
+    fn auto_switching_can_be_turned_off() {
+        let games = Profile { apps: vec!["game.exe".into()], ..profile("games") };
+        let mut rig = rig(vec![profile("default"), games]);
+        rig.controller.reload_settings(Ok(Settings { auto_switch: false, ..Settings::default() }));
+        rig.controller.focus(Some("game.exe".into()));
+        assert_eq!(rig.controller.state().active_profile, "default");
     }
 
     #[test]

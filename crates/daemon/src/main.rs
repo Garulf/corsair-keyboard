@@ -48,6 +48,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let released = ReleaseSignal::default();
     shutdown::install(sender.clone(), released.clone())?;
+    if let Some(source) = daemon::focus::platform_source() {
+        daemon::focus::spawn_watcher(source, sender.clone());
+    }
 
     let reload = sender.clone();
     let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
