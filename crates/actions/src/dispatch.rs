@@ -50,6 +50,11 @@ impl Dispatcher {
         self.recorder.state()
     }
 
+    pub fn arm_recording(&mut self) -> RecorderState {
+        self.recorder.arm();
+        self.recorder.state()
+    }
+
     pub fn dial_mode(&self) -> &DialMode {
         self.dial.mode()
     }
@@ -166,6 +171,14 @@ mod tests {
         dispatcher.poll(ms(at + 500));
         dispatcher.handle(&InputEvent::KeyUp(137), ms(at + 600));
         assert_eq!(dispatcher.recorder_state(), RecorderState::AwaitingKey);
+    }
+
+    #[test]
+    fn arming_from_outside_makes_the_next_g_key_the_target() {
+        let mut dispatcher = Dispatcher::new(&[], &DialConfig::default());
+        assert_eq!(dispatcher.arm_recording(), RecorderState::AwaitingKey);
+        let intents = dispatcher.handle(&InputEvent::KeyDown(led::G1), Duration::ZERO);
+        assert_eq!(intents, [Intent::Recording(RecorderState::Recording { key: led::G1 })]);
     }
 
     #[test]

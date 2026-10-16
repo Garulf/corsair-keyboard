@@ -142,6 +142,7 @@ mod tests {
             profiles: vec!["default".into(), "games".into()],
             brightness: 70,
             polling_rate_hz: Some(4000),
+            max_polling_rate_hz: Some(8000),
             config_errors: vec!["broken.toml: oops".into()],
             winlock: Some(true),
             dial_mode: "brightness".into(),

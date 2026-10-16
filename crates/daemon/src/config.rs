@@ -2,91 +2,14 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use engine::{EffectConfig, LayerConfig, NamedZone, Zone};
-pub use ipc::Profile;
-use serde::{Deserialize, Serialize};
-
-use crate::indicators::DialRing;
+pub use ipc::{Debounce, DialRing, Profile, Settings, WinLockShortcut};
+use serde::Serialize;
 
 const SETTINGS_FILE: &str = "settings.toml";
 const PROFILES_DIR: &str = "profiles";
 
-fn version_one() -> u32 {
-    1
-}
-
 fn default_profile_name() -> String {
     "default".into()
-}
-
-fn enabled() -> bool {
-    true
-}
-
-fn sixty() -> u32 {
-    60
-}
-
-fn full_brightness() -> u8 {
-    100
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Settings {
-    #[serde(default = "version_one")]
-    pub version: u32,
-    #[serde(default = "default_profile_name")]
-    pub default_profile: String,
-    #[serde(default = "sixty")]
-    pub fps: u32,
-    #[serde(default)]
-    pub polling_rate_hz: Option<u32>,
-    #[serde(default)]
-    pub ignore_conflicts: Vec<String>,
-    #[serde(default = "full_brightness")]
-    pub brightness: u8,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub winlock_disables: Option<Vec<WinLockShortcut>>,
-    #[serde(default)]
-    pub dial_ring: DialRing,
-    #[serde(default = "enabled")]
-    pub auto_switch: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WinLockShortcut {
-    Win,
-    AltTab,
-    AltF4,
-    ShiftTab,
-}
-
-impl WinLockShortcut {
-    pub fn bit(self) -> u32 {
-        match self {
-            Self::Win => 1,
-            Self::AltTab => 2,
-            Self::AltF4 => 4,
-            Self::ShiftTab => 8,
-        }
-    }
-}
-
-impl Default for Settings {
-    fn default() -> Self {
-        Self {
-            version: 1,
-            default_profile: default_profile_name(),
-            fps: 60,
-            polling_rate_hz: None,
-            ignore_conflicts: Vec::new(),
-            brightness: 100,
-            winlock_disables: None,
-            dial_ring: DialRing::default(),
-            auto_switch: true,
-        }
-    }
 }
 
 pub fn default_profile() -> Profile {

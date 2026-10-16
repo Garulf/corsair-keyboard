@@ -7,7 +7,10 @@ use actions::{
 };
 use bragi::{PollingRate, PropertyId};
 use engine::{Compositor, KeyPress, Layout};
-use ipc::{DaemonState, DeviceState, Event, PROTOCOL_VERSION, Profile, Reply, Request};
+use ipc::{
+    DaemonState, Debounce, DeviceState, Event, MAX_DEBOUNCE_TIMEOUT, PROTOCOL_VERSION, Profile, Reply, Request,
+    SettingsPatch,
+};
 use k100::{DeviceError, Frame, IndicatorRecord, InputEvent, KeyMappings, Session, Transport, led};
 
 use crate::config::{ConfigDir, Settings, default_profile, profile_file_name};
@@ -197,6 +200,7 @@ impl Controller {
             profiles: self.profiles.keys().cloned().collect(),
             brightness: self.settings.brightness.min(100),
             polling_rate_hz: self.settings.polling_rate_hz,
+            max_polling_rate_hz: self.max_polling_rate.map(PollingRate::hz),
             config_errors,
             winlock: self.winlock,
             dial_mode: self.dispatcher.dial_mode().label(),
@@ -226,6 +230,11 @@ impl Controller {
             && let Err(message) = self.apply_polling_rate(hz)
         {
             self.device_warning = Some(message);
+        }
+        if let Some(debounce) = self.settings.debounce
+            && let Err(message) = self.apply_debounce(debounce)
+        {
+            self.device_warning.get_or_insert(message);
         }
         self.indicators.reset();
         self.show_continuous_dial();
@@ -307,6 +316,14 @@ impl Controller {
             }
             Request::SetBrightness { percent } => self.set_brightness(percent, config),
             Request::SetPollingRate { hz } => self.set_polling_rate(hz, config),
+            Request::SetDebounce { enabled, timeout } => self.set_debounce(Debounce { enabled, timeout }, config),
+            Request::GetSettings => Reply::Settings { settings: self.settings.clone() },
+            Request::SetSettings { patch } => self.set_settings(patch, config),
+            Request::StartRecording => self.start_recording(),
+            Request::CancelRecording => {
+                self.cancel_recording();
+                Reply::Done
+            }
             Request::SetWinLock { enabled } => {
                 if self.link.is_none() {
                     return error("no keyboard connected".into());
@@ -353,6 +370,9 @@ impl Controller {
                 let polling_changed = settings.polling_rate_hz != self.settings.polling_rate_hz;
                 let brightness_changed = settings.brightness != self.settings.brightness;
                 let shortcuts_changed = settings.winlock_disables != self.settings.winlock_disables;
+                let debounce_changed = settings.debounce != self.settings.debounce;
+                let reselect = settings.auto_switch != self.settings.auto_switch
+                    || settings.default_profile != self.settings.default_profile;
                 self.indicators.set_ring(settings.dial_ring);
                 self.settings = settings;
                 if brightness_changed {
@@ -363,6 +383,12 @@ impl Controller {
                 }
                 if shortcuts_changed {
                     self.apply_winlock_shortcuts();
+                }
+                if let (true, Some(debounce)) = (debounce_changed, self.settings.debounce) {
+                    self.device_warning = self.apply_debounce(debounce).err();
+                }
+                if reselect {
+                    self.reselect_profile();
                 }
             }
             Err(message) => self.settings_error = Some(message),
@@ -386,6 +412,14 @@ impl Controller {
 
     fn output_busy(&self) -> bool {
         self.dispatcher.is_busy() || self.output.is_busy()
+    }
+
+    fn reselect_profile(&mut self) {
+        if self.output_busy() {
+            self.focus_pending = true;
+        } else {
+            self.apply_focus();
+        }
     }
 
     fn apply_focus(&mut self) {
@@ -658,6 +692,62 @@ impl Controller {
         }
         self.with_link(|link| link.set_property(PropertyId::POLLING_RATE, rate.raw()))
             .map_err(|failure| format!("keyboard rejected {hz} Hz: {failure}"))
+    }
+
+    fn set_settings(&mut self, patch: SettingsPatch, config: &ConfigDir) -> Reply {
+        if let Some(name) = &patch.default_profile
+            && !self.profiles.contains_key(name)
+        {
+            return error(format!("no profile named {name:?}"));
+        }
+        let mut on_disk = config.load_settings().unwrap_or_else(|_| self.settings.clone());
+        patch.apply(&mut on_disk);
+        if let Err(failure) = config.save_settings(&on_disk) {
+            return error(format!("saving settings: {failure}"));
+        }
+        self.reload_settings(Ok(on_disk));
+        Reply::Done
+    }
+
+    fn set_debounce(&mut self, debounce: Debounce, config: &ConfigDir) -> Reply {
+        if debounce.timeout > MAX_DEBOUNCE_TIMEOUT {
+            return error(format!("debounce time must be 0 to {MAX_DEBOUNCE_TIMEOUT}"));
+        }
+        if let Err(message) = self.apply_debounce(debounce) {
+            return error(message);
+        }
+        let mut on_disk = config.load_settings().unwrap_or_else(|_| self.settings.clone());
+        on_disk.debounce = Some(debounce);
+        if let Err(failure) = config.save_settings(&on_disk) {
+            return error(format!("saving settings: {failure}"));
+        }
+        self.settings = on_disk;
+        Reply::Done
+    }
+
+    fn apply_debounce(&mut self, debounce: Debounce) -> Result<(), String> {
+        let enabled = u32::from(debounce.enabled);
+        let writes = [
+            (PropertyId::PRESS_DEBOUNCE_ENABLED, enabled),
+            (PropertyId::PRESS_DEBOUNCE_TIMEOUT, debounce.timeout),
+            (PropertyId::RELEASE_DEBOUNCE_ENABLED, enabled),
+            (PropertyId::RELEASE_DEBOUNCE_TIMEOUT, debounce.timeout),
+        ];
+        for (property, value) in writes {
+            self.with_link(|link| link.set_property(property, value))
+                .map_err(|failure| format!("keyboard rejected the debounce setting: {failure}"))?;
+        }
+        Ok(())
+    }
+
+    fn start_recording(&mut self) -> Reply {
+        if self.link.is_none() {
+            return error("no keyboard connected".into());
+        }
+        let state = self.dispatcher.arm_recording();
+        self.indicators.recording(state);
+        self.events.push(Event::Recording { state });
+        Reply::Done
     }
 
     fn release(&mut self) -> Reply {
@@ -1477,5 +1567,101 @@ mod tests {
         rig.controller.tick(ms(16), &[], &rig.config);
         let brightness_blue = IndicatorRecord { led: led::DIAL_KEY, color: Rgb::new(0, 0xBF, 0xFF), alpha: 0xFF };
         assert!(rig.log.lock().unwrap().indicators.contains(&brightness_blue));
+    }
+
+    #[test]
+    fn debounce_is_written_to_both_press_and_release_and_saved() {
+        let mut rig = rig(vec![profile("default")]);
+        rig.log.lock().unwrap().properties.clear();
+        let reply = rig.controller.handle(Request::SetDebounce { enabled: true, timeout: 45 }, &rig.config);
+        assert_eq!(reply, Reply::Done);
+        assert_eq!(rig.log.lock().unwrap().properties, [(0x09, 1), (0x0A, 45), (0x39, 1), (0x38, 45)]);
+        let saved = rig.config.load_settings().unwrap();
+        assert_eq!(saved.debounce, Some(ipc::Debounce { enabled: true, timeout: 45 }));
+        let too_long = rig.controller.handle(Request::SetDebounce { enabled: true, timeout: 301 }, &rig.config);
+        assert!(matches!(too_long, Reply::Error { message } if message.contains("0 to 300")));
+    }
+
+    #[test]
+    fn a_saved_debounce_is_applied_when_the_keyboard_attaches() {
+        let settings =
+            Settings { debounce: Some(ipc::Debounce { enabled: false, timeout: 30 }), ..Settings::default() };
+        let rig = rig_with(settings, vec![profile("default")]);
+        assert!(rig.log.lock().unwrap().properties.contains(&(0x0A, 30)));
+    }
+
+    #[test]
+    fn get_settings_returns_the_current_settings() {
+        let mut rig = rig(vec![profile("default")]);
+        let Reply::Settings { settings } = rig.controller.handle(Request::GetSettings, &rig.config) else {
+            panic!("expected settings");
+        };
+        assert_eq!(settings.brightness, 80);
+    }
+
+    #[test]
+    fn set_settings_applies_only_the_named_fields_and_persists_them() {
+        let mut rig = rig(vec![profile("default"), profile("games")]);
+        let patch = SettingsPatch {
+            winlock_disables: Some(vec![ipc::WinLockShortcut::Win, ipc::WinLockShortcut::AltF4]),
+            dial_ring: Some(DialRing::Continuous),
+            ..SettingsPatch::default()
+        };
+        assert_eq!(rig.controller.handle(Request::SetSettings { patch }, &rig.config), Reply::Done);
+        assert!(rig.log.lock().unwrap().properties.contains(&(0x4A, 5)));
+        let saved = rig.config.load_settings().unwrap();
+        assert_eq!(saved.dial_ring, DialRing::Continuous);
+        assert_eq!(saved.polling_rate_hz, None);
+        let unknown = SettingsPatch { default_profile: Some("nope".into()), ..SettingsPatch::default() };
+        let reply = rig.controller.handle(Request::SetSettings { patch: unknown }, &rig.config);
+        assert!(matches!(reply, Reply::Error { message } if message.contains("nope")));
+    }
+
+    #[test]
+    fn turning_auto_switch_back_on_applies_the_focused_apps_profile() {
+        let games = Profile { apps: vec!["game.exe".into()], ..profile("games") };
+        let settings = Settings { auto_switch: false, ..Settings::default() };
+        let mut rig = rig_with(settings, vec![profile("default"), games]);
+        rig.controller.focus(Some(r"C:\Games\game.exe".into()));
+        assert_eq!(rig.controller.state().active_profile, "default");
+        let patch = SettingsPatch { auto_switch: Some(true), ..SettingsPatch::default() };
+        rig.controller.handle(Request::SetSettings { patch }, &rig.config);
+        assert_eq!(rig.controller.state().active_profile, "games");
+    }
+
+    #[test]
+    fn changing_the_default_profile_takes_effect_without_a_manual_choice() {
+        let mut rig = rig(vec![profile("default"), profile("games")]);
+        let patch = SettingsPatch { default_profile: Some("games".into()), ..SettingsPatch::default() };
+        rig.controller.handle(Request::SetSettings { patch }, &rig.config);
+        assert_eq!(rig.controller.state().active_profile, "games");
+    }
+
+    #[test]
+    fn the_gui_can_start_and_cancel_a_recording() {
+        let mut rig = rig(vec![profile("default")]);
+        assert_eq!(rig.controller.handle(Request::StartRecording, &rig.config), Reply::Done);
+        assert_eq!(rig.controller.state().recording, RecorderState::AwaitingKey);
+        assert!(rig.controller.take_events().contains(&Event::Recording { state: RecorderState::AwaitingKey }));
+        assert_eq!(rig.controller.handle(Request::CancelRecording, &rig.config), Reply::Done);
+        assert_eq!(rig.controller.state().recording, RecorderState::Idle);
+        tap_key(&mut rig, led::G1, 0, 10);
+        assert_eq!(rig.controller.state().recording, RecorderState::Idle);
+    }
+
+    #[test]
+    fn recording_needs_a_connected_keyboard() {
+        let mut controller =
+            Controller::new(Settings::default(), vec![profile("default")], vec![], Box::new(DiscardOutput));
+        let dir = tempfile::tempdir().unwrap();
+        let config = ConfigDir::new(dir.path().to_path_buf());
+        let reply = controller.handle(Request::StartRecording, &config);
+        assert!(matches!(reply, Reply::Error { message } if message.contains("no keyboard")));
+    }
+
+    #[test]
+    fn state_reports_the_keyboards_maximum_polling_rate() {
+        let rig = rig(vec![profile("default")]);
+        assert_eq!(rig.controller.state().max_polling_rate_hz, Some(8000));
     }
 }

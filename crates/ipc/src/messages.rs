@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u32 = 2;
+use crate::settings::{Settings, SettingsPatch};
+
+pub const PROTOCOL_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -15,6 +17,11 @@ pub enum Request {
     SetBrightness { percent: u8 },
     SetPollingRate { hz: u32 },
     SetWinLock { enabled: bool },
+    SetDebounce { enabled: bool, timeout: u32 },
+    GetSettings,
+    SetSettings { patch: SettingsPatch },
+    StartRecording,
+    CancelRecording,
     Release,
     Reacquire,
     Subscribe,
@@ -27,6 +34,7 @@ pub enum Reply {
     State { state: DaemonState },
     Profiles { names: Vec<String> },
     Profile { profile: Profile },
+    Settings { settings: Settings },
     Done,
     Error { message: String },
     Event { event: Event },
@@ -46,23 +54,33 @@ pub enum Event {
     Brightness { percent: u8 },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum DeviceState {
+    #[default]
     Disconnected,
-    Connected { model: String, firmware: String },
-    Blocked { processes: Vec<String> },
+    Connected {
+        model: String,
+        firmware: String,
+    },
+    Blocked {
+        processes: Vec<String>,
+    },
     Released,
-    Paused { reason: String },
+    Paused {
+        reason: String,
+    },
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct DaemonState {
     pub device: DeviceState,
     pub active_profile: String,
     pub profiles: Vec<String>,
     pub brightness: u8,
     pub polling_rate_hz: Option<u32>,
+    #[serde(default)]
+    pub max_polling_rate_hz: Option<u32>,
     pub config_errors: Vec<String>,
     #[serde(default)]
     pub winlock: Option<bool>,
@@ -129,6 +147,24 @@ mod tests {
         let old_state = r#"{"device":{"state":"released"},"active_profile":"a","profiles":[],"brightness":5,"polling_rate_hz":null,"config_errors":[]}"#;
         let state: DaemonState = serde_json::from_str(old_state).unwrap();
         assert_eq!((state.winlock, state.dial_mode.as_str()), (None, ""));
+    }
+
+    #[test]
+    fn settings_and_recording_requests_use_snake_case_tags() {
+        let debounce = serde_json::to_string(&Request::SetDebounce { enabled: true, timeout: 30 }).unwrap();
+        assert_eq!(debounce, r#"{"type":"set_debounce","enabled":true,"timeout":30}"#);
+        let patch = SettingsPatch { auto_switch: Some(false), ..SettingsPatch::default() };
+        let set = serde_json::to_string(&Request::SetSettings { patch }).unwrap();
+        assert_eq!(set, r#"{"type":"set_settings","patch":{"auto_switch":false}}"#);
+        assert_eq!(serde_json::to_string(&Request::StartRecording).unwrap(), r#"{"type":"start_recording"}"#);
+        assert_eq!(serde_json::to_string(&Request::GetSettings).unwrap(), r#"{"type":"get_settings"}"#);
+    }
+
+    #[test]
+    fn daemon_state_defaults_to_a_disconnected_blank() {
+        let state = DaemonState::default();
+        assert_eq!(state.device, DeviceState::Disconnected);
+        assert!(state.profiles.is_empty() && state.max_polling_rate_hz.is_none());
     }
 
     #[test]
