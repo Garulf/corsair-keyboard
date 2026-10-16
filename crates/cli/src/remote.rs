@@ -115,6 +115,9 @@ mod tests {
             brightness: 70,
             polling_rate_hz: Some(4000),
             config_errors: vec!["broken.toml: oops".into()],
+            winlock: Some(true),
+            dial_mode: "brightness".into(),
+            recording: actions::RecorderState::Idle,
         };
         let text = format_state(&state);
         assert!(text.contains("connected: K100 RGB (firmware 1.15.61)"), "{text}");

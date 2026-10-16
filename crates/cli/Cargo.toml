@@ -11,6 +11,7 @@ name = "k100"
 path = "src/main.rs"
 
 [dependencies]
+actions.workspace = true
 bragi.workspace = true
 k100.workspace = true
 clap.workspace = true

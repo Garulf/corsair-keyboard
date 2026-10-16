@@ -69,8 +69,21 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let server_sender = sender.clone();
     thread::spawn(move || server::serve(listener, server_sender));
 
+    let mut warnings = Vec::new();
+    let sink = actions::platform_sink().unwrap_or_else(|failure| {
+        warnings.push(format!("key actions unavailable: {failure}"));
+        Box::new(actions::NullSink)
+    });
+    let (output, output_thread) = actions::spawn(sink);
+    let mut controller = Controller::new(settings, profiles, errors, Box::new(output));
+    for warning in warnings {
+        eprintln!("k100d: {warning}");
+        controller.add_warning(warning);
+    }
+
     eprintln!("k100d: config in {}", config.root().display());
-    runtime::run(Controller::new(settings, profiles, errors), config, receiver, sender, HidConnector);
+    runtime::run(controller, config, receiver, sender, HidConnector);
+    let _ = output_thread.join();
     released.notify();
     eprintln!("k100d: stopped");
     Ok(())

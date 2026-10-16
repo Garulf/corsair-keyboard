@@ -5,6 +5,8 @@ use engine::{EffectConfig, LayerConfig, NamedZone, Zone};
 pub use ipc::Profile;
 use serde::{Deserialize, Serialize};
 
+use crate::indicators::DialRing;
+
 const SETTINGS_FILE: &str = "settings.toml";
 const PROFILES_DIR: &str = "profiles";
 
@@ -39,6 +41,30 @@ pub struct Settings {
     pub ignore_conflicts: Vec<String>,
     #[serde(default = "full_brightness")]
     pub brightness: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub winlock_disables: Option<Vec<WinLockShortcut>>,
+    #[serde(default)]
+    pub dial_ring: DialRing,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WinLockShortcut {
+    Win,
+    AltTab,
+    AltF4,
+    ShiftTab,
+}
+
+impl WinLockShortcut {
+    pub fn bit(self) -> u32 {
+        match self {
+            Self::Win => 1,
+            Self::AltTab => 2,
+            Self::AltF4 => 4,
+            Self::ShiftTab => 8,
+        }
+    }
 }
 
 impl Default for Settings {
@@ -50,6 +76,8 @@ impl Default for Settings {
             polling_rate_hz: None,
             ignore_conflicts: Vec::new(),
             brightness: 100,
+            winlock_disables: None,
+            dial_ring: DialRing::default(),
         }
     }
 }
@@ -193,6 +221,16 @@ fn write_atomically(path: &Path, contents: &str) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn winlock_and_dial_ring_settings_parse() {
+        let settings: Settings =
+            toml::from_str("winlock_disables = [\"win\", \"alt_f4\"]\ndial_ring = \"continuous\"").unwrap();
+        let mask: u32 = settings.winlock_disables.unwrap().iter().map(|s| s.bit()).sum();
+        assert_eq!(mask, 5);
+        assert_eq!(settings.dial_ring, DialRing::Continuous);
+        assert_eq!(Settings::default().winlock_disables, None);
+    }
 
     fn dir() -> (tempfile::TempDir, ConfigDir) {
         let temp = tempfile::tempdir().unwrap();

@@ -96,6 +96,7 @@ pub fn run(
                 if let InputEvent::KeyDown(led) = event {
                     presses.push(KeyPress { led, at: started.elapsed() });
                 }
+                controller.input(event, started.elapsed(), &config);
                 if let Some(event) = input_event(event) {
                     broadcast(&mut subscribers, event);
                 }
@@ -109,7 +110,7 @@ pub fn run(
         }
 
         if Instant::now() >= next_frame {
-            controller.tick(started.elapsed(), &presses);
+            controller.tick(started.elapsed(), &presses, &config);
             presses.clear();
             next_frame += controller.frame_interval();
             if next_frame < Instant::now() {
@@ -196,6 +197,7 @@ mod tests {
 
     use super::*;
     use crate::config::{Settings, default_profile};
+    use crate::controller::DiscardOutput;
 
     struct CountingLink(Arc<Mutex<usize>>);
 
@@ -256,7 +258,7 @@ mod tests {
     fn reports_blocked_then_connects_and_renders() {
         let temp = tempfile::tempdir().unwrap();
         let config = ConfigDir::new(temp.path().to_path_buf());
-        let controller = Controller::new(Settings::default(), vec![default_profile()], vec![]);
+        let controller = Controller::new(Settings::default(), vec![default_profile()], vec![], Box::new(DiscardOutput));
         let frames = Arc::new(Mutex::new(0));
         let connector = ScriptedConnector {
             attempts: vec![Err(ConnectError::Blocked(vec!["iCUE.exe".into()]))],
@@ -271,7 +273,12 @@ mod tests {
         let first = events_rx.recv_timeout(Duration::from_secs(5)).unwrap();
         let blocked = DeviceState::Blocked { processes: vec!["iCUE.exe".into()] };
         assert_eq!(first, Reply::Event { event: Event::DeviceState { state: blocked } });
-        let connected = events_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let connected = loop {
+            let reply = events_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            if matches!(reply, Reply::Event { event: Event::DeviceState { .. } }) {
+                break reply;
+            }
+        };
         assert!(matches!(
             connected,
             Reply::Event { event: Event::DeviceState { state: DeviceState::Connected { .. } } }

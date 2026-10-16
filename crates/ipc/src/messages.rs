@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -14,6 +14,7 @@ pub enum Request {
     SetActiveProfile { name: String },
     SetBrightness { percent: u8 },
     SetPollingRate { hz: u32 },
+    SetWinLock { enabled: bool },
     Release,
     Reacquire,
     Subscribe,
@@ -38,6 +39,11 @@ pub enum Event {
     ProfileChanged { name: String },
     Key { led: u8, pressed: bool },
     Dial { clockwise: bool },
+    WinLock { enabled: bool },
+    DialMode { name: String },
+    Recording { state: actions::RecorderState },
+    MacroRecorded { key: String },
+    Brightness { percent: u8 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -58,6 +64,12 @@ pub struct DaemonState {
     pub brightness: u8,
     pub polling_rate_hz: Option<u32>,
     pub config_errors: Vec<String>,
+    #[serde(default)]
+    pub winlock: Option<bool>,
+    #[serde(default)]
+    pub dial_mode: String,
+    #[serde(default)]
+    pub recording: actions::RecorderState,
 }
 
 fn version_one() -> u32 {
@@ -105,6 +117,18 @@ mod tests {
         assert_eq!(json, r#"{"type":"set_active_profile","name":"games"}"#);
         let state = DeviceState::Blocked { processes: vec!["iCUE.exe".into()] };
         assert_eq!(serde_json::to_string(&state).unwrap(), r#"{"state":"blocked","processes":["iCUE.exe"]}"#);
+    }
+
+    #[test]
+    fn new_events_serialize_with_their_payloads() {
+        let event = Event::Recording { state: actions::RecorderState::Recording { key: 131 } };
+        assert_eq!(
+            serde_json::to_string(&event).unwrap(),
+            r#"{"type":"recording","state":{"state":"recording","key":131}}"#
+        );
+        let old_state = r#"{"device":{"state":"released"},"active_profile":"a","profiles":[],"brightness":5,"polling_rate_hz":null,"config_errors":[]}"#;
+        let state: DaemonState = serde_json::from_str(old_state).unwrap();
+        assert_eq!((state.winlock, state.dial_mode.as_str()), (None, ""));
     }
 
     #[test]

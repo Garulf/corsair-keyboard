@@ -1,14 +1,37 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+use actions::{
+    Action, Assignment, BrightnessChange, Dispatcher, Intent, Key, MacroStep, OutputCommand, ProfileTarget, RepeatMode,
+};
 use bragi::{PollingRate, PropertyId};
 use engine::{Compositor, KeyPress, Layout};
 use ipc::{DaemonState, DeviceState, Event, PROTOCOL_VERSION, Profile, Reply, Request};
-use k100::{DeviceError, Frame, IndicatorRecord, KeyMappings, Session, Transport};
+use k100::{DeviceError, Frame, IndicatorRecord, InputEvent, KeyMappings, Session, Transport, led};
 
 use crate::config::{ConfigDir, Settings, default_profile, profile_file_name};
+use crate::indicators::Indicators;
 
 const BRIGHTNESS_SCALE: u32 = 10;
+const BRIGHTNESS_STEP: u8 = 4;
+const BRIGHTNESS_SAVE_DELAY: Duration = Duration::from_secs(1);
+const WINLOCK_SETTLE: Duration = Duration::from_millis(150);
+
+pub trait OutputPort: Send {
+    fn send(&mut self, command: OutputCommand);
+}
+
+impl OutputPort for actions::OutputHandle {
+    fn send(&mut self, command: OutputCommand) {
+        actions::OutputHandle::send(self, command);
+    }
+}
+
+pub struct DiscardOutput;
+
+impl OutputPort for DiscardOutput {
+    fn send(&mut self, _command: OutputCommand) {}
+}
 
 pub trait DeviceLink: Send {
     fn write_frame(&mut self, frame: &Frame) -> Result<(), DeviceError>;
@@ -73,6 +96,9 @@ pub struct Controller {
     active: String,
     chosen: Option<String>,
     compositor: Compositor,
+    dispatcher: Dispatcher,
+    output: Box<dyn OutputPort>,
+    indicators: Indicators,
     link: Option<Box<dyn DeviceLink>>,
     max_polling_rate: Option<PollingRate>,
     device: DeviceState,
@@ -80,24 +106,40 @@ pub struct Controller {
     profile_errors: Vec<String>,
     settings_error: Option<String>,
     device_warning: Option<String>,
+    warnings: Vec<String>,
+    winlock: Option<bool>,
+    winlock_check: Option<Duration>,
+    brightness_changed_at: Option<Duration>,
+    now: Duration,
     events: Vec<Event>,
 }
 
 impl Controller {
-    pub fn new(settings: Settings, profiles: Vec<Profile>, config_errors: Vec<String>) -> Self {
+    pub fn new(
+        settings: Settings,
+        profiles: Vec<Profile>,
+        config_errors: Vec<String>,
+        output: Box<dyn OutputPort>,
+    ) -> Self {
         let mut profiles: BTreeMap<String, Profile> = profiles.into_iter().map(|p| (p.name.clone(), p)).collect();
         if profiles.is_empty() {
             let fallback = default_profile();
             profiles.insert(fallback.name.clone(), fallback);
         }
         let active = pick_active(&profiles, None, &settings.default_profile);
-        let compositor = Compositor::new(Layout::ansi(), &profiles[&active].layers);
+        let profile = &profiles[&active];
+        let compositor = Compositor::new(Layout::ansi(), &profile.layers);
+        let dispatcher = Dispatcher::new(&profile.assignments, &profile.dial);
+        let indicators = Indicators::new(settings.dial_ring);
         Self {
             settings,
             profiles,
             active,
             chosen: None,
             compositor,
+            dispatcher,
+            output,
+            indicators,
             link: None,
             max_polling_rate: None,
             device: DeviceState::Disconnected,
@@ -105,14 +147,24 @@ impl Controller {
             profile_errors: config_errors,
             settings_error: None,
             device_warning: None,
+            warnings: Vec::new(),
+            winlock: None,
+            winlock_check: None,
+            brightness_changed_at: None,
+            now: Duration::ZERO,
             events: Vec::new(),
         }
+    }
+
+    pub fn add_warning(&mut self, warning: String) {
+        self.warnings.push(warning);
     }
 
     pub fn state(&self) -> DaemonState {
         let mut config_errors: Vec<String> = self.settings_error.iter().cloned().collect();
         config_errors.extend(self.profile_errors.iter().cloned());
         config_errors.extend(self.device_warning.iter().cloned());
+        config_errors.extend(self.warnings.iter().cloned());
         DaemonState {
             device: self.device.clone(),
             active_profile: self.active.clone(),
@@ -120,6 +172,9 @@ impl Controller {
             brightness: self.settings.brightness.min(100),
             polling_rate_hz: self.settings.polling_rate_hz,
             config_errors,
+            winlock: self.winlock,
+            dial_mode: self.dispatcher.dial_mode().label(),
+            recording: self.dispatcher.recorder_state(),
         }
     }
 
@@ -146,22 +201,54 @@ impl Controller {
                 self.device_warning = Some(message);
             }
         }
+        self.indicators.reset();
+        self.write_key_mappings();
+        if let Some(enabled) = self.read_winlock() {
+            self.set_winlock_state(enabled, false);
+        }
+        self.apply_winlock_shortcuts();
         if self.link.is_some() {
             self.set_state(DeviceState::Connected { model: info.model, firmware: info.firmware });
         }
     }
 
     pub fn set_device_state(&mut self, state: DeviceState) {
-        self.link = None;
+        self.drop_link();
         self.set_state(state);
     }
 
-    pub fn tick(&mut self, now: Duration, presses: &[KeyPress]) {
+    pub fn input(&mut self, event: InputEvent, now: Duration, config: &ConfigDir) {
+        self.now = now;
+        match event {
+            InputEvent::Property { property, value } if property == PropertyId::WIN_LOCK_ENABLED => {
+                self.winlock_check = None;
+                self.set_winlock_state(value != 0, true);
+            }
+            InputEvent::KeyDown(led::WIN_LOCK) => self.winlock_check = Some(now + WINLOCK_SETTLE),
+            _ => {}
+        }
+        let intents = self.dispatcher.handle(&event, now);
+        self.apply_all(intents, config);
+    }
+
+    pub fn tick(&mut self, now: Duration, presses: &[KeyPress], config: &ConfigDir) {
+        self.now = now;
+        let intents = self.dispatcher.poll(now);
+        self.apply_all(intents, config);
+        if self.winlock_check.is_some_and(|due| now >= due) {
+            self.winlock_check = None;
+            self.resolve_winlock();
+        }
+        self.save_brightness_when_settled(config);
         if self.link.is_none() {
             return;
         }
         let frame = self.compositor.render(now, presses);
         let _ = self.with_link(|link| link.write_frame(&frame));
+        let records = self.indicators.records(now);
+        if !records.is_empty() {
+            let _ = self.with_link(|link| link.write_indicators(&records));
+        }
         if now.saturating_sub(self.last_ping) >= k100::PING_INTERVAL {
             self.last_ping = now;
             let _ = self.with_link(|link| link.ping());
@@ -189,6 +276,15 @@ impl Controller {
             }
             Request::SetBrightness { percent } => self.set_brightness(percent, config),
             Request::SetPollingRate { hz } => self.set_polling_rate(hz, config),
+            Request::SetWinLock { enabled } => {
+                if self.link.is_none() {
+                    return error("no keyboard connected".into());
+                }
+                match self.write_winlock(enabled) {
+                    Ok(()) => Reply::Done,
+                    Err(failure) => error(format!("keyboard rejected WinLock: {failure}")),
+                }
+            }
             Request::Release => self.release(),
             Request::Reacquire => {
                 if self.device == DeviceState::Released {
@@ -218,16 +314,24 @@ impl Controller {
 
     pub fn reload_settings(&mut self, settings: Result<Settings, String>) {
         match settings {
-            Ok(settings) => {
+            Ok(mut settings) => {
+                if self.brightness_changed_at.is_some() {
+                    settings.brightness = self.settings.brightness;
+                }
                 self.settings_error = None;
                 let polling_changed = settings.polling_rate_hz != self.settings.polling_rate_hz;
                 let brightness_changed = settings.brightness != self.settings.brightness;
+                let shortcuts_changed = settings.winlock_disables != self.settings.winlock_disables;
+                self.indicators.set_ring(settings.dial_ring);
                 self.settings = settings;
                 if brightness_changed {
                     let _ = self.apply_brightness();
                 }
                 if let (true, Some(hz)) = (polling_changed, self.settings.polling_rate_hz) {
                     self.device_warning = self.apply_polling_rate(hz).err();
+                }
+                if shortcuts_changed {
+                    self.apply_winlock_shortcuts();
                 }
             }
             Err(message) => self.settings_error = Some(message),
@@ -239,6 +343,8 @@ impl Controller {
     }
 
     pub fn shutdown(&mut self) {
+        self.output.send(OutputCommand::CancelAll);
+        self.dispatcher.forget_held_keys();
         if let Some(mut link) = self.link.take() {
             let _ = link.release();
         }
@@ -251,9 +357,158 @@ impl Controller {
     fn activate(&mut self, name: String) {
         let changed = name != self.active;
         self.active = name;
-        self.compositor = Compositor::new(Layout::ansi(), &self.active_profile().layers);
+        let profile = self.active_profile().clone();
+        self.compositor = Compositor::new(Layout::ansi(), &profile.layers);
+        self.dispatcher.reconfigure(&profile.assignments, &profile.dial);
         if changed {
+            self.output.send(OutputCommand::CancelAll);
+            self.indicators.profile_switched(self.now);
             self.events.push(Event::ProfileChanged { name: self.active.clone() });
+        }
+        self.write_key_mappings();
+    }
+
+    fn drop_link(&mut self) {
+        if self.link.take().is_some() {
+            self.output.send(OutputCommand::CancelAll);
+            self.dispatcher.forget_held_keys();
+        }
+    }
+
+    fn apply_all(&mut self, intents: Vec<Intent>, config: &ConfigDir) {
+        for intent in intents {
+            self.apply(intent, config);
+        }
+    }
+
+    fn apply(&mut self, intent: Intent, config: &ConfigDir) {
+        match intent {
+            Intent::Output(command) => self.output.send(command),
+            Intent::SwitchProfile(target) => {
+                if let Some(name) = self.resolve_target(target) {
+                    self.chosen = Some(name.clone());
+                    self.activate(name);
+                }
+            }
+            Intent::Brightness(change) => self.step_brightness(change),
+            Intent::LightingTrigger { layer, on: true, duration_ms } => {
+                let until = duration_ms.map(|ms| self.now + Duration::from_millis(u64::from(ms)));
+                self.compositor.trigger_layer(&layer, until);
+            }
+            Intent::LightingTrigger { layer, on: false, .. } => self.compositor.release_layer(&layer),
+            Intent::DialMode { .. } => {
+                let mode = self.dispatcher.dial_mode();
+                let (color, name) = (mode.color(), mode.label());
+                self.indicators.dial_mode(color, self.now);
+                self.events.push(Event::DialMode { name });
+            }
+            Intent::Recording(state) => {
+                self.indicators.recording(state);
+                self.events.push(Event::Recording { state });
+            }
+            Intent::SaveMacro { key, steps } => self.save_macro(key, steps, config),
+        }
+    }
+
+    fn resolve_target(&self, target: ProfileTarget) -> Option<String> {
+        let names: Vec<&String> = self.profiles.keys().collect();
+        let position = names.iter().position(|name| **name == self.active)?;
+        let count = names.len();
+        match target {
+            ProfileTarget::Named(name) => self.profiles.contains_key(&name).then_some(name),
+            ProfileTarget::Next => Some(names[(position + 1) % count].clone()),
+            ProfileTarget::Previous => Some(names[(position + count - 1) % count].clone()),
+        }
+    }
+
+    fn step_brightness(&mut self, change: BrightnessChange) {
+        let current = self.settings.brightness.min(100);
+        let target = match change {
+            BrightnessChange::Up => (current / BRIGHTNESS_STEP + 1) * BRIGHTNESS_STEP,
+            BrightnessChange::Down => current.saturating_sub(1) / BRIGHTNESS_STEP * BRIGHTNESS_STEP,
+            BrightnessChange::Set(percent) => percent,
+        }
+        .min(100);
+        if target == current {
+            return;
+        }
+        self.settings.brightness = target;
+        let _ = self.apply_brightness();
+        self.brightness_changed_at = Some(self.now);
+        self.events.push(Event::Brightness { percent: target });
+    }
+
+    fn save_brightness_when_settled(&mut self, config: &ConfigDir) {
+        let settled = self.brightness_changed_at.is_some_and(|at| self.now.saturating_sub(at) >= BRIGHTNESS_SAVE_DELAY);
+        if !settled {
+            return;
+        }
+        self.brightness_changed_at = None;
+        let mut on_disk = config.load_settings().unwrap_or_else(|_| self.settings.clone());
+        on_disk.brightness = self.settings.brightness;
+        if config.save_settings(&on_disk).is_ok() {
+            self.settings = on_disk;
+        }
+    }
+
+    fn save_macro(&mut self, key: Key, steps: Vec<MacroStep>, config: &ConfigDir) {
+        let mut profile = self.active_profile().clone();
+        profile.assignments.retain(|assignment| assignment.key != key);
+        let action = Action::Macro { steps, mode: RepeatMode::Once };
+        profile.assignments.push(Assignment { key, action, pass_through: Vec::new() });
+        match self.save_profile(profile, config) {
+            Reply::Error { message } => self.warnings.push(format!("recorded macro not saved: {message}")),
+            _ => self.events.push(Event::MacroRecorded { key: key.name().to_owned() }),
+        }
+    }
+
+    fn read_winlock(&mut self) -> Option<bool> {
+        let mut value = None;
+        let _ =
+            self.with_link(|link| link.get_property(PropertyId::WIN_LOCK_ENABLED).map(|raw| value = Some(raw != 0)));
+        value
+    }
+
+    fn resolve_winlock(&mut self) {
+        let Some(on_device) = self.read_winlock() else { return };
+        if Some(on_device) == self.winlock {
+            let _ = self.write_winlock(!on_device);
+        } else {
+            self.set_winlock_state(on_device, true);
+        }
+    }
+
+    fn write_winlock(&mut self, enabled: bool) -> Result<(), DeviceError> {
+        self.with_link(|link| link.set_property(PropertyId::WIN_LOCK_ENABLED, u32::from(enabled)))?;
+        self.set_winlock_state(enabled, true);
+        Ok(())
+    }
+
+    fn set_winlock_state(&mut self, enabled: bool, announce: bool) {
+        let changed = self.winlock != Some(enabled);
+        self.winlock = Some(enabled);
+        self.indicators.winlock(enabled, self.now, announce && changed);
+        if changed {
+            self.events.push(Event::WinLock { enabled });
+        }
+    }
+
+    fn apply_winlock_shortcuts(&mut self) {
+        let Some(shortcuts) = self.settings.winlock_disables.clone() else { return };
+        let mask = shortcuts.iter().fold(0, |mask, shortcut| mask | shortcut.bit());
+        let _ = self.with_link(|link| link.try_set_property(PropertyId::WIN_LOCK_DISABLED_SHORTCUTS, mask).map(drop));
+    }
+
+    fn write_key_mappings(&mut self) {
+        let assignments = self.active_profile().assignments.clone();
+        let result = self.with_link(|link| {
+            let mappings: KeyMappings = actions::key_mappings(&assignments, link.key_count());
+            link.set_key_mappings(&mappings)
+        });
+        if let Err(failure) = result {
+            if failure.status().is_some() {
+                self.device_warning = Some(format!("keyboard rejected the key assignments: {failure}"));
+            }
         }
     }
 
@@ -314,6 +569,8 @@ impl Controller {
     }
 
     fn release(&mut self) -> Reply {
+        self.output.send(OutputCommand::CancelAll);
+        self.dispatcher.forget_held_keys();
         let result = self.link.take().map_or(Ok(()), |mut link| link.release());
         self.set_state(DeviceState::Released);
         match result {
@@ -348,7 +605,7 @@ impl Controller {
         let result = operation(link);
         if let Err(failure) = &result {
             if failure.status().is_none() {
-                self.link = None;
+                self.drop_link();
                 self.set_state(DeviceState::Paused { reason: failure.to_string() });
             }
         }
@@ -378,6 +635,9 @@ fn error(message: String) -> Reply {
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
+
+    use actions::{Action, Assignment, Key, MacroStep, OutputCommand, RecorderState, RepeatMode};
+    use k100::{IndicatorRecord, Rgb, led};
 
     use super::*;
     use crate::config::default_profile;
@@ -458,14 +718,64 @@ mod tests {
         Profile { name: name.into(), ..default_profile() }
     }
 
-    fn controller() -> (Controller, Arc<Mutex<Log>>, tempfile::TempDir, ConfigDir) {
+    #[derive(Clone, Default)]
+    struct FakeOutput(Arc<Mutex<Vec<OutputCommand>>>);
+
+    impl FakeOutput {
+        fn take(&self) -> Vec<OutputCommand> {
+            std::mem::take(&mut *self.0.lock().unwrap())
+        }
+    }
+
+    impl OutputPort for FakeOutput {
+        fn send(&mut self, command: OutputCommand) {
+            self.0.lock().unwrap().push(command);
+        }
+    }
+
+    struct Rig {
+        controller: Controller,
+        log: Arc<Mutex<Log>>,
+        output: FakeOutput,
+        _temp: tempfile::TempDir,
+        config: ConfigDir,
+    }
+
+    fn rig(profiles: Vec<Profile>) -> Rig {
         let temp = tempfile::tempdir().unwrap();
         let config = ConfigDir::new(temp.path().to_path_buf());
         let settings = Settings { brightness: 80, ..Settings::default() };
-        let mut controller = Controller::new(settings, vec![profile("default"), profile("games")], vec![]);
+        let output = FakeOutput::default();
+        let mut controller = Controller::new(settings, profiles, vec![], Box::new(output.clone()));
         let log = Arc::new(Mutex::new(Log::default()));
         controller.attach(Box::new(FakeLink(log.clone())), info(Some(PollingRate::Hz8000)), Duration::ZERO);
-        (controller, log, temp, config)
+        Rig { controller, log, output, _temp: temp, config }
+    }
+
+    fn controller() -> (Controller, Arc<Mutex<Log>>, tempfile::TempDir, ConfigDir) {
+        let rig = rig(vec![profile("default"), profile("games")]);
+        (rig.controller, rig.log, rig._temp, rig.config)
+    }
+
+    fn ms(value: u64) -> Duration {
+        Duration::from_millis(value)
+    }
+
+    fn key(name: &str) -> Key {
+        Key::named(name).unwrap()
+    }
+
+    fn assigned(name: &str, key_name: &str, action: Action) -> Profile {
+        Profile { assignments: vec![Assignment { key: key(key_name), action, pass_through: vec![] }], ..profile(name) }
+    }
+
+    fn caps_to_escape() -> Profile {
+        assigned("default", "caps_lock", Action::Remap { key: key("escape"), modifiers: vec![] })
+    }
+
+    fn tap_key(rig: &mut Rig, index: u8, down_at: u64, up_at: u64) {
+        rig.controller.input(InputEvent::KeyDown(index), ms(down_at), &rig.config);
+        rig.controller.input(InputEvent::KeyUp(index), ms(up_at), &rig.config);
     }
 
     #[test]
@@ -478,11 +788,11 @@ mod tests {
 
     #[test]
     fn ticks_write_frames_and_ping_on_schedule() {
-        let (mut controller, log, _temp, _config) = controller();
-        controller.tick(Duration::from_millis(16), &[]);
-        controller.tick(Duration::from_secs(10), &[]);
+        let (mut controller, log, _temp, config) = controller();
+        controller.tick(Duration::from_millis(16), &[], &config);
+        controller.tick(Duration::from_secs(10), &[], &config);
         assert_eq!(log.lock().unwrap().pings, 0);
-        controller.tick(Duration::from_secs(25), &[]);
+        controller.tick(Duration::from_secs(25), &[], &config);
         let log = log.lock().unwrap();
         assert_eq!(log.frames, 3);
         assert_eq!(log.pings, 1);
@@ -490,13 +800,13 @@ mod tests {
 
     #[test]
     fn write_failure_pauses_and_drops_the_link() {
-        let (mut controller, log, _temp, _config) = controller();
+        let (mut controller, log, _temp, config) = controller();
         log.lock().unwrap().fail_writes = true;
-        controller.tick(Duration::from_millis(16), &[]);
+        controller.tick(Duration::from_millis(16), &[], &config);
         assert!(matches!(controller.state().device, DeviceState::Paused { .. }));
         assert!(controller.wants_device());
         log.lock().unwrap().fail_writes = false;
-        controller.tick(Duration::from_millis(32), &[]);
+        controller.tick(Duration::from_millis(32), &[], &config);
         assert_eq!(log.lock().unwrap().frames, 0, "no frames after the link is gone");
     }
 
@@ -569,7 +879,7 @@ mod tests {
 
     #[test]
     fn new_without_profiles_uses_the_built_in_default() {
-        let controller = Controller::new(Settings::default(), vec![], vec![]);
+        let controller = Controller::new(Settings::default(), vec![], vec![], Box::new(DiscardOutput));
         assert_eq!(controller.state().active_profile, "default");
         assert_eq!(controller.state().device, DeviceState::Disconnected);
     }
@@ -581,7 +891,7 @@ mod tests {
         let reply = controller.handle(Request::SetPollingRate { hz: 2000 }, &config);
         assert!(matches!(reply, Reply::Error { .. }), "{reply:?}");
         assert!(matches!(controller.state().device, DeviceState::Connected { .. }));
-        controller.tick(Duration::from_millis(16), &[]);
+        controller.tick(Duration::from_millis(16), &[], &config);
         assert_eq!(log.lock().unwrap().frames, 1);
     }
 
@@ -589,7 +899,8 @@ mod tests {
     fn polling_above_the_keyboard_maximum_is_refused() {
         let temp = tempfile::tempdir().unwrap();
         let config = ConfigDir::new(temp.path().to_path_buf());
-        let mut controller = Controller::new(Settings::default(), vec![profile("default")], vec![]);
+        let mut controller =
+            Controller::new(Settings::default(), vec![profile("default")], vec![], Box::new(DiscardOutput));
         let log = Arc::new(Mutex::new(Log::default()));
         controller.attach(Box::new(FakeLink(log.clone())), info(Some(PollingRate::Hz1000)), Duration::ZERO);
         let reply = controller.handle(Request::SetPollingRate { hz: 8000 }, &config);
@@ -633,5 +944,188 @@ mod tests {
         let reply = controller.handle(Request::SaveProfile { profile: bad }, &config);
         assert!(matches!(reply, Reply::Error { ref message } if message.contains("g2")), "{reply:?}");
         assert!(config.load_profiles().0.is_empty());
+    }
+
+    #[test]
+    fn attach_writes_the_profile_key_mappings() {
+        let rig = rig(vec![caps_to_escape()]);
+        let log = rig.log.lock().unwrap();
+        let bytes = log.mappings.last().unwrap();
+        assert_eq!((bytes.len(), bytes[57], bytes[4]), (138, 0x00, 0x01));
+    }
+
+    #[test]
+    fn assigned_keys_drive_the_output_worker() {
+        let mut rig = rig(vec![caps_to_escape()]);
+        tap_key(&mut rig, 57, 10, 20);
+        assert_eq!(
+            rig.output.take(),
+            [
+                OutputCommand::Press { source: 57, program: actions::Program::remap(key("escape"), &[]) },
+                OutputCommand::Release { source: 57 },
+            ]
+        );
+    }
+
+    #[test]
+    fn the_profile_key_cycles_profiles_and_cleans_up() {
+        let mut rig = rig(vec![profile("default"), profile("games")]);
+        let writes = rig.log.lock().unwrap().mappings.len();
+        rig.controller.input(InputEvent::KeyDown(led::PROFILE), ms(10), &rig.config);
+        assert_eq!(rig.controller.state().active_profile, "games");
+        assert_eq!(rig.output.take(), [OutputCommand::CancelAll]);
+        assert_eq!(rig.log.lock().unwrap().mappings.len(), writes + 1);
+        rig.controller.tick(ms(20), &[], &rig.config);
+        let white = IndicatorRecord { led: led::PROFILE, color: Rgb::new(255, 255, 255), alpha: 0xFF };
+        assert!(rig.log.lock().unwrap().indicators.contains(&white));
+        rig.controller.tick(ms(3100), &[], &rig.config);
+        let handed_back = IndicatorRecord { led: led::PROFILE, color: Rgb::BLACK, alpha: 0 };
+        assert_eq!(rig.log.lock().unwrap().indicators.last(), Some(&handed_back));
+    }
+
+    #[test]
+    fn dial_brightness_steps_and_is_saved_once_it_settles() {
+        let mut rig = rig(vec![profile("default")]);
+        rig.controller.input(InputEvent::DialCw, ms(0), &rig.config);
+        rig.controller.input(InputEvent::DialCw, ms(100), &rig.config);
+        assert_eq!(rig.log.lock().unwrap().properties[1..], [(0x02, 840), (0x02, 880)]);
+        assert_eq!(rig.controller.state().brightness, 88);
+        rig.controller.tick(ms(1050), &[], &rig.config);
+        assert!(!rig.config.root().join("settings.toml").exists(), "not saved while the dial still moves");
+        rig.controller.tick(ms(1100), &[], &rig.config);
+        assert_eq!(rig.config.load_settings().unwrap().brightness, 88);
+    }
+
+    #[test]
+    fn brightness_steps_stop_at_the_limits() {
+        let mut rig = rig(vec![profile("default")]);
+        rig.controller.handle(Request::SetBrightness { percent: 98 }, &rig.config);
+        rig.controller.input(InputEvent::DialCw, ms(0), &rig.config);
+        rig.controller.input(InputEvent::DialCw, ms(10), &rig.config);
+        rig.controller.handle(Request::SetBrightness { percent: 2 }, &rig.config);
+        rig.controller.input(InputEvent::DialCcw, ms(20), &rig.config);
+        rig.controller.input(InputEvent::DialCcw, ms(30), &rig.config);
+        let log = rig.log.lock().unwrap();
+        let brightness: Vec<u32> = log.properties.iter().filter(|(p, _)| *p == 0x02).map(|(_, v)| *v).collect();
+        assert_eq!(brightness, [800, 980, 1000, 20, 0]);
+    }
+
+    #[test]
+    fn winlock_follows_the_firmware_when_it_toggles_itself() {
+        let mut rig = rig(vec![profile("default")]);
+        assert_eq!(rig.controller.state().winlock, Some(false));
+        rig.log.lock().unwrap().winlock_on_device = 1;
+        rig.controller.input(InputEvent::KeyDown(led::WIN_LOCK), ms(0), &rig.config);
+        rig.controller.tick(ms(100), &[], &rig.config);
+        assert_eq!(rig.controller.state().winlock, Some(false), "waits for the firmware to settle");
+        rig.controller.tick(ms(200), &[], &rig.config);
+        assert_eq!(rig.controller.state().winlock, Some(true));
+        assert!(!rig.log.lock().unwrap().properties.iter().any(|(p, _)| *p == 0x45), "no second toggle");
+        assert!(rig.controller.take_events().contains(&Event::WinLock { enabled: true }));
+    }
+
+    #[test]
+    fn winlock_is_toggled_by_the_daemon_when_the_firmware_does_not() {
+        let mut rig = rig(vec![profile("default")]);
+        rig.controller.input(InputEvent::KeyDown(led::WIN_LOCK), ms(0), &rig.config);
+        rig.controller.tick(ms(200), &[], &rig.config);
+        assert!(rig.log.lock().unwrap().properties.contains(&(0x45, 1)));
+        assert_eq!(rig.controller.state().winlock, Some(true));
+        let red = IndicatorRecord { led: led::WIN_LOCK, color: Rgb::new(255, 0, 0), alpha: 0xFF };
+        assert!(rig.log.lock().unwrap().indicators.contains(&red));
+    }
+
+    #[test]
+    fn a_winlock_notification_settles_the_press_without_reading() {
+        let mut rig = rig(vec![profile("default")]);
+        let reads = rig.log.lock().unwrap().property_reads.len();
+        rig.controller.input(InputEvent::KeyDown(led::WIN_LOCK), ms(0), &rig.config);
+        let change = InputEvent::Property { property: PropertyId::WIN_LOCK_ENABLED, value: 1 };
+        rig.controller.input(change, ms(50), &rig.config);
+        rig.controller.tick(ms(300), &[], &rig.config);
+        assert_eq!(rig.log.lock().unwrap().property_reads.len(), reads);
+        assert_eq!(rig.controller.state().winlock, Some(true));
+    }
+
+    #[test]
+    fn set_winlock_requests_reach_the_keyboard() {
+        let mut rig = rig(vec![profile("default")]);
+        assert_eq!(rig.controller.handle(Request::SetWinLock { enabled: true }, &rig.config), Reply::Done);
+        assert!(rig.log.lock().unwrap().properties.contains(&(0x45, 1)));
+        assert_eq!(rig.controller.state().winlock, Some(true));
+        let mut detached = Controller::new(Settings::default(), vec![], vec![], Box::new(DiscardOutput));
+        let reply = detached.handle(Request::SetWinLock { enabled: true }, &rig.config);
+        assert!(matches!(reply, Reply::Error { .. }));
+    }
+
+    #[test]
+    fn recording_a_macro_saves_it_into_the_active_profile() {
+        let mut rig = rig(vec![profile("default")]);
+        tap_key(&mut rig, led::DIAL_KEY, 0, 50);
+        rig.controller.input(InputEvent::KeyDown(led::DIAL_KEY), ms(100), &rig.config);
+        rig.controller.tick(ms(700), &[], &rig.config);
+        rig.controller.input(InputEvent::KeyUp(led::DIAL_KEY), ms(750), &rig.config);
+        assert_eq!(rig.controller.state().recording, RecorderState::AwaitingKey);
+        tap_key(&mut rig, led::G1, 800, 850);
+        tap_key(&mut rig, 4, 900, 960);
+        rig.controller.input(InputEvent::KeyDown(led::G1), ms(1000), &rig.config);
+        let steps = vec![MacroStep::Down(key("a")), MacroStep::Delay(60), MacroStep::Up(key("a"))];
+        let expected = Assignment {
+            key: key("g1"),
+            action: Action::Macro { steps, mode: RepeatMode::Once },
+            pass_through: vec![],
+        };
+        assert_eq!(rig.config.load_profiles().0[0].assignments, [expected]);
+        assert!(rig.controller.take_events().contains(&Event::MacroRecorded { key: "g1".into() }));
+        assert_eq!(rig.log.lock().unwrap().mappings.last().unwrap()[131], 0x00);
+    }
+
+    #[test]
+    fn releasing_the_keyboard_lets_go_of_held_keys() {
+        let mut rig = rig(vec![caps_to_escape()]);
+        rig.controller.input(InputEvent::KeyDown(57), ms(0), &rig.config);
+        rig.output.take();
+        rig.controller.handle(Request::Release, &rig.config);
+        assert_eq!(rig.output.take(), [OutputCommand::CancelAll]);
+    }
+
+    #[test]
+    fn a_dropped_link_forgets_keys_whose_release_was_lost() {
+        let mut profile = caps_to_escape();
+        profile.assignments[0].pass_through = vec![actions::PassThrough::Shift];
+        let mut rig = rig(vec![profile]);
+        rig.controller.input(InputEvent::KeyDown(106), ms(0), &rig.config);
+        rig.output.take();
+        rig.log.lock().unwrap().fail_writes = true;
+        rig.controller.tick(ms(16), &[], &rig.config);
+        assert!(matches!(rig.controller.state().device, DeviceState::Paused { .. }));
+        assert_eq!(rig.output.take(), [OutputCommand::CancelAll]);
+        let fresh = Arc::new(Mutex::new(Log::default()));
+        rig.controller.attach(Box::new(FakeLink(fresh)), info(None), ms(32));
+        rig.controller.input(InputEvent::KeyDown(57), ms(40), &rig.config);
+        assert!(matches!(rig.output.take().as_slice(), [OutputCommand::Press { source: 57, .. }]));
+    }
+
+    #[test]
+    fn lighting_triggers_show_a_disabled_layer_while_held() {
+        let red = Rgb::new(255, 0, 0);
+        let mut alert = engine::LayerConfig::new(
+            "alert",
+            engine::Zone::Named(engine::NamedZone::All),
+            engine::EffectConfig::Solid { color: red },
+        );
+        alert.enabled = false;
+        let trigger = Action::LightingTrigger { layer: "alert".into(), duration_ms: None };
+        let profile = Profile { layers: vec![alert], ..assigned("default", "g1", trigger) };
+        let mut rig = rig(vec![profile]);
+        let frame_key = |rig: &Rig| rig.log.lock().unwrap().last_frame.unwrap()[4];
+        rig.controller.tick(ms(10), &[], &rig.config);
+        assert_eq!(frame_key(&rig), Rgb::BLACK);
+        rig.controller.input(InputEvent::KeyDown(led::G1), ms(15), &rig.config);
+        rig.controller.tick(ms(20), &[], &rig.config);
+        assert_eq!(frame_key(&rig), red);
+        rig.controller.input(InputEvent::KeyUp(led::G1), ms(25), &rig.config);
+        rig.controller.tick(ms(30), &[], &rig.config);
+        assert_eq!(frame_key(&rig), Rgb::BLACK);
     }
 }
