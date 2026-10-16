@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use engine::{Layout, Zone};
 use ipc::{DaemonState, DeviceState, Event, Profile, Reply, Request, Settings};
-use k100::Frame;
+use k100::{Frame, Rgb};
 
 use crate::canvas::CanvasState;
 
@@ -116,6 +116,16 @@ pub fn validate_profile(profile: &Profile) -> Result<(), String> {
     profile.validate()
 }
 
+pub fn move_item<T>(items: &mut [T], index: usize, raise: bool) -> Option<usize> {
+    if index >= items.len() {
+        return None;
+    }
+    let target =
+        if raise { index.checked_add(1).filter(|target| *target < items.len())? } else { index.checked_sub(1)? };
+    items.swap(index, target);
+    Some(target)
+}
+
 pub struct Model {
     pub connection: Connection,
     pub state: Option<DaemonState>,
@@ -130,6 +140,8 @@ pub struct Model {
     pub starting_daemon: bool,
     pub auto_apply: bool,
     pub canvas: CanvasState,
+    pub layer: usize,
+    pub paint: Rgb,
     effects: Vec<Effect>,
 }
 
@@ -155,6 +167,8 @@ impl Model {
             starting_daemon: false,
             auto_apply: true,
             canvas: CanvasState::default(),
+            layer: 0,
+            paint: Rgb::new(255, 255, 255),
             effects: Vec::new(),
         }
     }
@@ -682,6 +696,19 @@ mod tests {
         model.tick(Duration::from_secs(1));
         model.tick(Duration::from_secs(5));
         assert!(model.take_effects().is_empty());
+    }
+
+    #[test]
+    fn items_move_until_the_edge() {
+        let mut items = ["a", "b", "c"];
+        assert_eq!(move_item(&mut items, 0, true), Some(1));
+        assert_eq!(items, ["b", "a", "c"]);
+        assert_eq!(move_item(&mut items, 2, true), None);
+        assert_eq!(move_item(&mut items, 0, false), None);
+        assert_eq!(move_item(&mut items, 2, false), Some(1));
+        assert_eq!(items, ["b", "c", "a"]);
+        assert_eq!(move_item(&mut items, 7, false), None);
+        assert_eq!(move_item(&mut items, 7, true), None);
     }
 
     #[test]

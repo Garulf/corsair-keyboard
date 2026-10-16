@@ -93,7 +93,7 @@ pub fn root(ui: &mut egui::Ui, model: &mut Model) {
         }
         match model.pane {
             Pane::Overview => overview(ui, model),
-            Pane::Lighting => crate::canvas::pane(ui, model),
+            Pane::Lighting => crate::layers::lighting(ui, model),
         }
     });
 }

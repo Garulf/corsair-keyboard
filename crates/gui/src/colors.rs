@@ -5,12 +5,10 @@ pub fn to_color32(color: Rgb) -> Color32 {
     Color32::from_rgb(color.r, color.g, color.b)
 }
 
-#[cfg_attr(not(test), expect(dead_code))]
 pub fn to_array(color: Rgb) -> [u8; 3] {
     [color.r, color.g, color.b]
 }
 
-#[cfg_attr(not(test), expect(dead_code))]
 pub fn from_array(value: [u8; 3]) -> Rgb {
     Rgb::new(value[0], value[1], value[2])
 }
@@ -21,7 +19,6 @@ pub fn contrast(background: Color32) -> Color32 {
     if luma > 140.0 { Color32::BLACK } else { Color32::WHITE }
 }
 
-#[expect(dead_code)]
 pub fn color_button(ui: &mut egui::Ui, color: &mut Rgb) -> bool {
     let mut value = to_array(*color);
     let changed = ui.color_edit_button_srgb(&mut value).changed();

@@ -2,6 +2,7 @@ mod app;
 mod canvas;
 mod colors;
 mod io;
+mod layers;
 mod model;
 
 #[cfg(test)]
