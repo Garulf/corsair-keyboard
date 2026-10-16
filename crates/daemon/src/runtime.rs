@@ -204,8 +204,23 @@ mod tests {
             *self.0.lock().unwrap() += 1;
             Ok(())
         }
+        fn write_indicators(&mut self, _records: &[k100::IndicatorRecord]) -> Result<(), k100::DeviceError> {
+            Ok(())
+        }
+        fn set_key_mappings(&mut self, _mappings: &k100::KeyMappings) -> Result<(), k100::DeviceError> {
+            Ok(())
+        }
+        fn get_property(&mut self, _p: bragi::PropertyId) -> Result<u32, k100::DeviceError> {
+            Ok(0)
+        }
         fn set_property(&mut self, _p: bragi::PropertyId, _v: u32) -> Result<(), k100::DeviceError> {
             Ok(())
+        }
+        fn try_set_property(&mut self, _p: bragi::PropertyId, _v: u32) -> Result<bool, k100::DeviceError> {
+            Ok(true)
+        }
+        fn key_count(&self) -> usize {
+            138
         }
         fn ping(&mut self) -> Result<(), k100::DeviceError> {
             Ok(())

@@ -4,7 +4,7 @@ use std::time::Duration;
 use bragi::{PollingRate, PropertyId};
 use engine::{Compositor, KeyPress, Layout};
 use ipc::{DaemonState, DeviceState, Event, PROTOCOL_VERSION, Profile, Reply, Request};
-use k100::{DeviceError, Frame, Session, Transport};
+use k100::{DeviceError, Frame, IndicatorRecord, KeyMappings, Session, Transport};
 
 use crate::config::{ConfigDir, Settings, default_profile, profile_file_name};
 
@@ -12,7 +12,12 @@ const BRIGHTNESS_SCALE: u32 = 10;
 
 pub trait DeviceLink: Send {
     fn write_frame(&mut self, frame: &Frame) -> Result<(), DeviceError>;
+    fn write_indicators(&mut self, records: &[IndicatorRecord]) -> Result<(), DeviceError>;
+    fn set_key_mappings(&mut self, mappings: &KeyMappings) -> Result<(), DeviceError>;
+    fn get_property(&mut self, property: PropertyId) -> Result<u32, DeviceError>;
     fn set_property(&mut self, property: PropertyId, value: u32) -> Result<(), DeviceError>;
+    fn try_set_property(&mut self, property: PropertyId, value: u32) -> Result<bool, DeviceError>;
+    fn key_count(&self) -> usize;
     fn ping(&mut self) -> Result<(), DeviceError>;
     fn release(&mut self) -> Result<(), DeviceError>;
 }
@@ -22,8 +27,28 @@ impl<T: Transport> DeviceLink for Session<T> {
         Session::write_frame(self, frame)
     }
 
+    fn write_indicators(&mut self, records: &[IndicatorRecord]) -> Result<(), DeviceError> {
+        Session::write_indicators(self, records)
+    }
+
+    fn set_key_mappings(&mut self, mappings: &KeyMappings) -> Result<(), DeviceError> {
+        Session::set_key_mappings(self, mappings)
+    }
+
+    fn get_property(&mut self, property: PropertyId) -> Result<u32, DeviceError> {
+        Session::get_property(self, property)
+    }
+
     fn set_property(&mut self, property: PropertyId, value: u32) -> Result<(), DeviceError> {
         Session::set_property(self, property, value)
+    }
+
+    fn try_set_property(&mut self, property: PropertyId, value: u32) -> Result<bool, DeviceError> {
+        Session::try_set_property(self, property, value)
+    }
+
+    fn key_count(&self) -> usize {
+        self.model().key_count
     }
 
     fn ping(&mut self) -> Result<(), DeviceError> {
@@ -360,7 +385,12 @@ mod tests {
     #[derive(Default)]
     struct Log {
         frames: usize,
+        last_frame: Option<Frame>,
         properties: Vec<(u16, u32)>,
+        property_reads: Vec<u16>,
+        winlock_on_device: u32,
+        mappings: Vec<Vec<u8>>,
+        indicators: Vec<k100::IndicatorRecord>,
         pings: usize,
         released: bool,
         fail_writes: bool,
@@ -370,13 +400,27 @@ mod tests {
     struct FakeLink(Arc<Mutex<Log>>);
 
     impl DeviceLink for FakeLink {
-        fn write_frame(&mut self, _frame: &Frame) -> Result<(), DeviceError> {
+        fn write_frame(&mut self, frame: &Frame) -> Result<(), DeviceError> {
             let mut log = self.0.lock().unwrap();
             if log.fail_writes {
                 return Err(DeviceError::Timeout(bragi::Command::WriteBufferBegin));
             }
             log.frames += 1;
+            log.last_frame = Some(*frame);
             Ok(())
+        }
+        fn write_indicators(&mut self, records: &[k100::IndicatorRecord]) -> Result<(), DeviceError> {
+            self.0.lock().unwrap().indicators.extend_from_slice(records);
+            Ok(())
+        }
+        fn set_key_mappings(&mut self, mappings: &k100::KeyMappings) -> Result<(), DeviceError> {
+            self.0.lock().unwrap().mappings.push(mappings.as_bytes().to_vec());
+            Ok(())
+        }
+        fn get_property(&mut self, property: PropertyId) -> Result<u32, DeviceError> {
+            let mut log = self.0.lock().unwrap();
+            log.property_reads.push(property.0);
+            Ok(if property == PropertyId::WIN_LOCK_ENABLED { log.winlock_on_device } else { 0 })
         }
         fn set_property(&mut self, property: PropertyId, value: u32) -> Result<(), DeviceError> {
             let mut log = self.0.lock().unwrap();
@@ -384,8 +428,17 @@ mod tests {
                 let status = bragi::Status::InvalidArgument;
                 return Err(DeviceError::Status { command: bragi::Command::SetProperty, status });
             }
+            if property == PropertyId::WIN_LOCK_ENABLED {
+                log.winlock_on_device = value;
+            }
             log.properties.push((property.0, value));
             Ok(())
+        }
+        fn try_set_property(&mut self, property: PropertyId, value: u32) -> Result<bool, DeviceError> {
+            self.set_property(property, value).map(|()| true)
+        }
+        fn key_count(&self) -> usize {
+            138
         }
         fn ping(&mut self) -> Result<(), DeviceError> {
             self.0.lock().unwrap().pings += 1;
