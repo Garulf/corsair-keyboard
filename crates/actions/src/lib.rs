@@ -16,3 +16,7 @@ mod sink;
 pub use player::{LOOP_GAP, Player, TYPEMATIC_DELAY, TYPEMATIC_INTERVAL};
 pub use program::{Program, tap};
 pub use sink::{Axis, InputSink, NullSink, RecordingSink, SinkError, SinkEvent};
+
+mod worker;
+
+pub use worker::{OutputCommand, OutputHandle, spawn};
