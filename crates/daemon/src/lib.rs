@@ -6,3 +6,7 @@ pub mod indicators;
 pub mod runtime;
 pub mod server;
 pub mod shutdown;
+pub mod tray_menu;
+
+#[cfg(any(windows, feature = "tray"))]
+pub mod tray;

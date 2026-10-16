@@ -24,10 +24,12 @@ fn main() -> ExitCode {
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut config_dir = None;
     let mut exit_after = None;
+    let mut no_tray = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--config-dir" => config_dir = args.next().map(PathBuf::from),
+            "--no-tray" => no_tray = true,
             "--exit-after" => exit_after = args.next().map(|s| s.parse::<u64>()).transpose()?,
             other => return Err(format!("unknown argument {other:?}").into()),
         }
@@ -86,8 +88,21 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         controller.set_output_available(false);
     }
 
+    #[cfg(any(windows, feature = "tray"))]
+    let tray = if no_tray {
+        None
+    } else {
+        daemon::tray::spawn(sender.clone()).map_err(|failure| eprintln!("k100d: tray unavailable: {failure}")).ok()
+    };
+    #[cfg(not(any(windows, feature = "tray")))]
+    let _ = no_tray;
+
     eprintln!("k100d: config in {}", config.root().display());
     runtime::run(controller, config, receiver, sender, HidConnector);
+    #[cfg(any(windows, feature = "tray"))]
+    if let Some(tray) = tray {
+        tray.stop();
+    }
     let _ = output_thread.join();
     released.notify();
     drop(instance);

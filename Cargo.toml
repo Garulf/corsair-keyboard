@@ -25,6 +25,8 @@ directories = "6"
 notify = "8.2"
 evdev = "0.13"
 windows-sys = "0.61"
+tray-icon = { version = "0.26", default-features = false }
+gtk = "0.18"
 tempfile = "3"
 serde = { version = "1.0", features = ["derive"] }
 toml = "1.1"

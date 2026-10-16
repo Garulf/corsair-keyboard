@@ -10,6 +10,9 @@ rust-version.workspace = true
 name = "k100d"
 path = "src/main.rs"
 
+[features]
+tray = ["dep:tray-icon", "dep:gtk"]
+
 [dependencies]
 actions.workspace = true
 bragi.workspace = true
@@ -34,6 +37,11 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_Threading",
     "Win32_UI_WindowsAndMessaging",
 ] }
+tray-icon.workspace = true
+
+[target.'cfg(not(windows))'.dependencies]
+tray-icon = { workspace = true, optional = true, features = ["libappindicator"] }
+gtk = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile.workspace = true
