@@ -1,0 +1,49 @@
+name = "actions"
+
+[[layers]]
+name = "base"
+zone = "all"
+effect = { type = "solid", color = "#102030" }
+
+[[layers]]
+name = "alert"
+zone = "keys"
+enabled = false
+effect = { type = "solid", color = "#ff0000" }
+
+[[assignments]]
+key = "g1"
+action = { type = "text", text = "Hello from the K100" }
+
+[[assignments]]
+key = "g2"
+action = { type = "macro", steps = [{ down = "left_ctrl" }, { tap = "c" }, { up = "left_ctrl" }] }
+
+[[assignments]]
+key = "g3"
+action = { type = "lighting_trigger", layer = "alert", duration_ms = 1500 }
+
+[[assignments]]
+key = "g4"
+action = { type = "open_url", url = "https://github.com/Garulf/corsair-keyboard" }
+
+[[assignments]]
+key = "g5"
+action = { type = "mouse", button = "middle" }
+
+[[assignments]]
+key = "caps_lock"
+action = { type = "remap", key = "escape" }
+pass_through = ["shift"]
+
+[[dial.modes]]
+kind = "brightness"
+
+[[dial.modes]]
+kind = "macro_recording"
+
+[[dial.modes]]
+kind = "track_selector"
+
+[[dial.modes]]
+kind = "vertical_scroll"

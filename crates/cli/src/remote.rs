@@ -96,8 +96,35 @@ pub fn format_state(state: &DaemonState) -> String {
         format!("brightness: {}%", state.brightness),
         format!("polling:    {polling}"),
     ];
+    let winlock = match state.winlock {
+        Some(true) => "on",
+        Some(false) => "off",
+        None => "unknown",
+    };
+    lines.push(format!("winlock:    {winlock}"));
+    lines.push(format!("dial:       {}", state.dial_mode));
+    match state.recording {
+        actions::RecorderState::Idle => {}
+        actions::RecorderState::AwaitingKey => lines.push("recording:  press a G key to choose the macro key".into()),
+        actions::RecorderState::Recording { key } => {
+            let name = actions::Key::from_index(key).map_or(key.to_string(), |key| key.name().to_owned());
+            lines.push(format!("recording:  into {name}"));
+        }
+    }
     lines.extend(state.config_errors.iter().map(|error| format!("config error: {error}")));
     lines.join("\n")
+}
+
+pub fn key_list() -> String {
+    actions::all()
+        .iter()
+        .map(|def| {
+            let index = def.index.map_or("-".to_owned(), |index| index.to_string());
+            let note = if def.output.is_some() { "" } else { "  input only" };
+            format!("{:<18}{index:>4}{note}", def.name)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[cfg(test)]
@@ -125,10 +152,23 @@ mod tests {
         assert!(text.contains("brightness: 70%"), "{text}");
         assert!(text.contains("polling:    4000 Hz"), "{text}");
         assert!(text.contains("broken.toml: oops"), "{text}");
+        assert!(text.contains("winlock:    on"), "{text}");
+        assert!(text.contains("dial:       brightness"), "{text}");
+        assert!(!text.contains("recording"), "{text}");
+        let recording = DaemonState { recording: actions::RecorderState::Recording { key: 131 }, ..state.clone() };
+        assert!(format_state(&recording).contains("recording:  into g1"));
         let blocked = DaemonState { device: DeviceState::Blocked { processes: vec!["iCUE.exe".into()] }, ..state };
         let blocked_text = format_state(&blocked);
         assert!(blocked_text.contains("blocked by iCUE.exe"));
         assert!(blocked_text.contains("ignore_conflicts"), "{blocked_text}");
+    }
+
+    #[test]
+    fn key_list_shows_names_indices_and_input_only_keys() {
+        let text = key_list();
+        assert!(text.lines().any(|line| line.starts_with("caps_lock") && line.contains("57")), "{text}");
+        assert!(text.lines().any(|line| line.starts_with("g1") && line.contains("input only")), "{text}");
+        assert!(text.lines().any(|line| line.starts_with("f13") && line.contains('-')), "{text}");
     }
 
     #[test]

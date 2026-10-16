@@ -26,11 +26,24 @@ enum Command {
     Release,
     /// Take the keyboard back after a release
     Reacquire,
+    /// Turn WinLock on or off
+    Winlock {
+        #[arg(value_enum)]
+        state: Switch,
+    },
+    /// List key names for profiles, with their keyboard index
+    Keys,
     /// Print key, dial and state events until Ctrl-C
     Events,
     /// Low-level hardware checks that talk to the keyboard directly (stop k100d first)
     #[command(subcommand)]
     Diag(diag::Diag),
+}
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+enum Switch {
+    On,
+    Off,
 }
 
 fn main() {
@@ -42,6 +55,11 @@ fn main() {
         Command::Polling { hz } => remote::simple(Request::SetPollingRate { hz }),
         Command::Release => remote::simple(Request::Release),
         Command::Reacquire => remote::simple(Request::Reacquire),
+        Command::Winlock { state } => remote::simple(Request::SetWinLock { enabled: matches!(state, Switch::On) }),
+        Command::Keys => {
+            println!("{}", remote::key_list());
+            Ok(())
+        }
         Command::Events => remote::events(),
         Command::Diag(diag) => diag::run(diag),
     };

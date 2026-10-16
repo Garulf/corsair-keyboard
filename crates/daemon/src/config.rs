@@ -230,6 +230,13 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_actions_example_is_a_valid_profile() {
+        let profile: Profile = toml::from_str(include_str!("../../../examples/profiles/actions.toml")).unwrap();
+        profile.validate().unwrap();
+        assert!(!profile.assignments.is_empty());
+    }
+
+    #[test]
     fn winlock_and_dial_ring_settings_parse() {
         let settings: Settings =
             toml::from_str("winlock_disables = [\"win\", \"alt_f4\"]\ndial_ring = \"continuous\"").unwrap();
