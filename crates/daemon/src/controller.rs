@@ -131,6 +131,7 @@ pub struct Controller {
     brightness_changed_at: Option<Duration>,
     now: Duration,
     events: Vec<Event>,
+    last_frame: Option<Frame>,
 }
 
 impl Controller {
@@ -179,6 +180,7 @@ impl Controller {
             brightness_changed_at: None,
             now: Duration::ZERO,
             events: Vec::new(),
+            last_frame: None,
         }
     }
 
@@ -213,6 +215,10 @@ impl Controller {
 
     pub fn wants_device(&self) -> bool {
         self.link.is_none() && self.device != DeviceState::Released
+    }
+
+    pub fn last_frame(&self) -> Option<Frame> {
+        self.last_frame
     }
 
     pub fn frame_interval(&self) -> Duration {
@@ -282,6 +288,7 @@ impl Controller {
             return;
         }
         let frame = self.compositor.render(now, presses);
+        self.last_frame = Some(frame);
         let _ = self.with_link(|link| link.write_frame(&frame));
         let records = self.indicators.records(now);
         if !records.is_empty() {
@@ -339,7 +346,7 @@ impl Controller {
                 }
                 Reply::Done
             }
-            Request::Subscribe => Reply::Done,
+            Request::Subscribe | Request::SubscribeFrames => Reply::Done,
         }
     }
 
@@ -1162,6 +1169,14 @@ mod tests {
         assert_eq!(controller.state().active_profile, "default");
         controller.reload(vec![profile("default"), profile("games")], vec![], vec![]);
         assert_eq!(controller.state().active_profile, "games");
+    }
+
+    #[test]
+    fn the_last_rendered_frame_is_available_for_publishing() {
+        let mut rig = rig(vec![profile("default")]);
+        assert!(rig.controller.last_frame().is_none());
+        rig.controller.tick(ms(16), &[], &rig.config);
+        assert!(rig.controller.last_frame().is_some());
     }
 
     #[test]

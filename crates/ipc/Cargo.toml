@@ -10,6 +10,7 @@ rust-version.workspace = true
 actions.workspace = true
 engine.workspace = true
 interprocess.workspace = true
+k100 = { workspace = true, features = ["serde"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

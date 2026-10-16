@@ -25,6 +25,7 @@ pub enum Request {
     Release,
     Reacquire,
     Subscribe,
+    SubscribeFrames,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -52,6 +53,7 @@ pub enum Event {
     Recording { state: actions::RecorderState },
     MacroRecorded { key: String },
     Brightness { percent: u8 },
+    Frame { rgb: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -158,6 +160,13 @@ mod tests {
         assert_eq!(set, r#"{"type":"set_settings","patch":{"auto_switch":false}}"#);
         assert_eq!(serde_json::to_string(&Request::StartRecording).unwrap(), r#"{"type":"start_recording"}"#);
         assert_eq!(serde_json::to_string(&Request::GetSettings).unwrap(), r#"{"type":"get_settings"}"#);
+    }
+
+    #[test]
+    fn frame_events_and_requests_serialize() {
+        assert_eq!(serde_json::to_string(&Request::SubscribeFrames).unwrap(), r#"{"type":"subscribe_frames"}"#);
+        let event = Event::Frame { rgb: "00ff00".into() };
+        assert_eq!(serde_json::to_string(&event).unwrap(), r#"{"type":"frame","rgb":"00ff00"}"#);
     }
 
     #[test]

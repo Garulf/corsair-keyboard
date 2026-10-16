@@ -67,9 +67,14 @@ fn handle_client(stream: Stream, commands: &Sender<Command>) -> io::Result<()> {
                 continue;
             }
         };
-        if request == Request::Subscribe {
+        let subscription = match request {
+            Request::Subscribe => Some(false),
+            Request::SubscribeFrames => Some(true),
+            _ => None,
+        };
+        if let Some(frames) = subscription {
             let (events_tx, events_rx) = mpsc::sync_channel(SUBSCRIBER_QUEUE);
-            if commands.send(Command::Subscribe(events_tx)).is_err() {
+            if commands.send(Command::Subscribe { events: events_tx, frames }).is_err() {
                 return Ok(());
             }
             write_message(reader.get_mut(), &Reply::Done)?;
@@ -145,9 +150,10 @@ mod tests {
         let stream = Stream::connect("k100d-server-test-events".to_ns_name::<GenericNamespaced>().unwrap()).unwrap();
         let mut reader = BufReader::new(stream);
         reader.get_mut().write_all(b"{\"type\":\"subscribe\"}\n").unwrap();
-        let Command::Subscribe(events) = receiver.recv_timeout(Duration::from_secs(5)).unwrap() else {
+        let Command::Subscribe { events, frames } = receiver.recv_timeout(Duration::from_secs(5)).unwrap() else {
             panic!("expected subscribe");
         };
+        assert!(!frames);
         let mut line = String::new();
         reader.read_line(&mut line).unwrap();
         assert!(line.contains("\"done\""));
@@ -155,6 +161,18 @@ mod tests {
         line.clear();
         reader.read_line(&mut line).unwrap();
         assert!(line.contains("profile_changed"), "{line}");
+    }
+
+    #[test]
+    fn frame_subscribers_are_marked() {
+        let receiver = start("k100d-server-test-frames");
+        let stream = Stream::connect("k100d-server-test-frames".to_ns_name::<GenericNamespaced>().unwrap()).unwrap();
+        let mut reader = BufReader::new(stream);
+        reader.get_mut().write_all(b"{\"type\":\"subscribe_frames\"}\n").unwrap();
+        let Command::Subscribe { frames, .. } = receiver.recv_timeout(Duration::from_secs(5)).unwrap() else {
+            panic!("expected subscribe");
+        };
+        assert!(frames);
     }
 
     #[test]
