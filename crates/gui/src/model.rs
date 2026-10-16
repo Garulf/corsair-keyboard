@@ -117,6 +117,25 @@ impl Draft {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Stale {
+    pub message: String,
+    pub drops_macro: bool,
+}
+
+impl Stale {
+    pub fn changed_outside(name: &str) -> Self {
+        Self { message: format!("{name} changed outside this window."), drops_macro: false }
+    }
+
+    pub fn macro_conflict(key: &str, name: &str) -> Self {
+        Self {
+            message: format!("A macro was recorded into {key}, but {name} also changed outside this window."),
+            drops_macro: true,
+        }
+    }
+}
+
 pub fn validate_profile(profile: &Profile) -> Result<(), String> {
     if profile.name.trim().is_empty() {
         return Err("the profile needs a name".into());
@@ -136,6 +155,20 @@ pub fn validate_profile(profile: &Profile) -> Result<(), String> {
     profile.validate()
 }
 
+fn without_key(profile: &Profile, key: &str) -> Profile {
+    let mut copy = profile.clone();
+    copy.assignments.retain(|assignment| assignment.key.name() != key);
+    copy
+}
+
+fn take_assignment(target: &mut Profile, source: &Profile, key: &str) {
+    target.assignments.retain(|assignment| assignment.key.name() != key);
+    let at = source.assignments.iter().position(|assignment| assignment.key.name() == key);
+    let at = at.unwrap_or(target.assignments.len()).min(target.assignments.len());
+    let recorded = source.assignments.iter().filter(|assignment| assignment.key.name() == key).cloned();
+    target.assignments.splice(at..at, recorded);
+}
+
 pub fn move_item<T>(items: &mut [T], index: usize, raise: bool) -> Option<usize> {
     if index >= items.len() {
         return None;
@@ -151,7 +184,7 @@ pub struct Model {
     pub state: Option<DaemonState>,
     pub settings: Option<Settings>,
     pub draft: Option<Draft>,
-    pub stale: Option<String>,
+    pub stale: Option<Stale>,
     pub frame: Option<Frame>,
     pub layout: Layout,
     pub selection: BTreeSet<u8>,
@@ -167,6 +200,7 @@ pub struct Model {
     pub device_form: DeviceForm,
     pub profiles_form: ProfilesForm,
     pub pending_rename: Option<PendingRename>,
+    pending_macro: Option<String>,
     effects: Vec<Effect>,
 }
 
@@ -199,6 +233,7 @@ impl Model {
             device_form: DeviceForm::default(),
             profiles_form: ProfilesForm::default(),
             pending_rename: None,
+            pending_macro: None,
             effects: Vec::new(),
         }
     }
@@ -254,6 +289,9 @@ impl Model {
         if !draft.dirty() {
             return Err("Nothing to apply.".into());
         }
+        if self.stale.is_some() {
+            return Err("Keep your edits or reload first.".into());
+        }
         validate_profile(&draft.profile)
     }
 
@@ -289,7 +327,7 @@ impl Model {
         }
         let quiet = now.saturating_sub(draft.edited_at) >= AUTO_APPLY_QUIET;
         let refused = draft.rejected.as_ref() == Some(&draft.profile);
-        if self.auto_apply && quiet && !refused && self.stale.is_none() && self.can_save().is_ok() {
+        if self.auto_apply && quiet && !refused && self.can_save().is_ok() {
             self.apply_draft();
         }
     }
@@ -403,15 +441,25 @@ impl Model {
         let Some(draft) = self.draft.as_mut().filter(|draft| draft.dirty()) else {
             self.draft = Some(Draft::new(profile));
             self.stale = None;
+            self.pending_macro = None;
             return;
         };
         if draft.profile.name != profile.name {
             return;
         }
+        let recorded = self.pending_macro.take();
         if draft.profile == profile {
             draft.saved = profile;
+        } else if let Some(key) = recorded {
+            if without_key(&draft.saved, &key) == without_key(&profile, &key) {
+                take_assignment(&mut draft.profile, &profile, &key);
+                draft.saved = profile;
+                self.stale = None;
+            } else {
+                self.stale = Some(Stale::macro_conflict(&key, &profile.name));
+            }
         } else if draft.saved != profile {
-            self.stale.get_or_insert_with(|| format!("{} changed outside this window.", profile.name));
+            self.stale.get_or_insert_with(|| Stale::changed_outside(&profile.name));
         }
     }
 
@@ -442,11 +490,14 @@ impl Model {
             Event::ProfileEdited { name } => self.send(Request::GetProfile { name }),
             Event::MacroRecorded { key } => {
                 self.toast(format!("Macro recorded into {key}"));
-                if self.draft.as_ref().is_some_and(Draft::dirty) {
-                    self.stale = Some(format!("A macro was recorded into {key} while you had unsaved edits."));
-                } else {
-                    let active = self.active_profile().to_owned();
-                    self.send(Request::GetProfile { name: active });
+                let active = self.active_profile().to_owned();
+                match self.draft.as_ref().filter(|draft| draft.dirty()) {
+                    Some(draft) if draft.profile.name != active => {}
+                    Some(_) => {
+                        self.pending_macro = Some(key);
+                        self.send(Request::GetProfile { name: active });
+                    }
+                    None => self.send(Request::GetProfile { name: active }),
                 }
             }
             Event::DeviceState { state } => self.update_state(|current| current.device = state),
@@ -589,18 +640,110 @@ mod tests {
         assert_eq!(dirty.draft.as_ref().unwrap().profile.name, "default");
     }
 
+    fn with_macro(mut profile: Profile, key: &str) -> Profile {
+        let action = actions::Action::Text { text: format!("recorded into {key}") };
+        let key = actions::Key::named(key).unwrap();
+        profile.assignments.retain(|assignment| assignment.key != key);
+        profile.assignments.push(actions::Assignment { key, action, pass_through: vec![] });
+        profile
+    }
+
     #[test]
-    fn a_recorded_macro_never_overwrites_unsaved_edits_silently() {
+    fn a_recorded_macro_reloads_a_clean_draft() {
         let mut clean = online("default", &["default"]);
         clean.apply(Inbox::Event(Event::MacroRecorded { key: "g1".into() }));
         assert_eq!(sent(&mut clean), [get_profile("default")]);
         assert!(clean.toasts[0].contains("g1"));
+        let recorded = with_macro(profile("default"), "g1");
+        clean.apply(Inbox::reply(get_profile("default"), Reply::Profile { profile: recorded.clone() }));
+        assert_eq!(clean.draft.as_ref().unwrap().profile, recorded);
+    }
 
-        let mut dirty = online("default", &["default"]);
-        edit(&mut dirty);
-        dirty.apply(Inbox::Event(Event::MacroRecorded { key: "g1".into() }));
-        assert!(sent(&mut dirty).is_empty());
-        assert!(dirty.stale.as_deref().unwrap().contains("g1"));
+    #[test]
+    fn a_macro_recorded_under_unsaved_edits_is_merged_into_the_draft() {
+        let mut model = online("default", &["default"]);
+        model.tick(Duration::ZERO);
+        edit(&mut model);
+        model.apply(Inbox::Event(Event::MacroRecorded { key: "g1".into() }));
+        assert_eq!(sent(&mut model), [get_profile("default")]);
+        assert!(model.stale.is_none());
+        let recorded = with_macro(profile("default"), "g1");
+        model.apply(Inbox::reply(get_profile("default"), Reply::Profile { profile: recorded.clone() }));
+        assert!(model.stale.is_none());
+        let draft = model.draft.as_ref().unwrap();
+        assert_eq!(draft.saved, recorded);
+        assert_eq!(draft.profile.apps, ["game.exe"]);
+        assert_eq!(draft.profile.assignments, recorded.assignments);
+        let requests = auto_save(&mut model, Duration::from_secs(1));
+        let [Request::SaveProfile { profile: saved }] = requests.as_slice() else { panic!("expected a save") };
+        assert_eq!(
+            (saved.apps.as_slice(), &saved.assignments),
+            (["game.exe".to_owned()].as_slice(), &recorded.assignments)
+        );
+    }
+
+    #[test]
+    fn a_macro_merge_replaces_only_the_recorded_key() {
+        let mut model = online("default", &["default"]);
+        let before = with_macro(with_macro(profile("default"), "g1"), "g2");
+        model.draft = Some(Draft::new(before.clone()));
+        edit(&mut model);
+        model.apply(Inbox::Event(Event::MacroRecorded { key: "g1".into() }));
+        sent(&mut model);
+        let mut recorded = before.clone();
+        recorded.assignments[0].action = actions::Action::Text { text: "again".into() };
+        model.apply(Inbox::reply(get_profile("default"), Reply::Profile { profile: recorded.clone() }));
+        assert!(model.stale.is_none());
+        let draft = model.draft.as_ref().unwrap();
+        assert_eq!(draft.profile.assignments, recorded.assignments);
+        assert_eq!(draft.profile.apps, ["game.exe"]);
+    }
+
+    #[test]
+    fn the_edit_notice_of_a_recorded_macro_does_not_leave_the_banner_behind() {
+        let mut model = online("default", &["default"]);
+        edit(&mut model);
+        let recorded = with_macro(profile("default"), "g1");
+        model.apply(Inbox::Event(Event::ProfileEdited { name: "default".into() }));
+        model.apply(Inbox::reply(get_profile("default"), Reply::Profile { profile: recorded.clone() }));
+        assert!(model.stale.is_some());
+        model.apply(Inbox::Event(Event::MacroRecorded { key: "g1".into() }));
+        assert_eq!(sent(&mut model), [get_profile("default"), get_profile("default")]);
+        model.apply(Inbox::reply(get_profile("default"), Reply::Profile { profile: recorded.clone() }));
+        assert!(model.stale.is_none());
+        assert_eq!(model.draft.as_ref().unwrap().profile.assignments, recorded.assignments);
+    }
+
+    #[test]
+    fn a_macro_and_an_outside_edit_together_fall_back_to_the_banner_and_hold_saves() {
+        let mut model = online("default", &["default"]);
+        model.tick(Duration::ZERO);
+        edit(&mut model);
+        model.apply(Inbox::Event(Event::MacroRecorded { key: "g1".into() }));
+        sent(&mut model);
+        let mut recorded = with_macro(profile("default"), "g1");
+        recorded.apps.push("other.exe".into());
+        model.apply(Inbox::reply(get_profile("default"), Reply::Profile { profile: recorded }));
+        let stale = model.stale.clone().unwrap();
+        assert!(stale.drops_macro && stale.message.contains("g1"));
+        assert_eq!(model.draft.as_ref().unwrap().profile, changed_apps("default", &["game.exe"]));
+        assert!(model.can_save().is_err());
+        assert!(!model.apply_draft());
+        assert!(auto_save(&mut model, Duration::from_secs(1)).is_empty());
+        model.keep_edits();
+        assert!(model.apply_draft());
+    }
+
+    #[test]
+    fn a_macro_recorded_into_another_profile_leaves_a_dirty_draft_alone() {
+        let mut model = online("default", &["default", "games"]);
+        model.state.as_mut().unwrap().active_profile = "games".into();
+        edit(&mut model);
+        model.apply(Inbox::Event(Event::MacroRecorded { key: "g1".into() }));
+        assert!(model.stale.is_none());
+        assert!(model.toasts[0].contains("g1"));
+        model.apply(Inbox::reply(get_profile("default"), Reply::Profile { profile: profile("default") }));
+        assert_eq!(model.draft.as_ref().unwrap().profile.apps, ["game.exe"]);
     }
 
     #[test]
@@ -638,7 +781,7 @@ mod tests {
         let mut changed = profile("default");
         changed.apps.push("other.exe".into());
         model.apply(Inbox::reply(get_profile("default"), Reply::Profile { profile: changed }));
-        assert!(model.stale.as_deref().unwrap().contains("default"));
+        assert!(model.stale.as_ref().unwrap().message.contains("default"));
         assert_eq!(model.draft.as_ref().unwrap().profile.apps, ["game.exe"]);
     }
 
@@ -661,7 +804,7 @@ mod tests {
         let mut changed = profile("default");
         changed.apps.push("other.exe".into());
         model.apply(Inbox::reply(get_profile("default"), Reply::Profile { profile: changed }));
-        assert!(model.stale.as_deref().unwrap().contains("g1"));
+        assert!(model.stale.as_ref().unwrap().message.contains("g1"));
     }
 
     #[test]
@@ -778,7 +921,7 @@ mod tests {
     fn reverting_discards_the_draft_and_reloads_it() {
         let mut model = online("default", &["default"]);
         edit(&mut model);
-        model.stale = Some("changed".into());
+        model.stale = Some(Stale::changed_outside("default"));
         model.discard_draft();
         assert!(model.draft.is_none() && model.stale.is_none());
         assert_eq!(sent(&mut model), [get_profile("default")]);
@@ -823,7 +966,7 @@ mod tests {
         let mut model = online("default", &["default"]);
         model.tick(Duration::ZERO);
         edit(&mut model);
-        model.stale = Some("changed".into());
+        model.stale = Some(Stale::changed_outside("default"));
         model.tick(Duration::from_secs(1));
         model.tick(Duration::from_secs(5));
         assert!(model.take_effects().is_empty());

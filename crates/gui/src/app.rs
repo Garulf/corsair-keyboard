@@ -159,10 +159,11 @@ fn status_bar(ui: &mut egui::Ui, model: &mut Model) {
 }
 
 pub fn stale_banner(ui: &mut egui::Ui, model: &mut Model) {
-    let Some(message) = model.stale.clone() else { return };
+    let Some(stale) = model.stale.clone() else { return };
     ui.horizontal(|ui| {
-        ui.colored_label(Color32::YELLOW, message);
-        if ui.button("Keep my edits").clicked() {
+        ui.colored_label(Color32::YELLOW, stale.message);
+        let keep = if stale.drops_macro { "Keep my edits (drop the macro)" } else { "Keep my edits" };
+        if ui.button(keep).clicked() {
             model.keep_edits();
         }
         if ui.button("Reload").clicked() {
@@ -320,7 +321,7 @@ mod tests {
     fn the_stale_banner_offers_keep_or_reload() {
         let mut model = online("games", &["games"]);
         model.draft.as_mut().unwrap().profile.apps.push("x.exe".into());
-        model.stale = Some("games changed outside this window.".into());
+        model.stale = Some(crate::model::Stale::changed_outside("games"));
         let mut harness = harness(model, stale_banner);
         harness.run();
         harness.get_by_label_contains("changed outside");
@@ -328,6 +329,24 @@ mod tests {
         harness.run();
         assert!(harness.state().stale.is_none());
         assert!(harness.state().draft.as_ref().unwrap().dirty());
+    }
+
+    #[test]
+    fn a_banner_that_would_drop_a_macro_says_so_and_holds_apply() {
+        let mut model = online("games", &["games"]);
+        model.draft.as_mut().unwrap().profile.apps.push("x.exe".into());
+        model.stale = Some(crate::model::Stale::macro_conflict("g1", "games"));
+        let mut harness = harness(model, |ui, model| {
+            stale_banner(ui, model);
+            draft_bar(ui, model);
+        });
+        harness.run();
+        harness.get_by_label_contains("g1");
+        assert!(harness.get_by_label("Apply").accesskit_node().is_disabled());
+        harness.get_by_label("Keep my edits (drop the macro)").click();
+        harness.run();
+        assert!(harness.state().stale.is_none());
+        assert!(!harness.get_by_label("Apply").accesskit_node().is_disabled());
     }
 
     #[test]
