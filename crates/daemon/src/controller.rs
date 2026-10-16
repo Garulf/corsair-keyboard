@@ -94,6 +94,7 @@ pub struct Controller {
     settings: Settings,
     profiles: BTreeMap<String, Profile>,
     active: String,
+    applied: Profile,
     chosen: Option<String>,
     compositor: Compositor,
     dispatcher: Dispatcher,
@@ -131,10 +132,12 @@ impl Controller {
         let compositor = Compositor::new(Layout::ansi(), &profile.layers);
         let dispatcher = Dispatcher::new(&profile.assignments, &profile.dial);
         let indicators = Indicators::new(settings.dial_ring);
+        let applied = profile.clone();
         Self {
             settings,
             profiles,
             active,
+            applied,
             chosen: None,
             compositor,
             dispatcher,
@@ -358,10 +361,14 @@ impl Controller {
         let changed = name != self.active;
         self.active = name;
         let profile = self.active_profile().clone();
+        if !changed && profile == self.applied {
+            return;
+        }
+        self.output.send(OutputCommand::CancelAll);
         self.compositor = Compositor::new(Layout::ansi(), &profile.layers);
         self.dispatcher.reconfigure(&profile.assignments, &profile.dial);
+        self.applied = profile;
         if changed {
-            self.output.send(OutputCommand::CancelAll);
             self.indicators.profile_switched(self.now);
             self.events.push(Event::ProfileChanged { name: self.active.clone() });
         }
@@ -372,6 +379,8 @@ impl Controller {
         if self.link.take().is_some() {
             self.output.send(OutputCommand::CancelAll);
             self.dispatcher.forget_held_keys();
+            self.winlock = None;
+            self.winlock_check = None;
         }
     }
 
@@ -571,6 +580,8 @@ impl Controller {
     fn release(&mut self) -> Reply {
         self.output.send(OutputCommand::CancelAll);
         self.dispatcher.forget_held_keys();
+        self.winlock = None;
+        self.winlock_check = None;
         let result = self.link.take().map_or(Ok(()), |mut link| link.release());
         self.set_state(DeviceState::Released);
         match result {
@@ -1127,5 +1138,65 @@ mod tests {
         rig.controller.input(InputEvent::KeyUp(led::G1), ms(25), &rig.config);
         rig.controller.tick(ms(30), &[], &rig.config);
         assert_eq!(frame_key(&rig), Rgb::BLACK);
+    }
+
+    #[test]
+    fn reloading_an_unchanged_profile_leaves_held_keys_alone() {
+        let mut rig = rig(vec![caps_to_escape()]);
+        let writes = rig.log.lock().unwrap().mappings.len();
+        rig.controller.input(InputEvent::KeyDown(57), ms(0), &rig.config);
+        rig.output.take();
+        rig.controller.reload(vec![caps_to_escape()], vec![], vec![]);
+        rig.controller.input(InputEvent::KeyUp(57), ms(10), &rig.config);
+        assert_eq!(rig.output.take(), [OutputCommand::Release { source: 57 }]);
+        assert_eq!(rig.log.lock().unwrap().mappings.len(), writes);
+    }
+
+    #[test]
+    fn reloading_a_changed_profile_cancels_held_keys_and_rewrites_mappings() {
+        let mut rig = rig(vec![caps_to_escape()]);
+        let writes = rig.log.lock().unwrap().mappings.len();
+        rig.controller.input(InputEvent::KeyDown(57), ms(0), &rig.config);
+        rig.output.take();
+        let changed = assigned("default", "caps_lock", Action::Remap { key: key("space"), modifiers: vec![] });
+        rig.controller.reload(vec![changed], vec![], vec![]);
+        assert_eq!(rig.output.take(), [OutputCommand::CancelAll]);
+        assert_eq!(rig.log.lock().unwrap().mappings.len(), writes + 1);
+        rig.controller.take_events();
+        tap_key(&mut rig, 57, 20, 30);
+        let press = OutputCommand::Press { source: 57, program: actions::Program::remap(key("space"), &[]) };
+        assert_eq!(rig.output.take(), [press, OutputCommand::Release { source: 57 }]);
+    }
+
+    #[test]
+    fn a_dropped_link_clears_the_reported_winlock() {
+        let mut rig = rig(vec![profile("default")]);
+        assert_eq!(rig.controller.state().winlock, Some(false));
+        rig.controller.set_device_state(DeviceState::Disconnected);
+        assert_eq!(rig.controller.state().winlock, None);
+    }
+
+    #[test]
+    fn shutdown_lets_go_of_held_keys() {
+        let mut rig = rig(vec![caps_to_escape()]);
+        rig.controller.input(InputEvent::KeyDown(57), ms(0), &rig.config);
+        rig.output.take();
+        rig.controller.shutdown();
+        assert_eq!(rig.output.take(), [OutputCommand::CancelAll]);
+        assert!(rig.log.lock().unwrap().released);
+    }
+
+    #[test]
+    fn releasing_the_keyboard_forgets_key_state() {
+        let mut profile = caps_to_escape();
+        profile.assignments[0].pass_through = vec![actions::PassThrough::Shift];
+        let mut rig = rig(vec![profile]);
+        rig.controller.input(InputEvent::KeyDown(106), ms(0), &rig.config);
+        rig.controller.handle(Request::Release, &rig.config);
+        rig.output.take();
+        let fresh = Arc::new(Mutex::new(Log::default()));
+        rig.controller.attach(Box::new(FakeLink(fresh)), info(None), ms(32));
+        rig.controller.input(InputEvent::KeyDown(57), ms(40), &rig.config);
+        assert!(matches!(rig.output.take().as_slice(), [OutputCommand::Press { source: 57, .. }]));
     }
 }
