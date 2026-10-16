@@ -1,0 +1,18 @@
+[package]
+name = "gui"
+description = "egui front end for k100d"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+actions.workspace = true
+eframe.workspace = true
+engine.workspace = true
+ipc.workspace = true
+k100.workspace = true
+
+[dev-dependencies]
+egui_kittest.workspace = true
+interprocess.workspace = true

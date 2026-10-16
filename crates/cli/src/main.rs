@@ -17,6 +17,8 @@ struct Cli {
 enum Command {
     /// Show daemon and keyboard status
     Status,
+    /// Open the graphical interface
+    Gui,
     /// Manage profiles
     #[command(subcommand)]
     Profile(remote::ProfileCommand),
@@ -70,6 +72,7 @@ fn main() {
     let cli = Cli::parse();
     let result = match cli.command {
         Command::Status => remote::status(),
+        Command::Gui => gui::run().map_err(Into::into),
         Command::Profile(command) => remote::profile(command),
         Command::Brightness { percent } => remote::simple(Request::SetBrightness { percent }),
         Command::Polling { hz } => remote::simple(Request::SetPollingRate { hz }),
@@ -116,6 +119,11 @@ mod tests {
         let cli = Cli::try_parse_from(["k100", "effect", "solid", "--color", "#ff0000"]).unwrap();
         let Command::Effect { name, color } = cli.command else { panic!("expected effect") };
         assert_eq!((name.as_str(), color.as_deref()), ("solid", Some("#ff0000")));
+    }
+
+    #[test]
+    fn gui_is_a_plain_subcommand() {
+        assert!(matches!(Cli::try_parse_from(["k100", "gui"]).unwrap().command, Command::Gui));
     }
 
     #[test]
