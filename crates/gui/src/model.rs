@@ -5,6 +5,8 @@ use engine::{Layout, Zone};
 use ipc::{DaemonState, DeviceState, Event, Profile, Reply, Request, Settings};
 use k100::Frame;
 
+use crate::canvas::CanvasState;
+
 pub const AUTO_APPLY_QUIET: Duration = Duration::from_millis(400);
 const MAX_TOASTS: usize = 4;
 
@@ -19,20 +21,23 @@ pub enum Connection {
 pub enum Pane {
     #[default]
     Overview,
+    Lighting,
 }
 
 impl Pane {
-    pub const ALL: &[Pane] = &[Pane::Overview];
+    pub const ALL: &[Pane] = &[Pane::Overview, Pane::Lighting];
 
     pub fn label(self) -> &'static str {
         match self {
             Pane::Overview => "Overview",
+            Pane::Lighting => "Lighting",
         }
     }
 
     pub fn edits_profile(self) -> bool {
         match self {
             Pane::Overview => false,
+            Pane::Lighting => true,
         }
     }
 }
@@ -124,6 +129,7 @@ pub struct Model {
     pub toasts: Vec<String>,
     pub starting_daemon: bool,
     pub auto_apply: bool,
+    pub canvas: CanvasState,
     effects: Vec<Effect>,
 }
 
@@ -148,6 +154,7 @@ impl Model {
             toasts: Vec::new(),
             starting_daemon: false,
             auto_apply: true,
+            canvas: CanvasState::default(),
             effects: Vec::new(),
         }
     }

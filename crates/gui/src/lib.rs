@@ -1,4 +1,6 @@
 mod app;
+mod canvas;
+mod colors;
 mod io;
 mod model;
 

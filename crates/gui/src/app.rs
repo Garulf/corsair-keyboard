@@ -93,6 +93,7 @@ pub fn root(ui: &mut egui::Ui, model: &mut Model) {
         }
         match model.pane {
             Pane::Overview => overview(ui, model),
+            Pane::Lighting => crate::canvas::pane(ui, model),
         }
     });
 }
@@ -303,6 +304,17 @@ mod tests {
         harness.run();
         assert!(harness.state().stale.is_none());
         assert!(harness.state().draft.as_ref().unwrap().dirty());
+    }
+
+    #[test]
+    fn the_lighting_pane_is_in_the_navigation() {
+        let mut harness = harness(online("games", &["games"]), root);
+        harness.run();
+        assert_eq!(harness.state().pane, Pane::Overview);
+        harness.get_by_label("Lighting").click();
+        harness.run();
+        assert_eq!(harness.state().pane, Pane::Lighting);
+        harness.get_by_label("Select all");
     }
 
     #[test]
