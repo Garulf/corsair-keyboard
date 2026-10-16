@@ -22,15 +22,17 @@ pub enum Pane {
     #[default]
     Overview,
     Lighting,
+    Keys,
 }
 
 impl Pane {
-    pub const ALL: &[Pane] = &[Pane::Overview, Pane::Lighting];
+    pub const ALL: &[Pane] = &[Pane::Overview, Pane::Lighting, Pane::Keys];
 
     pub fn label(self) -> &'static str {
         match self {
             Pane::Overview => "Overview",
             Pane::Lighting => "Lighting",
+            Pane::Keys => "Keys",
         }
     }
 
@@ -38,6 +40,7 @@ impl Pane {
         match self {
             Pane::Overview => false,
             Pane::Lighting => true,
+            Pane::Keys => true,
         }
     }
 }

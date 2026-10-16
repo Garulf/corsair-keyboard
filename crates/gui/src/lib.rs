@@ -1,4 +1,6 @@
+mod actions_editor;
 mod app;
+mod assignments;
 mod canvas;
 mod colors;
 mod io;
