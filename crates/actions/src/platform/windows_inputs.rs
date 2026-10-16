@@ -1,5 +1,5 @@
 use crate::config::MouseButton;
-use crate::keys::Output;
+use crate::keys::{Key, Output};
 use crate::sink::{Axis, SinkEvent};
 
 pub const KEYEVENTF_EXTENDEDKEY: u32 = 0x0001;
@@ -35,18 +35,35 @@ pub fn win_inputs(event: &SinkEvent) -> Vec<WinInput> {
                 Axis::Vertical => MOUSEEVENTF_WHEEL,
                 Axis::Horizontal => MOUSEEVENTF_HWHEEL,
             };
-            vec![WinInput::Mouse { flags, data: clicks * WHEEL_DELTA }]
+            vec![WinInput::Mouse { flags, data: clicks.saturating_mul(WHEEL_DELTA) }]
         }
-        SinkEvent::Text(text) => text
-            .encode_utf16()
-            .flat_map(|unit| {
-                [
-                    WinInput::Key { vk: 0, scan: unit, flags: KEYEVENTF_UNICODE },
-                    WinInput::Key { vk: 0, scan: unit, flags: KEYEVENTF_UNICODE | KEYEVENTF_KEYUP },
-                ]
-            })
-            .collect(),
+        SinkEvent::Text(text) => text_inputs(text),
     }
+}
+
+fn text_inputs(text: &str) -> Vec<WinInput> {
+    let mut inputs = Vec::new();
+    let mut chars = text.chars().peekable();
+    while let Some(character) = chars.next() {
+        match character {
+            '\r' if chars.peek() == Some(&'\n') => {}
+            '\r' | '\n' => inputs.extend(key_tap("enter")),
+            '\t' => inputs.extend(key_tap("tab")),
+            other => {
+                let mut units = [0u16; 2];
+                for unit in other.encode_utf16(&mut units) {
+                    inputs.push(WinInput::Key { vk: 0, scan: *unit, flags: KEYEVENTF_UNICODE });
+                    inputs.push(WinInput::Key { vk: 0, scan: *unit, flags: KEYEVENTF_UNICODE | KEYEVENTF_KEYUP });
+                }
+            }
+        }
+    }
+    inputs
+}
+
+fn key_tap(name: &str) -> [WinInput; 2] {
+    let output = Key::named(name).and_then(Key::output).expect("built-in key names are in the key table");
+    [key_input(output, true), key_input(output, false)]
 }
 
 fn key_input(output: Output, down: bool) -> WinInput {
@@ -102,6 +119,32 @@ mod tests {
         assert_eq!(inputs[0], WinInput::Key { vk: 0, scan: 0xE9, flags: KEYEVENTF_UNICODE });
         assert_eq!(inputs[1], WinInput::Key { vk: 0, scan: 0xE9, flags: KEYEVENTF_UNICODE | KEYEVENTF_KEYUP });
         assert_eq!(inputs[2], WinInput::Key { vk: 0, scan: 0xD83D, flags: KEYEVENTF_UNICODE });
+    }
+
+    #[test]
+    fn line_breaks_and_tabs_are_typed_as_keys() {
+        let unicode = |unit: u16| {
+            [
+                WinInput::Key { vk: 0, scan: unit, flags: KEYEVENTF_UNICODE },
+                WinInput::Key { vk: 0, scan: unit, flags: KEYEVENTF_UNICODE | KEYEVENTF_KEYUP },
+            ]
+        };
+        let scan = |code: u16| {
+            [
+                WinInput::Key { vk: 0, scan: code, flags: KEYEVENTF_SCANCODE },
+                WinInput::Key { vk: 0, scan: code, flags: KEYEVENTF_SCANCODE | KEYEVENTF_KEYUP },
+            ]
+        };
+        let expected: Vec<WinInput> =
+            [unicode(0x61), scan(0x1C), unicode(0x62), scan(0x0F), unicode(0x63)].into_iter().flatten().collect();
+        assert_eq!(win_inputs(&SinkEvent::Text("a\r\nb\tc".into())), expected);
+        assert_eq!(win_inputs(&SinkEvent::Text("\r".into())), scan(0x1C));
+    }
+
+    #[test]
+    fn huge_wheel_steps_saturate() {
+        let wheel = SinkEvent::Wheel { axis: Axis::Vertical, clicks: i32::MAX };
+        assert_eq!(win_inputs(&wheel), [WinInput::Mouse { flags: MOUSEEVENTF_WHEEL, data: i32::MAX }]);
     }
 
     #[test]
