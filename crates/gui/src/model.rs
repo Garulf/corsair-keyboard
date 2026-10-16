@@ -62,6 +62,7 @@ pub enum Inbox {
     Connected,
     Disconnected(String),
     LaunchFailed(String),
+    RequestFailed(Box<Request>, String),
     Reply(Box<(Request, Reply)>),
     Event(Event),
 }
@@ -69,6 +70,10 @@ pub enum Inbox {
 impl Inbox {
     pub fn reply(request: Request, reply: Reply) -> Self {
         Self::Reply(Box::new((request, reply)))
+    }
+
+    pub fn request_failed(request: Request, message: impl Into<String>) -> Self {
+        Self::RequestFailed(Box::new(request), message.into())
     }
 
     pub fn as_reply(&self) -> Option<(&Request, &Reply)> {
@@ -232,14 +237,31 @@ impl Model {
         self.state.as_ref().is_some_and(|state| state.recording != RecorderState::Idle)
     }
 
+    pub fn can_save(&self) -> Result<(), String> {
+        if self.connection != Connection::Online || self.state.is_none() {
+            return Err("Waiting for k100d.".into());
+        }
+        if self.recording() {
+            return Err("Finish or cancel the recording first".into());
+        }
+        if self.renaming() {
+            return Err("Wait for the rename to finish.".into());
+        }
+        let Some(draft) = self.draft.as_ref() else { return Err("No profile is loaded yet.".into()) };
+        if draft.saving {
+            return Err("Saving...".into());
+        }
+        if !draft.dirty() {
+            return Err("Nothing to apply.".into());
+        }
+        validate_profile(&draft.profile)
+    }
+
     pub fn apply_draft(&mut self) -> bool {
-        if self.recording() || self.renaming() || self.draft_problem().is_some() {
+        if self.can_save().is_err() {
             return false;
         }
         let Some(draft) = self.draft.as_mut() else { return false };
-        if draft.saving || !draft.dirty() {
-            return false;
-        }
         draft.saving = true;
         let profile = draft.profile.clone();
         self.send(Request::SaveProfile { profile });
@@ -267,8 +289,7 @@ impl Model {
         }
         let quiet = now.saturating_sub(draft.edited_at) >= AUTO_APPLY_QUIET;
         let refused = draft.rejected.as_ref() == Some(&draft.profile);
-        let due = self.auto_apply && draft.dirty() && !draft.saving && quiet && !refused && self.stale.is_none();
-        if due {
+        if self.auto_apply && quiet && !refused && self.stale.is_none() && self.can_save().is_ok() {
             self.apply_draft();
         }
     }
@@ -278,9 +299,16 @@ impl Model {
             Inbox::Connected => {
                 self.connection = Connection::Online;
                 self.starting_daemon = false;
-                if self.draft.as_ref().is_none_or(|draft| !draft.dirty()) {
-                    self.draft = None;
-                    self.stale = None;
+                match self.draft.as_mut().filter(|draft| draft.dirty()) {
+                    Some(draft) => {
+                        draft.rejected = None;
+                        let name = draft.profile.name.clone();
+                        self.send(Request::GetProfile { name });
+                    }
+                    None => {
+                        self.draft = None;
+                        self.stale = None;
+                    }
                 }
                 self.send(Request::GetState);
                 self.send(Request::GetSettings);
@@ -298,11 +326,31 @@ impl Model {
                 self.starting_daemon = false;
                 self.toast(message);
             }
+            Inbox::RequestFailed(request, message) => self.request_failed(*request, message),
             Inbox::Reply(pair) => {
                 let (request, reply) = *pair;
                 self.reply(request, reply);
             }
             Inbox::Event(event) => self.event(event),
+        }
+    }
+
+    fn drafted(&mut self, name: &str) -> Option<&mut Draft> {
+        self.draft.as_mut().filter(|draft| draft.profile.name == name)
+    }
+
+    fn request_failed(&mut self, request: Request, message: String) {
+        self.toast(message);
+        match request {
+            Request::SaveProfile { profile } => {
+                if self.pending_rename.as_ref().is_some_and(|pending| pending.new == profile.name) {
+                    self.pending_rename = None;
+                } else if let Some(draft) = self.drafted(&profile.name) {
+                    draft.saving = false;
+                }
+            }
+            Request::SetBrightness { .. } => self.device_form.brightness = None,
+            _ => {}
         }
     }
 
@@ -312,7 +360,7 @@ impl Model {
         }
         match (request, reply) {
             (Request::SaveProfile { profile }, Reply::Error { message }) => {
-                if let Some(draft) = self.draft.as_mut() {
+                if let Some(draft) = self.drafted(&profile.name) {
                     draft.saving = false;
                     draft.rejected = Some(profile);
                 }
@@ -368,9 +416,7 @@ impl Model {
     }
 
     fn accept_saved(&mut self, profile: Profile) {
-        if let Some(draft) = self.draft.as_mut()
-            && draft.profile.name == profile.name
-        {
+        if let Some(draft) = self.drafted(&profile.name) {
             draft.saved = profile;
             draft.saving = false;
             draft.rejected = None;
@@ -781,6 +827,107 @@ mod tests {
         model.tick(Duration::from_secs(1));
         model.tick(Duration::from_secs(5));
         assert!(model.take_effects().is_empty());
+    }
+
+    fn changed_apps(name: &str, apps: &[&str]) -> Profile {
+        let mut changed = profile(name);
+        changed.apps = apps.iter().map(|app| (*app).to_owned()).collect();
+        changed
+    }
+
+    fn reconnect(model: &mut Model, on_disk: Profile) {
+        model.apply(Inbox::Disconnected("gone".into()));
+        model.apply(Inbox::Connected);
+        let name = on_disk.name.clone();
+        assert_eq!(sent(model), [get_profile(&name), Request::GetState, Request::GetSettings]);
+        model.apply(Inbox::reply(get_profile(&name), Reply::Profile { profile: on_disk }));
+        model.apply(Inbox::reply(Request::GetState, Reply::State { state: state(&name, &[&name]) }));
+    }
+
+    fn auto_save(model: &mut Model, from: Duration) -> Vec<Request> {
+        model.tick(from);
+        model.tick(from + AUTO_APPLY_QUIET * 2);
+        sent(model)
+    }
+
+    #[test]
+    fn a_lost_connection_during_a_save_is_retried_after_reconnecting() {
+        let mut model = online("default", &["default"]);
+        model.tick(Duration::ZERO);
+        edit(&mut model);
+        let requests = auto_save(&mut model, Duration::from_secs(1));
+        let [save @ Request::SaveProfile { .. }] = requests.as_slice() else { panic!("expected a save: {requests:?}") };
+        let save = save.clone();
+        model.apply(Inbox::request_failed(save, "cannot reach k100d"));
+        assert_eq!(model.toasts, ["cannot reach k100d"]);
+        let draft = model.draft.as_ref().unwrap();
+        assert!(!draft.saving && draft.rejected.is_none());
+        reconnect(&mut model, profile("default"));
+        assert!(model.stale.is_none());
+        assert!(matches!(auto_save(&mut model, Duration::from_secs(10)).as_slice(), [Request::SaveProfile { .. }]));
+    }
+
+    #[test]
+    fn a_profile_changed_on_disk_while_offline_raises_the_banner_after_reconnecting() {
+        let mut model = online("default", &["default"]);
+        model.tick(Duration::ZERO);
+        edit(&mut model);
+        reconnect(&mut model, changed_apps("default", &["other.exe"]));
+        assert!(model.stale.is_some());
+        assert_eq!(model.draft.as_ref().unwrap().profile.apps, ["game.exe"]);
+        assert!(auto_save(&mut model, Duration::from_secs(10)).is_empty());
+    }
+
+    #[test]
+    fn reconnecting_clears_an_earlier_refusal() {
+        let mut model = online("default", &["default"]);
+        edit(&mut model);
+        let draft = model.draft.as_mut().unwrap();
+        draft.rejected = Some(draft.profile.clone());
+        reconnect(&mut model, profile("default"));
+        assert!(model.draft.as_ref().unwrap().rejected.is_none());
+        assert!(matches!(auto_save(&mut model, Duration::from_secs(10)).as_slice(), [Request::SaveProfile { .. }]));
+    }
+
+    #[test]
+    fn nothing_is_saved_while_offline_or_before_the_state_arrives() {
+        let mut model = online("default", &["default"]);
+        model.tick(Duration::ZERO);
+        edit(&mut model);
+        model.apply(Inbox::Disconnected("gone".into()));
+        assert!(auto_save(&mut model, Duration::from_secs(1)).is_empty());
+        assert!(!model.apply_draft());
+        model.apply(Inbox::Connected);
+        sent(&mut model);
+        assert!(auto_save(&mut model, Duration::from_secs(5)).is_empty(), "the state has not arrived yet");
+        assert!(!model.apply_draft());
+        model.apply(Inbox::reply(get_profile("default"), Reply::Profile { profile: profile("default") }));
+        model.apply(Inbox::reply(Request::GetState, Reply::State { state: state("default", &["default"]) }));
+        assert!(matches!(auto_save(&mut model, Duration::from_secs(10)).as_slice(), [Request::SaveProfile { .. }]));
+    }
+
+    #[test]
+    fn a_refused_or_lost_save_of_another_profile_leaves_the_draft_alone() {
+        let mut model = online("default", &["default"]);
+        edit(&mut model);
+        assert!(model.apply_draft());
+        sent(&mut model);
+        model.create_profile("work").unwrap();
+        let [create] = sent(&mut model).try_into().unwrap();
+        model.apply(Inbox::reply(create.clone(), Reply::Error { message: "disk full".into() }));
+        model.apply(Inbox::request_failed(create.clone(), "cannot reach k100d"));
+        model.apply(Inbox::reply(create, Reply::Done));
+        let draft = model.draft.as_ref().unwrap();
+        assert!(draft.saving && draft.rejected.is_none() && draft.dirty());
+    }
+
+    #[test]
+    fn a_lost_brightness_write_reverts_the_shown_value() {
+        let mut model = online("default", &["default"]);
+        model.device_form.brightness = Some(30);
+        model.apply(Inbox::request_failed(Request::SetBrightness { percent: 30 }, "cannot reach k100d"));
+        assert_eq!(model.device_form.brightness, None);
+        assert_eq!(model.toasts, ["cannot reach k100d"]);
     }
 
     #[test]

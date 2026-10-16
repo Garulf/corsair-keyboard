@@ -68,9 +68,11 @@ fn spawn_worker(connector: Connector, requests: Receiver<Request>, inbox: Sender
     thread::spawn(move || {
         let mut cached: Option<Client> = None;
         for request in requests {
-            let reply = exchange(&connector, &mut cached, &request)
-                .unwrap_or_else(|failure| Reply::Error { message: failure.to_string() });
-            if !emit(&inbox, &wake, Inbox::reply(request, reply)) {
+            let message = match exchange(&connector, &mut cached, &request) {
+                Ok(reply) => Inbox::reply(request, reply),
+                Err(failure) => Inbox::request_failed(request, failure.to_string()),
+            };
+            if !emit(&inbox, &wake, message) {
                 return;
             }
         }
@@ -200,12 +202,13 @@ mod tests {
         let connector: Connector = Arc::new(|| Err(ClientError::Closed));
         let backend = Backend::spawn(connector, Arc::new(|| {}), Duration::from_millis(20));
         backend.send(Request::GetState);
+        let failed = |m: &Inbox| matches!(m, Inbox::RequestFailed(request, _) if **request == Request::GetState);
         let seen = collect(&backend, |seen| {
-            seen.iter().filter(|m| matches!(m, Inbox::Disconnected(_))).count() >= 2
-                && seen.iter().any(|m| matches!(m.as_reply(), Some((Request::GetState, Reply::Error { .. }))))
+            seen.iter().filter(|m| matches!(m, Inbox::Disconnected(_))).count() >= 2 && seen.iter().any(failed)
         });
         assert!(seen.iter().filter(|m| matches!(m, Inbox::Disconnected(_))).count() >= 2, "retries: {seen:?}");
-        assert!(seen.iter().any(|m| matches!(m.as_reply(), Some((Request::GetState, Reply::Error { .. })))));
+        assert!(seen.iter().any(failed), "{seen:?}");
+        assert!(!seen.iter().any(|m| m.as_reply().is_some()), "a lost request is not a daemon reply: {seen:?}");
     }
 
     #[test]

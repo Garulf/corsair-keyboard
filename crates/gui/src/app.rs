@@ -176,8 +176,9 @@ pub fn draft_bar(ui: &mut egui::Ui, model: &mut Model) {
         ui.label("Loading the profile...");
         return;
     };
-    let (name, dirty, saving) = (draft.profile.name.clone(), draft.dirty(), draft.saving);
+    let (name, dirty) = (draft.profile.name.clone(), draft.dirty());
     let problem = model.draft_problem();
+    let can_save = model.can_save().is_ok();
     let is_active = name == model.active_profile();
     let recording = model.recording();
     ui.horizontal(|ui| {
@@ -194,7 +195,7 @@ pub fn draft_bar(ui: &mut egui::Ui, model: &mut Model) {
         if recording && dirty {
             ui.weak("Finish or cancel the recording first");
         }
-        if ui.add_enabled(dirty && !saving && !recording && problem.is_none(), egui::Button::new("Apply")).clicked() {
+        if ui.add_enabled(can_save, egui::Button::new("Apply")).clicked() {
             model.apply_draft();
         }
         if ui.add_enabled(dirty, egui::Button::new("Revert")).clicked() {
