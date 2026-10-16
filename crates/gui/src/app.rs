@@ -176,6 +176,7 @@ pub fn draft_bar(ui: &mut egui::Ui, model: &mut Model) {
     let (name, dirty, saving) = (draft.profile.name.clone(), draft.dirty(), draft.saving);
     let problem = model.draft_problem();
     let is_active = name == model.active_profile();
+    let recording = model.recording();
     ui.horizontal(|ui| {
         ui.strong(if name.is_empty() { "(unnamed)" } else { name.as_str() });
         if !is_active {
@@ -187,7 +188,10 @@ pub fn draft_bar(ui: &mut egui::Ui, model: &mut Model) {
         if let Some(problem) = &problem {
             ui.colored_label(Color32::LIGHT_RED, problem);
         }
-        if ui.add_enabled(dirty && !saving && problem.is_none(), egui::Button::new("Apply")).clicked() {
+        if recording && dirty {
+            ui.weak("Finish or cancel the recording first");
+        }
+        if ui.add_enabled(dirty && !saving && !recording && problem.is_none(), egui::Button::new("Apply")).clicked() {
             model.apply_draft();
         }
         if ui.add_enabled(dirty, egui::Button::new("Revert")).clicked() {
@@ -276,6 +280,21 @@ mod tests {
         harness.run();
         assert!(harness.get_by_label("Apply").accesskit_node().is_disabled());
         harness.get_by_label_contains("needs a name");
+    }
+
+    #[test]
+    fn apply_is_disabled_while_a_macro_is_being_recorded() {
+        let mut model = online("games", &["games"]);
+        model.draft.as_mut().unwrap().profile.apps.push("game.exe".into());
+        model.state.as_mut().unwrap().recording = actions::RecorderState::Recording { key: 131 };
+        let mut harness = harness(model, draft_bar);
+        harness.run();
+        assert!(harness.get_by_label("Apply").accesskit_node().is_disabled());
+        harness.get_by_label("Finish or cancel the recording first");
+        harness.state_mut().state.as_mut().unwrap().recording = actions::RecorderState::Idle;
+        harness.run();
+        assert!(!harness.get_by_label("Apply").accesskit_node().is_disabled());
+        assert!(harness.query_by_label("Finish or cancel the recording first").is_none());
     }
 
     #[test]

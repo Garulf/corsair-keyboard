@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use std::time::Duration;
 
+use actions::RecorderState;
 use engine::{Layout, Zone};
 use ipc::{DaemonState, DeviceState, Event, Profile, Reply, Request, Settings};
 use k100::{Frame, Rgb};
@@ -208,8 +209,12 @@ impl Model {
         self.draft.as_ref().and_then(|draft| validate_profile(&draft.profile).err())
     }
 
+    pub fn recording(&self) -> bool {
+        self.state.as_ref().is_some_and(|state| state.recording != RecorderState::Idle)
+    }
+
     pub fn apply_draft(&mut self) -> bool {
-        if self.draft_problem().is_some() {
+        if self.recording() || self.draft_problem().is_some() {
             return false;
         }
         let Some(draft) = self.draft.as_mut() else { return false };
@@ -613,6 +618,37 @@ mod tests {
         assert!(matches!(sent(&mut model).as_slice(), [Request::SaveProfile { .. }]));
         model.tick(Duration::from_millis(3000));
         assert!(model.take_effects().is_empty(), "already saving");
+    }
+
+    #[test]
+    fn nothing_is_saved_while_the_recorder_is_not_idle() {
+        let mut model = online("default", &["default"]);
+        model.tick(Duration::ZERO);
+        model.state.as_mut().unwrap().recording = RecorderState::AwaitingKey;
+        edit(&mut model);
+        model.tick(Duration::from_secs(1));
+        model.tick(Duration::from_secs(10));
+        assert!(model.take_effects().is_empty(), "the quiet period passed but the recorder is waiting");
+        assert!(!model.apply_draft());
+        assert!(model.take_effects().is_empty());
+        assert!(!model.draft.as_ref().unwrap().saving);
+        model.state.as_mut().unwrap().recording = RecorderState::Recording { key: 131 };
+        model.tick(Duration::from_secs(20));
+        assert!(model.take_effects().is_empty(), "still recording");
+        model.state.as_mut().unwrap().recording = RecorderState::Idle;
+        model.tick(Duration::from_secs(21));
+        assert!(matches!(sent(&mut model).as_slice(), [Request::SaveProfile { .. }]));
+    }
+
+    #[test]
+    fn a_manual_apply_goes_out_once_the_recorder_is_idle() {
+        let mut model = online("default", &["default"]);
+        edit(&mut model);
+        model.state.as_mut().unwrap().recording = RecorderState::AwaitingKey;
+        assert!(!model.apply_draft());
+        model.state.as_mut().unwrap().recording = RecorderState::Idle;
+        assert!(model.apply_draft());
+        assert!(matches!(sent(&mut model).as_slice(), [Request::SaveProfile { .. }]));
     }
 
     #[test]
