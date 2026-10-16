@@ -682,7 +682,7 @@ impl Controller {
         if let Err(failure) = config.save_settings(&on_disk) {
             return error(format!("saving settings: {failure}"));
         }
-        self.settings = on_disk;
+        self.settings.polling_rate_hz = Some(hz);
         self.device_warning = None;
         Reply::Done
     }
@@ -783,7 +783,8 @@ impl Controller {
         if let Err(failure) = config.save_settings(&on_disk) {
             return error(format!("saving settings: {failure}"));
         }
-        self.settings = on_disk;
+        self.settings.brightness = on_disk.brightness;
+        self.brightness_changed_at = None;
         match self.apply_brightness() {
             Ok(()) => Reply::Done,
             Err(failure) => error(format!("keyboard rejected the brightness: {failure}")),
@@ -1767,5 +1768,42 @@ mod tests {
         let with_debounce = Settings { debounce: Some(ipc::Debounce { enabled: true, timeout: 30 }), ..bad_polling };
         rig.controller.reload_settings(Ok(with_debounce));
         assert_eq!(rig.controller.state().config_errors, polling_warning);
+    }
+
+    #[test]
+    fn a_brightness_save_keeps_a_direct_polling_edit_pending() {
+        let mut rig = rig(vec![profile("default")]);
+        let edited = Settings { polling_rate_hz: Some(500), ..Settings::default() };
+        rig.config.save_settings(&edited).unwrap();
+        assert_eq!(rig.controller.handle(Request::SetBrightness { percent: 40 }, &rig.config), Reply::Done);
+        rig.log.lock().unwrap().properties.clear();
+        rig.controller.reload_settings(rig.config.load_settings());
+        assert!(rig.log.lock().unwrap().properties.contains(&(0x01, 3)));
+    }
+
+    #[test]
+    fn a_polling_save_keeps_a_direct_dial_ring_edit_pending() {
+        let mut rig = rig(vec![profile("default")]);
+        let edited = Settings { dial_ring: DialRing::Continuous, ..Settings::default() };
+        rig.config.save_settings(&edited).unwrap();
+        assert_eq!(rig.controller.handle(Request::SetPollingRate { hz: 1000 }, &rig.config), Reply::Done);
+        let ring = |rig: &mut Rig| match rig.controller.handle(Request::GetSettings, &rig.config) {
+            Reply::Settings { settings } => settings.dial_ring,
+            other => panic!("expected settings, got {other:?}"),
+        };
+        assert_eq!(ring(&mut rig), DialRing::Temporary);
+        rig.controller.reload_settings(rig.config.load_settings());
+        assert_eq!(ring(&mut rig), DialRing::Continuous);
+    }
+
+    #[test]
+    fn an_explicit_brightness_supersedes_a_pending_dial_change() {
+        let mut rig = rig(vec![profile("default")]);
+        rig.controller.input(InputEvent::DialCw, ms(0), &rig.config);
+        assert_eq!(rig.controller.handle(Request::SetBrightness { percent: 40 }, &rig.config), Reply::Done);
+        let edited = Settings { brightness: 70, ..Settings::default() };
+        rig.config.save_settings(&edited).unwrap();
+        rig.controller.reload_settings(rig.config.load_settings());
+        assert_eq!(rig.controller.state().brightness, 70);
     }
 }
