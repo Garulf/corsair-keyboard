@@ -117,13 +117,13 @@ impl Indicators {
         if active(self.profile_flash_until) {
             light(led::PROFILE, WHITE);
         }
-        if let Some((color, until)) = self.dial {
-            if until.is_none_or(|until| now < until) {
-                light(led::DIAL_KEY, color);
-                RING.for_each(|led| light(led, color));
-            }
+        if let Some((color, until)) = self.dial
+            && until.is_none_or(|until| now < until)
+        {
+            light(led::DIAL_KEY, color);
+            RING.for_each(|led| light(led, color));
         }
-        let blink_on = (now.as_millis() / BLINK.as_millis()) % 2 == 0;
+        let blink_on = (now.as_millis() / BLINK.as_millis()).is_multiple_of(2);
         match self.recording {
             RecorderState::Recording { .. } => light(led::MACRO_RECORDING_INDICATOR, WHITE),
             RecorderState::AwaitingKey if blink_on => light(led::MACRO_RECORDING_INDICATOR, WHITE),

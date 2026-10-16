@@ -17,10 +17,10 @@ pub fn bind_name(name: Name<'static>) -> io::Result<Listener> {
     if Stream::connect(name.borrow()).is_ok() {
         return Err(io::Error::new(io::ErrorKind::AlreadyExists, "k100d is already running"));
     }
-    if name.is_path() {
-        if let Some(path) = ipc::socket_path() {
-            let _ = std::fs::remove_file(path);
-        }
+    if name.is_path()
+        && let Some(path) = ipc::socket_path()
+    {
+        let _ = std::fs::remove_file(path);
     }
     ListenerOptions::new().name(name).create_sync()
 }

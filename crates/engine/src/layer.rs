@@ -98,10 +98,10 @@ struct Layer {
 
 impl Layer {
     fn visible(&mut self, time: Duration) -> bool {
-        if let Forced::Until(end) = self.forced {
-            if time >= end {
-                self.forced = Forced::No;
-            }
+        if let Forced::Until(end) = self.forced
+            && time >= end
+        {
+            self.forced = Forced::No;
         }
         self.enabled || self.forced != Forced::No
     }

@@ -98,10 +98,10 @@ fn build_steps(events: &[(Duration, Key, bool)]) -> Vec<MacroStep> {
         if !pressed && !down.contains(&key) {
             continue;
         }
-        if let Some(gap) = previous.map(|before| at.saturating_sub(before).as_millis()) {
-            if gap > 0 {
-                steps.push(MacroStep::Delay(u32::try_from(gap).unwrap_or(u32::MAX)));
-            }
+        if let Some(gap) = previous.map(|before| at.saturating_sub(before).as_millis())
+            && gap > 0
+        {
+            steps.push(MacroStep::Delay(u32::try_from(gap).unwrap_or(u32::MAX)));
         }
         previous = Some(at);
         if pressed {

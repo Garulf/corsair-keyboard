@@ -203,10 +203,10 @@ impl Controller {
         self.last_ping = now;
         self.device_warning = None;
         let _ = self.apply_brightness();
-        if let Some(hz) = self.settings.polling_rate_hz {
-            if let Err(message) = self.apply_polling_rate(hz) {
-                self.device_warning = Some(message);
-            }
+        if let Some(hz) = self.settings.polling_rate_hz
+            && let Err(message) = self.apply_polling_rate(hz)
+        {
+            self.device_warning = Some(message);
         }
         self.indicators.reset();
         self.write_key_mappings();
@@ -540,10 +540,10 @@ impl Controller {
             let mappings: KeyMappings = actions::key_mappings(&assignments, link.key_count());
             link.set_key_mappings(&mappings)
         });
-        if let Err(failure) = result {
-            if failure.status().is_some() {
-                self.device_warning = Some(format!("keyboard rejected the key assignments: {failure}"));
-            }
+        if let Err(failure) = result
+            && failure.status().is_some()
+        {
+            self.device_warning = Some(format!("keyboard rejected the key assignments: {failure}"));
         }
     }
 
@@ -640,11 +640,11 @@ impl Controller {
     ) -> Result<(), DeviceError> {
         let Some(link) = self.link.as_deref_mut() else { return Ok(()) };
         let result = operation(link);
-        if let Err(failure) = &result {
-            if failure.status().is_none() {
-                self.drop_link();
-                self.set_state(DeviceState::Paused { reason: failure.to_string() });
-            }
+        if let Err(failure) = &result
+            && failure.status().is_none()
+        {
+            self.drop_link();
+            self.set_state(DeviceState::Paused { reason: failure.to_string() });
         }
         result
     }
