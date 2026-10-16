@@ -103,7 +103,7 @@ fn open_url(url: &str) {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use super::*;
     use crate::config::{MacroStep, RepeatMode};
@@ -131,22 +131,34 @@ mod tests {
         handle.send(OutputCommand::Emit(vec![SinkEvent::Text("hi".into())]));
         let held = Program::macro_steps(&[MacroStep::Down(key("c")), MacroStep::Delay(10_000)], RepeatMode::Once);
         handle.send(OutputCommand::Press { source: 5, program: held });
-        std::thread::sleep(Duration::from_millis(100));
         drop(handle);
         thread.join().unwrap();
         assert_eq!(sink.take(), [down("b"), up("b"), SinkEvent::Text("hi".into()), down("c"), up("c")]);
     }
 
+    fn collect(sink: &RecordingSink, count: usize, within: Duration) -> Vec<SinkEvent> {
+        let deadline = Instant::now() + within;
+        let mut events = Vec::new();
+        while events.len() < count && Instant::now() < deadline {
+            events.extend(sink.take());
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        events
+    }
+
     #[test]
     fn waits_out_macro_delays() {
+        let delay = Duration::from_millis(400);
         let sink = RecordingSink::default();
         let (handle, thread) = spawn(Box::new(sink.clone()));
-        let steps = [MacroStep::Tap(key("a")), MacroStep::Delay(60), MacroStep::Tap(key("b"))];
+        let steps = [MacroStep::Tap(key("a")), MacroStep::Delay(400), MacroStep::Tap(key("b"))];
+        let pressed = Instant::now();
         handle.send(OutputCommand::Press { source: 1, program: Program::macro_steps(&steps, RepeatMode::Once) });
-        std::thread::sleep(Duration::from_millis(20));
-        assert_eq!(sink.take(), [down("a"), up("a")]);
-        std::thread::sleep(Duration::from_millis(150));
-        assert_eq!(sink.take(), [down("b"), up("b")]);
+        assert_eq!(collect(&sink, 2, Duration::from_secs(5)), [down("a"), up("a")]);
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(sink.take(), []);
+        assert_eq!(collect(&sink, 2, Duration::from_secs(5)), [down("b"), up("b")]);
+        assert!(pressed.elapsed() >= delay);
         drop(handle);
         thread.join().unwrap();
     }
