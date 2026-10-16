@@ -72,6 +72,18 @@ pub fn menu(state: &DaemonState) -> Vec<MenuEntry> {
     ]
 }
 
+pub fn expected_checks(entries: &[MenuEntry]) -> Vec<(String, bool)> {
+    let mut checks = Vec::new();
+    for entry in entries {
+        match entry {
+            MenuEntry::Check { id, checked, .. } => checks.push((id.clone(), *checked)),
+            MenuEntry::Submenu { entries, .. } => checks.extend(expected_checks(entries)),
+            MenuEntry::Item { .. } | MenuEntry::Separator => {}
+        }
+    }
+    checks
+}
+
 pub fn parse_command(id: &str) -> Option<TrayCommand> {
     match id {
         "open" => Some(TrayCommand::Open),
@@ -203,6 +215,15 @@ mod tests {
         let MenuEntry::Submenu { entries: profiles, .. } = &entries[2] else { panic!() };
         assert_eq!(profiles.len(), 1);
         assert!(matches!(&profiles[0], MenuEntry::Item { enabled: false, .. }));
+    }
+
+    #[test]
+    fn expected_checks_flatten_nested_check_items() {
+        assert_eq!(
+            expected_checks(&menu(&state())),
+            [("profile:default".to_owned(), false), ("profile:games".to_owned(), true)]
+        );
+        assert!(expected_checks(&menu(&DaemonState::default())).is_empty());
     }
 
     #[test]

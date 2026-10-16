@@ -8,7 +8,9 @@ use tray_icon::menu::{CheckMenuItem, IsMenuItem, Menu, MenuEvent, MenuItem, Pred
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
 use crate::runtime::{Command, SUBSCRIBER_QUEUE};
-use crate::tray_menu::{self, ICON_SIZE, MenuEntry, TrayCommand, dispatch, fetch_state, open_gui, parse_command};
+use crate::tray_menu::{
+    self, ICON_SIZE, MenuEntry, TrayCommand, dispatch, expected_checks, fetch_state, open_gui, parse_command,
+};
 
 const LOOP_TICK: Duration = Duration::from_millis(50);
 const REFRESH_EVERY: Duration = Duration::from_secs(5);
@@ -48,7 +50,7 @@ fn run(commands: &Sender<Command>, stopped: &Receiver<()>) {
         return;
     }
     let state = fetch_state(commands).unwrap_or_default();
-    let (tray, mut shown) = match create(&state) {
+    let (tray, mut checks, mut shown) = match create(&state) {
         Ok(created) => created,
         Err(message) => {
             eprintln!("k100d: tray unavailable: {message}");
@@ -59,9 +61,11 @@ fn run(commands: &Sender<Command>, stopped: &Receiver<()>) {
     let mut next_refresh = Instant::now() + REFRESH_EVERY;
     loop {
         pump();
+        let mut due = Instant::now() >= next_refresh;
         while let Ok(event) = MenuEvent::receiver().try_recv() {
             if let Some(command) = parse_command(&event.id().0) {
                 dispatch(command, commands, open_gui);
+                due = true;
             }
         }
         while let Ok(event) = TrayIconEvent::receiver().try_recv() {
@@ -69,7 +73,6 @@ fn run(commands: &Sender<Command>, stopped: &Receiver<()>) {
                 dispatch(TrayCommand::Open, commands, open_gui);
             }
         }
-        let mut due = Instant::now() >= next_refresh;
         match events.recv_timeout(LOOP_TICK) {
             Ok(Reply::Event { event }) => {
                 due |= matches!(event, Event::ProfileChanged { .. } | Event::DeviceState { .. });
@@ -84,7 +87,7 @@ fn run(commands: &Sender<Command>, stopped: &Receiver<()>) {
         }
         if due {
             next_refresh = Instant::now() + REFRESH_EVERY;
-            refresh(&tray, commands, &mut shown);
+            refresh(&tray, commands, &mut checks, &mut shown);
         }
         if !matches!(stopped.try_recv(), Err(TryRecvError::Empty)) {
             return;
@@ -98,29 +101,31 @@ fn subscribe(commands: &Sender<Command>) -> Option<Receiver<Reply>> {
     Some(receiver)
 }
 
-fn create(state: &DaemonState) -> Result<(TrayIcon, Shown), String> {
+fn create(state: &DaemonState) -> Result<(TrayIcon, Vec<CheckMenuItem>, Shown), String> {
     let shown = shown_for(state);
+    let (menu, checks) = build_menu(&shown.entries)?;
     let tray = TrayIconBuilder::new()
-        .with_menu(Box::new(build_menu(&shown.entries)?))
+        .with_menu(Box::new(menu))
         .with_tooltip(&shown.tooltip)
         .with_icon(icon(&shown.device)?)
         .build()
         .map_err(|failure| failure.to_string())?;
-    Ok((tray, shown))
+    Ok((tray, checks, shown))
 }
 
-fn refresh(tray: &TrayIcon, commands: &Sender<Command>, shown: &mut Shown) {
+fn refresh(tray: &TrayIcon, commands: &Sender<Command>, checks: &mut Vec<CheckMenuItem>, shown: &mut Shown) {
     let Some(state) = fetch_state(commands) else { return };
     let next = shown_for(&state);
-    if next == *shown {
-        return;
-    }
     if next.entries != shown.entries
-        && let Ok(menu) = build_menu(&next.entries)
+        && let Ok((menu, rebuilt)) = build_menu(&next.entries)
     {
         tray.set_menu(Some(Box::new(menu)));
+        *checks = rebuilt;
     }
-    let _ = tray.set_tooltip(Some(&next.tooltip));
+    resync_checks(checks, &next.entries);
+    if next.tooltip != shown.tooltip {
+        let _ = tray.set_tooltip(Some(&next.tooltip));
+    }
     if next.device != shown.device
         && let Ok(icon) = icon(&next.device)
     {
@@ -129,29 +134,40 @@ fn refresh(tray: &TrayIcon, commands: &Sender<Command>, shown: &mut Shown) {
     *shown = next;
 }
 
+fn resync_checks(checks: &[CheckMenuItem], entries: &[MenuEntry]) {
+    for (id, checked) in expected_checks(entries) {
+        if let Some(item) = checks.iter().find(|item| item.id().0 == id) {
+            item.set_checked(checked);
+        }
+    }
+}
+
 fn icon(device: &DeviceState) -> Result<Icon, String> {
     Icon::from_rgba(tray_menu::icon_rgba(device), ICON_SIZE, ICON_SIZE).map_err(|failure| failure.to_string())
 }
 
-fn build_menu(entries: &[MenuEntry]) -> Result<Menu, String> {
+fn build_menu(entries: &[MenuEntry]) -> Result<(Menu, Vec<CheckMenuItem>), String> {
     let menu = Menu::new();
+    let mut checks = Vec::new();
     for entry in entries {
-        menu.append(&*to_item(entry)?).map_err(|failure| failure.to_string())?;
+        menu.append(&*to_item(entry, &mut checks)?).map_err(|failure| failure.to_string())?;
     }
-    Ok(menu)
+    Ok((menu, checks))
 }
 
-fn to_item(entry: &MenuEntry) -> Result<Box<dyn IsMenuItem>, String> {
+fn to_item(entry: &MenuEntry, checks: &mut Vec<CheckMenuItem>) -> Result<Box<dyn IsMenuItem>, String> {
     let item: Box<dyn IsMenuItem> = match entry {
         MenuEntry::Item { id, text, enabled } => Box::new(MenuItem::with_id(id.as_str(), text, *enabled, None)),
         MenuEntry::Check { id, text, checked } => {
-            Box::new(CheckMenuItem::with_id(id.as_str(), text, true, *checked, None))
+            let item = CheckMenuItem::with_id(id.as_str(), text, true, *checked, None);
+            checks.push(item.clone());
+            Box::new(item)
         }
         MenuEntry::Separator => Box::new(PredefinedMenuItem::separator()),
         MenuEntry::Submenu { text, entries } => {
             let submenu = Submenu::new(text, true);
             for child in entries {
-                submenu.append(&*to_item(child)?).map_err(|failure| failure.to_string())?;
+                submenu.append(&*to_item(child, checks)?).map_err(|failure| failure.to_string())?;
             }
             Box::new(submenu)
         }
