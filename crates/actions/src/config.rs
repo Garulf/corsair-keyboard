@@ -234,6 +234,9 @@ pub fn validate(assignments: &[Assignment], dial: &DialConfig) -> Result<(), Str
         let Some(index) = key.index() else {
             return Err(format!("{key} is not a key on the keyboard"));
         };
+        if !key.is_on_k100() {
+            return Err(format!("{key} is not on the K100"));
+        }
         if PROTECTED_KEYS.contains(&index) {
             return Err(format!("{key} cannot be reassigned"));
         }
@@ -394,6 +397,8 @@ counter_clockwise = { type = "remap", key = "volume_down" }
             (vec![assign("dial", remap("a"))], "cannot be reassigned"),
             (vec![assign("win_lock", remap("a"))], "cannot be reassigned"),
             (vec![assign("f13", remap("a"))], "not a key on the keyboard"),
+            (vec![assign("mr", remap("a"))], "mr is not on the K100"),
+            (vec![assign("brightness", remap("a"))], "brightness is not on the K100"),
             (vec![assign("g1", remap("a")), assign("g1", remap("b"))], "assigned twice"),
             (vec![assign("g1", Action::Macro { steps: Vec::new(), mode: RepeatMode::Once })], "no steps"),
             (vec![assign("g1", Action::SetBrightness { percent: 101 })], "0 to 100"),

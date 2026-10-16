@@ -118,6 +118,7 @@ pub fn format_state(state: &DaemonState) -> String {
 pub fn key_list() -> String {
     actions::all()
         .iter()
+        .filter(|def| def.index.is_none() || def.is_on_k100())
         .map(|def| {
             let index = def.index.map_or("-".to_owned(), |index| index.to_string());
             let note = if def.output.is_some() { "" } else { "  input only" };
@@ -169,6 +170,7 @@ mod tests {
         assert!(text.lines().any(|line| line.starts_with("caps_lock") && line.contains("57")), "{text}");
         assert!(text.lines().any(|line| line.starts_with("g1") && line.contains("input only")), "{text}");
         assert!(text.lines().any(|line| line.starts_with("f13") && line.contains('-')), "{text}");
+        assert!(!text.lines().any(|line| line.starts_with("mr ") || line.starts_with("brightness")), "{text}");
     }
 
     #[test]

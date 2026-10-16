@@ -22,6 +22,14 @@ pub struct KeyDef {
     pub output: Option<Output>,
 }
 
+const MISSING_ON_K100: [u8; 2] = [113, 127];
+
+impl KeyDef {
+    pub fn is_on_k100(&self) -> bool {
+        self.index.is_some_and(|index| !MISSING_ON_K100.contains(&index))
+    }
+}
+
 const fn plain(name: &'static str, index: u8, scan: u16) -> KeyDef {
     KeyDef { name, index: Some(index), output: Some(Output { scan, vk: 0, evdev: scan }) }
 }
@@ -211,6 +219,10 @@ impl Key {
         self.0.output
     }
 
+    pub fn is_on_k100(self) -> bool {
+        self.0.is_on_k100()
+    }
+
     pub fn is_modifier(self) -> bool {
         matches!(self.0.index, Some(105..=112))
     }
@@ -277,6 +289,10 @@ mod tests {
         assert_eq!((f13.index(), f13.output()), (None, Some(Output { scan: 0, vk: 0x7C, evdev: 183 })));
         assert_eq!(Key::from_index(128).unwrap().name(), "profile");
         assert!(Key::named("left_shift").unwrap().is_modifier());
+        assert!(a.is_on_k100() && g1.is_on_k100());
+        assert!(!Key::named("mr").unwrap().is_on_k100());
+        assert!(!Key::named("brightness").unwrap().is_on_k100());
+        assert!(!f13.is_on_k100());
         assert!(!a.is_modifier());
     }
 
