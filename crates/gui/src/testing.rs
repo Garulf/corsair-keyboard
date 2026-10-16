@@ -48,3 +48,12 @@ pub fn sent(model: &mut Model) -> Vec<Request> {
         })
         .collect()
 }
+
+pub fn copy(model: &Model) -> Model {
+    let mut copy = Model::new();
+    copy.connection = model.connection.clone();
+    copy.state = model.state.clone();
+    copy.settings = model.settings.clone();
+    copy.draft = model.draft.clone();
+    copy
+}

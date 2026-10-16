@@ -7,6 +7,7 @@ use ipc::{DaemonState, DeviceState, Event, Profile, Reply, Request, Settings};
 use k100::{Frame, Rgb};
 
 use crate::canvas::CanvasState;
+use crate::device::DeviceForm;
 
 pub const AUTO_APPLY_QUIET: Duration = Duration::from_millis(400);
 const MAX_TOASTS: usize = 4;
@@ -25,10 +26,11 @@ pub enum Pane {
     Lighting,
     Keys,
     Dial,
+    Device,
 }
 
 impl Pane {
-    pub const ALL: &[Pane] = &[Pane::Overview, Pane::Lighting, Pane::Keys, Pane::Dial];
+    pub const ALL: &[Pane] = &[Pane::Overview, Pane::Lighting, Pane::Keys, Pane::Dial, Pane::Device];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -36,6 +38,7 @@ impl Pane {
             Pane::Lighting => "Lighting",
             Pane::Keys => "Keys",
             Pane::Dial => "Dial",
+            Pane::Device => "Device",
         }
     }
 
@@ -45,6 +48,7 @@ impl Pane {
             Pane::Lighting => true,
             Pane::Keys => true,
             Pane::Dial => true,
+            Pane::Device => false,
         }
     }
 }
@@ -151,6 +155,7 @@ pub struct Model {
     pub dial: usize,
     pub name_edit: Option<(String, String)>,
     pub paint: Rgb,
+    pub device_form: DeviceForm,
     effects: Vec<Effect>,
 }
 
@@ -180,6 +185,7 @@ impl Model {
             dial: 0,
             name_edit: None,
             paint: Rgb::new(255, 255, 255),
+            device_form: DeviceForm::default(),
             effects: Vec::new(),
         }
     }
@@ -299,6 +305,11 @@ impl Model {
                     draft.rejected = Some(profile);
                 }
                 self.toast(message);
+            }
+            (Request::SetBrightness { .. }, Reply::Error { message }) => {
+                self.device_form.brightness = None;
+                self.toast(message);
+                self.send(Request::GetState);
             }
             (_, Reply::Error { message }) => self.toast(message),
             (Request::GetState, Reply::State { state }) => self.accept_state(state),
@@ -479,6 +490,22 @@ mod tests {
         assert_eq!(model.take_effects(), [Effect::StartDaemon]);
         model.apply(Inbox::Connected);
         assert!(!model.starting_daemon);
+    }
+
+    #[test]
+    fn a_refused_brightness_write_reverts_the_shown_value_and_refetches_state() {
+        let mut model = online("default", &["default"]);
+        crate::device::commit_brightness(&mut model, 30);
+        assert_eq!(model.state.as_ref().unwrap().brightness, 30);
+        model.take_effects();
+        let request = Request::SetBrightness { percent: 30 };
+        model.device_form.brightness = Some(30);
+        model.apply(Inbox::reply(request, Reply::Error { message: "settings.toml does not parse".into() }));
+        assert_eq!(model.toasts, ["settings.toml does not parse"]);
+        assert_eq!(model.device_form.brightness, None);
+        assert_eq!(sent(&mut model), [Request::GetState]);
+        model.apply(Inbox::reply(Request::GetState, Reply::State { state: state("default", &["default"]) }));
+        assert_eq!(model.state.as_ref().unwrap().brightness, 80);
     }
 
     #[test]

@@ -96,6 +96,7 @@ pub fn root(ui: &mut egui::Ui, model: &mut Model) {
             Pane::Lighting => crate::layers::lighting(ui, model),
             Pane::Keys => crate::assignments::keys(ui, model),
             Pane::Dial => crate::dial::dial(ui, model),
+            Pane::Device => crate::device::device(ui, model),
         }
     });
 }
@@ -336,6 +337,23 @@ mod tests {
         harness.run();
         assert_eq!(harness.state().pane, Pane::Lighting);
         harness.get_by_label("Select all");
+    }
+
+    #[test]
+    fn the_device_pane_is_in_the_navigation_and_leaves_the_profile_alone() {
+        assert!(!Pane::Device.edits_profile());
+        let mut model = online("games", &["games"]);
+        model.draft.as_mut().unwrap().profile.apps.push("game.exe".into());
+        model.pane = Pane::Lighting;
+        let mut harness = harness(model, root);
+        harness.run();
+        harness.get_by_label("Unsaved changes");
+        harness.get_by_label("Device").click();
+        harness.run();
+        assert_eq!(harness.state().pane, Pane::Device);
+        harness.get_by_label("Apply debounce");
+        assert!(harness.query_by_label("Unsaved changes").is_none());
+        assert!(harness.state().draft.as_ref().unwrap().dirty());
     }
 
     #[test]

@@ -3,6 +3,7 @@ mod app;
 mod assignments;
 mod canvas;
 mod colors;
+mod device;
 mod dial;
 mod io;
 mod layers;
