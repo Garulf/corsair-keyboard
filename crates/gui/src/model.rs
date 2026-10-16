@@ -310,9 +310,18 @@ impl Model {
         self.stale = None;
     }
 
-    pub fn discard_draft(&mut self) {
-        self.draft = None;
+    fn replace_draft(&mut self, draft: Option<Draft>) {
+        let unchanged = matches!((&self.draft, &draft), (Some(old), Some(new)) if old.profile == new.profile);
+        if !unchanged {
+            self.name_edit = None;
+        }
+        self.draft = draft;
         self.stale = None;
+        self.pending_macro = None;
+    }
+
+    pub fn discard_draft(&mut self) {
+        self.replace_draft(None);
         let active = self.active_profile().to_owned();
         if !active.is_empty() {
             self.send(Request::GetProfile { name: active });
@@ -343,10 +352,7 @@ impl Model {
                         let name = draft.profile.name.clone();
                         self.send(Request::GetProfile { name });
                     }
-                    None => {
-                        self.draft = None;
-                        self.stale = None;
-                    }
+                    None => self.replace_draft(None),
                 }
                 self.send(Request::GetState);
                 self.send(Request::GetSettings);
@@ -439,9 +445,7 @@ impl Model {
 
     fn accept_profile(&mut self, profile: Profile) {
         let Some(draft) = self.draft.as_mut().filter(|draft| draft.dirty()) else {
-            self.draft = Some(Draft::new(profile));
-            self.stale = None;
-            self.pending_macro = None;
+            self.replace_draft(Some(Draft::new(profile)));
             return;
         };
         if draft.profile.name != profile.name {
@@ -450,6 +454,7 @@ impl Model {
         let recorded = self.pending_macro.take();
         if draft.profile == profile {
             draft.saved = profile;
+            self.stale = None;
         } else if let Some(key) = recorded {
             if without_key(&draft.saved, &key) == without_key(&profile, &key) {
                 take_assignment(&mut draft.profile, &profile, &key);
@@ -1071,6 +1076,45 @@ mod tests {
         model.apply(Inbox::request_failed(Request::SetBrightness { percent: 30 }, "cannot reach k100d"));
         assert_eq!(model.device_form.brightness, None);
         assert_eq!(model.toasts, ["cannot reach k100d"]);
+    }
+
+    #[test]
+    fn a_draft_that_matches_the_disk_again_drops_the_banner() {
+        let mut model = online("default", &["default"]);
+        edit(&mut model);
+        let mine = model.draft.as_ref().unwrap().profile.clone();
+        model.apply(Inbox::reply(get_profile("default"), Reply::Profile { profile: changed_apps("default", &["x"]) }));
+        assert!(model.stale.is_some());
+        model.apply(Inbox::reply(get_profile("default"), Reply::Profile { profile: mine }));
+        assert!(model.stale.is_none());
+        model.tick(Duration::ZERO);
+        edit(&mut model);
+        assert!(matches!(auto_save(&mut model, Duration::from_secs(1)).as_slice(), [Request::SaveProfile { .. }]));
+    }
+
+    #[test]
+    fn a_buffered_layer_name_is_dropped_whenever_the_draft_is_dropped() {
+        let typing = || Some(("glow".to_owned(), "glowx".to_owned()));
+        let mut reconnected = online("default", &["default"]);
+        reconnected.name_edit = typing();
+        reconnected.apply(Inbox::Disconnected("gone".into()));
+        reconnected.apply(Inbox::Connected);
+        assert!(reconnected.name_edit.is_none());
+
+        let mut reverted = online("default", &["default"]);
+        reverted.name_edit = typing();
+        reverted.discard_draft();
+        assert!(reverted.name_edit.is_none());
+
+        let mut switched = online("default", &["default", "games"]);
+        switched.name_edit = typing();
+        switched.edit_profile("games").unwrap();
+        assert!(switched.name_edit.is_none());
+
+        let mut echoed = online("default", &["default"]);
+        echoed.name_edit = typing();
+        echoed.apply(Inbox::reply(get_profile("default"), Reply::Profile { profile: profile("default") }));
+        assert_eq!(echoed.name_edit, typing(), "an unchanged reload keeps what is being typed");
     }
 
     #[test]

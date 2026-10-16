@@ -164,6 +164,7 @@ impl Model {
         if self.draft.as_ref().is_some_and(Draft::dirty) {
             return Err("Apply or revert your edits first.".into());
         }
+        self.name_edit = None;
         self.send(Request::GetProfile { name: name.to_owned() });
         Ok(())
     }

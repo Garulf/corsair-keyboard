@@ -448,9 +448,10 @@ mod tests {
 
     use actions::{Action, Assignment, Key};
     use eframe::egui::accesskit::Role;
-    use egui_kittest::kittest::Queryable;
+    use egui_kittest::kittest::{NodeT, Queryable};
     use engine::effects::KeyColor;
     use engine::{EffectConfig, LayerConfig, NamedZone, Zone};
+    use ipc::{Reply, Request};
     use k100::Rgb;
 
     use super::*;
@@ -712,5 +713,57 @@ mod tests {
         harness.run();
         assert_eq!(names(harness.state()), ["a", "ab"]);
         assert!(harness.state().toasts[0].contains("two layers are called"));
+    }
+
+    fn type_a_name(harness: &mut egui_kittest::Harness<'_, Model>) {
+        harness.get_by_role(Role::TextInput).click();
+        harness.run();
+        harness.get_by_role(Role::TextInput).type_text("x");
+        harness.run();
+        assert_eq!(harness.state().name_edit, Some(("glow".into(), "glowx".into())));
+    }
+
+    fn blur_and_check(harness: &mut egui_kittest::Harness<'_, Model>, profile: &str) {
+        harness.run();
+        harness.get_by_label("Name").click();
+        harness.run();
+        let draft = harness.state().draft.as_ref().unwrap();
+        assert_eq!(draft.profile.name, profile);
+        assert_eq!(names(harness.state()), ["glow"]);
+        assert_eq!(harness.get_by_role(Role::TextInput).accesskit_node().value().as_deref(), Some("glow"));
+    }
+
+    fn glow_profile(name: &str) -> Profile {
+        let mut profile = crate::testing::profile(name);
+        profile.layers = vec![solid("glow")];
+        profile
+    }
+
+    #[test]
+    fn a_typed_name_is_not_replayed_onto_a_profile_loaded_meanwhile() {
+        let mut model = online("p", &["p", "games"]);
+        model.draft = Some(crate::model::Draft::new(glow_profile("p")));
+        let mut harness = harness(model, lighting);
+        harness.run();
+        type_a_name(&mut harness);
+        let games = glow_profile("games");
+        let reply = Reply::Profile { profile: games };
+        harness.state_mut().apply(crate::model::Inbox::reply(Request::GetProfile { name: "games".into() }, reply));
+        blur_and_check(&mut harness, "games");
+    }
+
+    #[test]
+    fn a_typed_name_is_not_replayed_after_reverting() {
+        let mut model = online("p", &["p"]);
+        model.draft = Some(crate::model::Draft::new(glow_profile("p")));
+        model.draft.as_mut().unwrap().profile.apps.push("game.exe".into());
+        let mut harness = harness(model, lighting);
+        harness.run();
+        type_a_name(&mut harness);
+        harness.state_mut().discard_draft();
+        harness.run();
+        let reply = Reply::Profile { profile: glow_profile("p") };
+        harness.state_mut().apply(crate::model::Inbox::reply(Request::GetProfile { name: "p".into() }, reply));
+        blur_and_check(&mut harness, "p");
     }
 }
