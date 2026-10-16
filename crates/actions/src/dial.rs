@@ -5,7 +5,7 @@ use k100::led;
 use crate::config::{DialConfig, DialMode, DialModeKind};
 use crate::intent::{BrightnessChange, Intent, one_shot};
 use crate::keys::Key;
-use crate::program::tap;
+use crate::program::{Program, tap};
 use crate::recorder::{Recorder, RecorderState};
 use crate::sink::{Axis, SinkEvent};
 use crate::worker::OutputCommand;
@@ -31,6 +31,7 @@ impl Dial {
         if self.index >= self.modes.len() {
             self.index = 0;
         }
+        self.alt_release_at = None;
     }
 
     pub fn index(&self) -> usize {
@@ -60,9 +61,9 @@ impl Dial {
     }
 
     pub fn rotate(&mut self, clockwise: bool, now: Duration) -> Vec<Intent> {
-        let mode = self.mode().clone();
+        let kind = self.mode().kind;
         let pick = |cw: &str, ccw: &str| key(if clockwise { cw } else { ccw });
-        match mode.kind {
+        match kind {
             DialModeKind::Brightness => {
                 vec![Intent::Brightness(if clockwise { BrightnessChange::Up } else { BrightnessChange::Down })]
             }
@@ -81,18 +82,22 @@ impl Dial {
                 SinkEvent::key(key("left_ctrl"), false),
             ]),
             DialModeKind::SwitchApps => {
-                let mut events = Vec::new();
+                let mut intents = Vec::new();
                 if self.alt_release_at.is_none() {
-                    events.push(SinkEvent::key(key("left_alt"), true));
+                    intents.push(Intent::Output(OutputCommand::Press {
+                        source: led::DIAL_KEY,
+                        program: Program::remap(key("left_alt"), &[]),
+                    }));
                 }
                 let shift: &[Key] = if clockwise { &[] } else { &[key("left_shift")] };
-                events.extend(tap(key("tab"), shift));
+                intents.extend(emit(tap(key("tab"), shift)));
                 self.alt_release_at = Some(now + SWITCH_APPS_HOLD);
-                emit(events)
+                intents
             }
             DialModeKind::Custom => {
-                let action = if clockwise { mode.clockwise } else { mode.counter_clockwise };
-                action.map(|action| one_shot(&action, led::DIAL_KEY)).unwrap_or_default()
+                let mode = self.mode();
+                let action = if clockwise { &mode.clockwise } else { &mode.counter_clockwise };
+                action.as_ref().map(|action| one_shot(action, led::DIAL_KEY)).unwrap_or_default()
             }
         }
     }
@@ -129,7 +134,7 @@ impl Dial {
 
     fn release_alt(&mut self) -> Vec<Intent> {
         match self.alt_release_at.take() {
-            Some(_) => emit(vec![SinkEvent::key(key("left_alt"), false)]),
+            Some(_) => vec![Intent::Output(OutputCommand::Release { source: led::DIAL_KEY })],
             None => Vec::new(),
         }
     }
@@ -149,7 +154,6 @@ mod tests {
     use crate::config::{Action, DialConfig, DialMode, DialModeKind};
     use crate::intent::ProfileTarget;
     use crate::keys::Key;
-    use crate::program::Program;
 
     fn ms(value: u64) -> Duration {
         Duration::from_millis(value)
@@ -240,17 +244,43 @@ mod tests {
         assert_eq!(emitted(dial.poll(ms(600), &mut recorder)), tap(key("play_pause"), &[]));
     }
 
+    fn alt_press() -> Intent {
+        Intent::Output(OutputCommand::Press { source: 137, program: Program::remap(key("left_alt"), &[]) })
+    }
+
+    fn alt_release() -> Intent {
+        Intent::Output(OutputCommand::Release { source: 137 })
+    }
+
+    fn tab_tap(modifiers: &[Key]) -> Intent {
+        Intent::Output(OutputCommand::Emit(tap(key("tab"), modifiers)))
+    }
+
     #[test]
     fn switch_apps_holds_alt_until_the_dial_rests() {
         let mut dial = dial_with(&[DialModeKind::SwitchApps]);
         let mut recorder = Recorder::default();
-        let alt_down = SinkEvent::key(key("left_alt"), true);
-        let mut first = vec![alt_down];
-        first.extend(tap(key("tab"), &[]));
-        assert_eq!(emitted(dial.rotate(true, ms(0))), first);
-        assert_eq!(emitted(dial.rotate(false, ms(300))), tap(key("tab"), &[key("left_shift")]));
+        assert_eq!(dial.rotate(true, ms(0)), [alt_press(), tab_tap(&[])]);
+        assert_eq!(dial.rotate(false, ms(300)), [tab_tap(&[key("left_shift")])]);
         assert!(dial.poll(ms(1099), &mut recorder).is_empty());
-        assert_eq!(emitted(dial.poll(ms(1100), &mut recorder)), [SinkEvent::key(key("left_alt"), false)]);
+        assert_eq!(dial.poll(ms(1100), &mut recorder), [alt_release()]);
+        assert!(dial.poll(ms(1200), &mut recorder).is_empty());
+    }
+
+    #[test]
+    fn a_dial_press_releases_a_held_alt() {
+        let mut dial = dial_with(&[DialModeKind::SwitchApps]);
+        dial.rotate(true, ms(0));
+        assert_eq!(dial.press(ms(100)), [alt_release()]);
+    }
+
+    #[test]
+    fn reconfigure_forgets_a_held_alt() {
+        let mut dial = dial_with(&[DialModeKind::SwitchApps]);
+        let mut recorder = Recorder::default();
+        dial.rotate(true, ms(0));
+        dial.reconfigure(&DialConfig { modes: vec![DialMode::builtin(DialModeKind::SwitchApps)] });
+        assert!(dial.poll(ms(2000), &mut recorder).is_empty());
     }
 
     #[test]
