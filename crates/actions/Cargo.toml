@@ -12,6 +12,7 @@ serde.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+bragi.workspace = true
 toml.workspace = true
 
 [target.'cfg(windows)'.dependencies]

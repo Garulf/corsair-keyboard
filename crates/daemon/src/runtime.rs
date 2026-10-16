@@ -96,7 +96,9 @@ pub fn run(
                 if let InputEvent::KeyDown(led) = event {
                     presses.push(KeyPress { led, at: started.elapsed() });
                 }
-                broadcast(&mut subscribers, input_event(event));
+                if let Some(event) = input_event(event) {
+                    broadcast(&mut subscribers, event);
+                }
             }
             Ok(Command::Reload) => {
                 controller.reload_settings(config.load_settings());
@@ -155,13 +157,14 @@ fn broadcast(subscribers: &mut Vec<SyncSender<Reply>>, event: Event) {
     });
 }
 
-fn input_event(event: InputEvent) -> Event {
-    match event {
+fn input_event(event: InputEvent) -> Option<Event> {
+    Some(match event {
         InputEvent::KeyDown(led) => Event::Key { led, pressed: true },
         InputEvent::KeyUp(led) => Event::Key { led, pressed: false },
         InputEvent::DialCw => Event::Dial { clockwise: true },
         InputEvent::DialCcw => Event::Dial { clockwise: false },
-    }
+        InputEvent::Property { .. } => return None,
+    })
 }
 
 fn spawn_input(mut input: Box<dyn InputSource>, sender: Sender<Command>) -> Arc<AtomicBool> {

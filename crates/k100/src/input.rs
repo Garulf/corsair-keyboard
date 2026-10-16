@@ -8,6 +8,7 @@ pub enum InputEvent {
     KeyUp(u8),
     DialCw,
     DialCcw,
+    Property { property: PropertyId, value: u32 },
 }
 
 #[derive(Debug, Default)]
@@ -22,6 +23,9 @@ impl KeyStateTracker {
             Notification::RelativePropertyChange { property, delta } if *property == PropertyId::DIAL_RING_ROTATION => {
                 let step = if *delta > 0 { InputEvent::DialCw } else { InputEvent::DialCcw };
                 vec![step; delta.unsigned_abs() as usize]
+            }
+            Notification::PropertyValueChange { property, value } => {
+                vec![InputEvent::Property { property: *property, value: *value }]
             }
             _ => Vec::new(),
         }
@@ -83,5 +87,15 @@ mod tests {
         assert_eq!(tracker.update(&turn(-1)), [InputEvent::DialCcw]);
         let other = Notification::RelativePropertyChange { property: PropertyId::BRIGHTNESS, delta: 3 };
         assert!(tracker.update(&other).is_empty());
+    }
+
+    #[test]
+    fn property_changes_pass_through() {
+        let mut tracker = KeyStateTracker::default();
+        let change = Notification::PropertyValueChange { property: PropertyId::WIN_LOCK_ENABLED, value: 1 };
+        assert_eq!(
+            tracker.update(&change),
+            [InputEvent::Property { property: PropertyId::WIN_LOCK_ENABLED, value: 1 }]
+        );
     }
 }
