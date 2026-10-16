@@ -12,7 +12,14 @@ use daemon::shutdown::{self, ReleaseSignal};
 use notify::{RecursiveMode, Watcher};
 
 fn main() -> ExitCode {
-    match run() {
+    let instance = match ipc::InstanceLock::acquire(&ipc::lock_path()) {
+        Ok(instance) => instance,
+        Err(error) => {
+            eprintln!("k100d: {error}");
+            return ExitCode::from(ipc::startup_exit_code(&error));
+        }
+    };
+    match run(instance) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("k100d: {error}");
@@ -21,7 +28,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn run() -> Result<(), Box<dyn std::error::Error>> {
+fn run(instance: ipc::InstanceLock) -> Result<(), Box<dyn std::error::Error>> {
     let mut config_dir = None;
     let mut exit_after = None;
     let mut no_tray = false;
@@ -34,7 +41,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             other => return Err(format!("unknown argument {other:?}").into()),
         }
     }
-    let instance = ipc::InstanceLock::acquire(&ipc::lock_path())?;
     let config = match config_dir {
         Some(path) => ConfigDir::new(path),
         None => ConfigDir::default_location().ok_or("no home directory")?,

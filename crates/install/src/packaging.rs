@@ -39,6 +39,13 @@ mod tests {
     }
 
     #[test]
+    fn the_service_does_not_restart_k100d_when_another_instance_holds_the_lock() {
+        let service = unix(SERVICE);
+        let expected = format!("RestartPreventExitStatus={}\n", ipc::ALREADY_RUNNING);
+        assert!(service.contains(&expected), "{service}");
+    }
+
+    #[test]
     fn desktop_files_are_complete() {
         let autostart = unix(AUTOSTART);
         let launcher = unix(LAUNCHER);

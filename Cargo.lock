@@ -1925,6 +1925,7 @@ name = "install"
 version = "0.1.0"
 dependencies = [
  "directories",
+ "ipc",
  "tempfile",
  "winreg",
 ]
