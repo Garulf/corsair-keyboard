@@ -97,6 +97,7 @@ pub struct Controller {
     applied: Profile,
     chosen: Option<String>,
     foreground: Option<String>,
+    manual_override: bool,
     compositor: Compositor,
     dispatcher: Dispatcher,
     output: Box<dyn OutputPort>,
@@ -141,6 +142,7 @@ impl Controller {
             applied,
             chosen: None,
             foreground: None,
+            manual_override: false,
             compositor,
             dispatcher,
             output,
@@ -276,6 +278,7 @@ impl Controller {
                     return error(format!("no profile named {name:?}"));
                 }
                 self.chosen = Some(name.clone());
+                self.manual_override = true;
                 self.activate(name);
                 Reply::Done
             }
@@ -344,6 +347,9 @@ impl Controller {
     }
 
     pub fn focus(&mut self, exe: Option<String>) {
+        if exe != self.foreground {
+            self.manual_override = false;
+        }
         self.foreground = exe;
         if self.settings.auto_switch {
             let target = self.preferred_profile();
@@ -355,7 +361,7 @@ impl Controller {
         let focused = self
             .foreground
             .as_deref()
-            .filter(|_| self.settings.auto_switch)
+            .filter(|_| self.settings.auto_switch && !self.manual_override)
             .and_then(|exe| crate::focus::profile_for(self.profiles.values(), exe));
         pick_active(&self.profiles, focused.as_deref().or(self.chosen.as_deref()), &self.settings.default_profile)
     }
@@ -415,6 +421,7 @@ impl Controller {
             Intent::SwitchProfile(target) => {
                 if let Some(name) = self.resolve_target(target) {
                     self.chosen = Some(name.clone());
+                    self.manual_override = true;
                     self.activate(name);
                 }
             }
@@ -900,6 +907,39 @@ mod tests {
         rig.controller.focus(Some(r"C:\Games\game.exe".into()));
         assert_eq!(rig.controller.state().active_profile, "games");
         rig.controller.focus(None);
+        assert_eq!(rig.controller.state().active_profile, "other");
+    }
+
+    fn rig_with_game_focused() -> Rig {
+        let games = Profile { apps: vec!["game.exe".into()], ..profile("games") };
+        let mut rig = rig(vec![profile("default"), games, profile("other")]);
+        rig.controller.focus(Some(r"C:\Games\game.exe".into()));
+        assert_eq!(rig.controller.state().active_profile, "games");
+        rig.controller.handle(Request::SetActiveProfile { name: "other".into() }, &rig.config);
+        rig
+    }
+
+    #[test]
+    fn a_manual_choice_survives_a_reload_while_the_app_stays_focused() {
+        let mut rig = rig_with_game_focused();
+        let games = Profile { apps: vec!["game.exe".into()], ..profile("games") };
+        rig.controller.reload(vec![profile("default"), games, profile("other")], vec![], vec![]);
+        assert_eq!(rig.controller.state().active_profile, "other");
+    }
+
+    #[test]
+    fn a_manual_choice_ends_when_the_foreground_app_changes() {
+        let mut rig = rig_with_game_focused();
+        rig.controller.focus(Some(r"C:\Windows\notepad.exe".into()));
+        assert_eq!(rig.controller.state().active_profile, "other");
+        rig.controller.focus(Some(r"C:\Games\game.exe".into()));
+        assert_eq!(rig.controller.state().active_profile, "games");
+    }
+
+    #[test]
+    fn repeating_the_same_foreground_app_keeps_the_manual_choice() {
+        let mut rig = rig_with_game_focused();
+        rig.controller.focus(Some(r"C:\Games\game.exe".into()));
         assert_eq!(rig.controller.state().active_profile, "other");
     }
 
