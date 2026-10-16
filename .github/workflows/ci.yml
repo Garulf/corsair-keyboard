@@ -27,3 +27,10 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libayatana-appindicator3-dev
       - run: cargo clippy -p daemon --features tray --all-targets -- -D warnings
       - run: cargo test -p daemon --features tray --lib
+  readme:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: Garulf/readwright@v0.5.0
+        with:
+          mode: check
