@@ -1,6 +1,7 @@
 mod client;
 mod frame;
 mod framing;
+pub mod launcher;
 mod messages;
 mod settings;
 
