@@ -85,10 +85,10 @@ impl Profile {
         actions::validate(&self.assignments, &self.dial)?;
         let dial_actions = self.dial.modes.iter().flat_map(|mode| mode.actions());
         for action in self.assignments.iter().map(|assignment| &assignment.action).chain(dial_actions) {
-            if let actions::Action::LightingTrigger { layer, .. } = action
-                && !self.layers.iter().any(|existing| existing.name == *layer)
-            {
-                return Err(format!("lighting trigger names the unknown layer {layer:?}"));
+            if let actions::Action::LightingTrigger { layer, .. } = action {
+                if !self.layers.iter().any(|existing| existing.name == *layer) {
+                    return Err(format!("lighting trigger names the unknown layer {layer:?}"));
+                }
             }
         }
         Ok(())
