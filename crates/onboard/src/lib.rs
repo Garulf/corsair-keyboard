@@ -1,6 +1,7 @@
 use std::ops::RangeInclusive;
 
 mod action;
+mod convert;
 mod file;
 mod lighting;
 mod mappings;
@@ -11,6 +12,7 @@ mod wire;
 mod fixtures;
 
 pub use action::{MacroAction, MacroEvent, RemapAction, RemapTarget, TextAction, execution};
+pub use convert::{MAX_EFFECTS, Report, convert_layers};
 pub use file::{StoredFile, decode as decode_file};
 pub use lighting::{
     CommonLighting, Direction, EffectDuration, EffectKind, HwColor, LightingEntry, LightingsList, SPECIFIED_COLORS,
