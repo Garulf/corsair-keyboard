@@ -21,6 +21,7 @@ const FRAGMENT_FRAMES: usize = 480;
 const READ_TIMEOUT: Duration = Duration::from_millis(200);
 const REPLY_TIMEOUT: Duration = Duration::from_secs(1);
 const COMMAND_CHANNEL: u32 = u32::MAX;
+const MAX_PACKET_BYTES: usize = 16 * 1024 * 1024;
 
 pub struct PulseMonitor;
 
@@ -147,7 +148,7 @@ impl Connection {
             Err(error) => return Err(error.to_string()),
         }
         let descriptor = protocol::read_descriptor(&mut self.socket).map_err(server_error)?;
-        packet.resize(descriptor.length as usize, 0);
+        packet.resize(packet_length(descriptor.length)?, 0);
         self.socket.read_exact(packet).map_err(|error| error.to_string())?;
         Ok(Some(descriptor.channel))
     }
@@ -158,6 +159,14 @@ impl Connection {
             Ok((_, Command::RecordStreamKilled(_)))
         )
     }
+}
+
+fn packet_length(declared: u32) -> Result<usize, String> {
+    let length = declared as usize;
+    if length > MAX_PACKET_BYTES {
+        return Err(format!("the audio server sent a {length} byte packet, more than the {MAX_PACKET_BYTES} allowed"));
+    }
+    Ok(length)
 }
 
 fn server_error(error: ProtocolError) -> String {
@@ -211,6 +220,17 @@ mod tests {
     #[test]
     fn a_failed_default_sink_check_counts_as_no_change() {
         assert!(!has_moved(c"speakers", None));
+    }
+
+    #[test]
+    fn a_packet_up_to_the_server_frame_limit_is_accepted() {
+        assert_eq!(packet_length(16 * 1024 * 1024), Ok(16 * 1024 * 1024));
+    }
+
+    #[test]
+    fn a_packet_beyond_the_server_frame_limit_is_rejected() {
+        assert!(packet_length(16 * 1024 * 1024 + 1).is_err());
+        assert!(packet_length(u32::MAX).is_err());
     }
 
     #[test]
