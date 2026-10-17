@@ -1,3 +1,10 @@
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use bragi::PropertyId;
+use ipc::Profile;
+
+use crate::{Backups, MemoryStore};
+
 pub(crate) const BLOB_STAND_IN: [u8; 7] = [0x0B, 0xB1, 0x02, 0, 0, 0, 0];
 
 macro_rules! fixture_files {
@@ -9,6 +16,8 @@ macro_rules! fixture_files {
                 _ => panic!("no fixture for file {id:#06x}"),
             }
         }
+
+        pub(crate) const FIXTURE_IDS: &[u16] = &[0x6D60, $($id),*];
     };
 }
 
@@ -30,6 +39,34 @@ fixture_files! {
     0x6D6D => "6d6d",
     0x6D6E => "6d6e",
     0x6D70 => "6d70",
+}
+
+pub(crate) fn dump_store() -> MemoryStore {
+    let store = MemoryStore::with_files(FIXTURE_IDS.iter().map(|id| (*id, file(*id).to_vec())));
+    store.put_property(PropertyId::ACTIVE_HARDWARE_PROFILE_INDEX, 0);
+    store
+}
+
+pub(crate) fn red_profile() -> Profile {
+    let text = r##"
+        name = "red"
+
+        [[layers]]
+        name = "all"
+        zone = "all"
+        effect = { type = "solid", color = "#ff0000" }
+    "##;
+    toml::from_str(text).expect("the red profile parses")
+}
+
+pub(crate) fn now() -> SystemTime {
+    UNIX_EPOCH + Duration::from_secs(1_792_238_461)
+}
+
+pub(crate) fn rig() -> (MemoryStore, Backups, tempfile::TempDir) {
+    let temp = tempfile::tempdir().expect("a temp dir");
+    let backups = Backups::under(temp.path());
+    (dump_store(), backups, temp)
 }
 
 #[test]
