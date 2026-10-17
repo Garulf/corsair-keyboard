@@ -4,7 +4,7 @@ use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use pulseaudio::protocol::stream::{BufferAttr, StreamFlags};
+use pulseaudio::protocol::stream::BufferAttr;
 use pulseaudio::protocol::{
     self, AuthParams, AuthReply, ChannelMap, Command, CommandReply, CreateRecordStreamReply, GetSinkInfo, Prop, Props,
     ProtocolError, RecordStreamParams, SampleFormat, SampleSpec, SetClientNameReply, SinkInfo,
@@ -17,7 +17,7 @@ const NO_SERVER: &str = "no PulseAudio or PipeWire (pipewire-pulse) server found
 const RATE: u32 = 48_000;
 const CHANNELS: u8 = 2;
 const BYTES_PER_SAMPLE: usize = size_of::<f32>();
-const FRAGMENT_FRAMES: usize = 480;
+const FRAGMENT_FRAMES: usize = 1024;
 const READ_TIMEOUT: Duration = Duration::from_millis(200);
 const REPLY_TIMEOUT: Duration = Duration::from_secs(1);
 const COMMAND_CHANNEL: u32 = u32::MAX;
@@ -49,6 +49,17 @@ fn default_moved_from(captured: &CStr) -> bool {
 
 fn has_moved(captured: &CStr, current_default: Option<&CStr>) -> bool {
     current_default.is_some_and(|name| name != captured)
+}
+
+fn record_params(source: u32) -> RecordStreamParams {
+    let fragment_bytes = FRAGMENT_FRAMES * usize::from(CHANNELS) * BYTES_PER_SAMPLE;
+    RecordStreamParams {
+        source_index: Some(source),
+        sample_spec: SampleSpec { format: SampleFormat::Float32Le, channels: CHANNELS, sample_rate: RATE },
+        channel_map: ChannelMap::stereo(),
+        buffer_attr: BufferAttr { fragment_size: fragment_bytes as u32, ..Default::default() },
+        ..Default::default()
+    }
 }
 
 fn display_name(sink: &SinkInfo) -> String {
@@ -86,15 +97,7 @@ impl Connection {
     }
 
     fn record(&mut self, source: u32) -> Result<CreateRecordStreamReply, String> {
-        let fragment_bytes = FRAGMENT_FRAMES * usize::from(CHANNELS) * BYTES_PER_SAMPLE;
-        self.request(&Command::CreateRecordStream(RecordStreamParams {
-            source_index: Some(source),
-            sample_spec: SampleSpec { format: SampleFormat::Float32Le, channels: CHANNELS, sample_rate: RATE },
-            channel_map: ChannelMap::stereo(),
-            buffer_attr: BufferAttr { fragment_size: fragment_bytes as u32, ..Default::default() },
-            flags: StreamFlags { adjust_latency: true, ..Default::default() },
-            ..Default::default()
-        }))
+        self.request(&Command::CreateRecordStream(record_params(source)))
     }
 
     fn stream_until_exit(
@@ -231,6 +234,14 @@ mod tests {
     fn a_packet_beyond_the_server_frame_limit_is_rejected() {
         assert!(packet_length(16 * 1024 * 1024 + 1).is_err());
         assert!(packet_length(u32::MAX).is_err());
+    }
+
+    #[test]
+    fn the_record_stream_asks_for_1024_frame_fragments_without_moving_the_source_latency() {
+        let params = record_params(7);
+        assert_eq!(params.source_index, Some(7));
+        assert_eq!(params.buffer_attr.fragment_size, 1024 * 2 * 4);
+        assert!(!params.flags.adjust_latency);
     }
 
     #[test]
