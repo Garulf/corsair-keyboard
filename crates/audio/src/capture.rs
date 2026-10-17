@@ -14,6 +14,7 @@ const STOP_CHECK_EVERY: Duration = Duration::from_millis(50);
 
 pub type SampleSink = Box<dyn FnMut(Samples<'_>) + Send>;
 
+#[derive(Debug, PartialEq, Eq)]
 pub enum Exit {
     Stopped,
     DeviceChanged,
