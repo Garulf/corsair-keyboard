@@ -13,6 +13,8 @@ use crate::model::{Closing, Connection, Draft, Effect, Inbox, Model, Pane, devic
 const REPAINT_EVERY: Duration = Duration::from_millis(100);
 
 pub fn run() -> Result<(), String> {
+    #[cfg(windows)]
+    crate::desktop::require_interactive_desktop()?;
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1180.0, 800.0])

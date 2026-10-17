@@ -3,6 +3,8 @@ mod app;
 mod assignments;
 mod canvas;
 mod colors;
+#[cfg(any(windows, test))]
+mod desktop;
 mod device;
 mod dial;
 mod io;
