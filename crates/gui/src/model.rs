@@ -406,6 +406,7 @@ impl Model {
         match inbox {
             Inbox::Connected => {
                 self.connection = Connection::Online;
+                self.state = None;
                 self.starting_daemon = false;
                 match self.draft.as_mut().filter(|draft| draft.dirty()) {
                     Some(draft) => {
@@ -1091,6 +1092,23 @@ mod tests {
         reconnect(&mut model, profile("default"));
         assert!(model.stale.is_none());
         assert!(matches!(auto_save(&mut model, Duration::from_secs(10)).as_slice(), [Request::SaveProfile { .. }]));
+    }
+
+    #[test]
+    fn a_state_reply_that_arrives_while_offline_does_not_let_a_save_skip_the_reconnect_check() {
+        let mut model = online("default", &["default"]);
+        model.tick(Duration::ZERO);
+        edit(&mut model);
+        model.apply(Inbox::Disconnected("gone".into()));
+        model.apply(Inbox::reply(Request::GetState, Reply::State { state: state("default", &["default"]) }));
+        model.apply(Inbox::Connected);
+        sent(&mut model);
+        assert!(auto_save(&mut model, Duration::from_secs(1)).is_empty(), "the reconnect comparison has not run");
+        let changed = changed_apps("default", &["other.exe"]);
+        model.apply(Inbox::reply(get_profile("default"), Reply::Profile { profile: changed }));
+        model.apply(Inbox::reply(Request::GetState, Reply::State { state: state("default", &["default"]) }));
+        assert!(model.stale.is_some());
+        assert!(auto_save(&mut model, Duration::from_secs(5)).is_empty());
     }
 
     #[test]
