@@ -3035,6 +3035,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "onboard"
+version = "0.1.0"
+dependencies = [
+ "actions",
+ "bragi",
+ "engine",
+ "ipc",
+ "k100",
+ "tempfile",
+ "thiserror 2.0.21",
+ "toml 1.1.8+spec-1.1.0",
+]
+
+[[package]]
 name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"

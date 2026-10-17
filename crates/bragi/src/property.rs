@@ -12,10 +12,12 @@ impl PropertyId {
     pub const RELEASE_DEBOUNCE_TIMEOUT: Self = Self(0x38);
     pub const RELEASE_DEBOUNCE_ENABLED: Self = Self(0x39);
     pub const PHYSICAL_KEYBOARD_LAYOUT: Self = Self(0x41);
+    pub const FREE_STORAGE_SIZE: Self = Self(0x3E);
     pub const WIN_LOCK_ENABLED: Self = Self(0x45);
     pub const WIN_LOCK_DISABLED_SHORTCUTS: Self = Self(0x4A);
     pub const DIAL_RING_ROTATION: Self = Self(0x60);
     pub const DIAL_ZONE_BRIGHTNESS: Self = Self(0x6D);
+    pub const ACTIVE_HARDWARE_PROFILE_INDEX: Self = Self(0x6E);
     pub const KEY_PRESS_NOTIFICATIONS_REPORTING: Self = Self(0x92);
     pub const MAXIMUM_POLLING_RATE: Self = Self(0x96);
     pub const BRAGI_PROTOCOL_VERSION: Self = Self(0x105);
