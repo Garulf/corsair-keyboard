@@ -114,9 +114,9 @@ pub fn format_state(state: &DaemonState) -> String {
     }
     match &state.audio {
         AudioState::Off => {}
-        AudioState::Starting => lines.push("audio: starting".into()),
-        AudioState::Capturing { device } => lines.push(format!("audio: capturing ({device})")),
-        AudioState::Failed { reason } => lines.push(format!("audio: failed: {reason}")),
+        AudioState::Starting => lines.push("audio:      starting".into()),
+        AudioState::Capturing { device } => lines.push(format!("audio:      capturing ({device})")),
+        AudioState::Failed { reason } => lines.push(format!("audio:      failed: {reason}")),
     }
     lines.extend(state.config_errors.iter().map(|error| format!("config error: {error}")));
     lines.join("\n")
@@ -169,9 +169,11 @@ mod tests {
         assert!(!text.contains("recording"), "{text}");
         assert!(!text.contains("audio"), "{text}");
         let capturing = DaemonState { audio: AudioState::Capturing { device: "Speakers".into() }, ..state.clone() };
-        assert!(format_state(&capturing).contains("audio: capturing (Speakers)"));
+        assert!(format_state(&capturing).contains("audio:      capturing (Speakers)"));
+        let starting = DaemonState { audio: AudioState::Starting, ..state.clone() };
+        assert!(format_state(&starting).contains("audio:      starting"));
         let failed = DaemonState { audio: AudioState::Failed { reason: "no sink".into() }, ..state.clone() };
-        assert!(format_state(&failed).contains("audio: failed: no sink"));
+        assert!(format_state(&failed).contains("audio:      failed: no sink"));
         let recording = DaemonState { recording: actions::RecorderState::Recording { key: 131 }, ..state.clone() };
         assert!(format_state(&recording).contains("recording:  into g1"));
         let blocked = DaemonState { device: DeviceState::Blocked { processes: vec!["iCUE.exe".into()] }, ..state };
