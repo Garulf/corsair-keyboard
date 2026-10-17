@@ -19,6 +19,7 @@ pub struct FileId(pub u16);
 
 impl FileId {
     pub const KEY_MAPPINGS: Self = Self(0x02);
+    pub const PROFILES_LIST: Self = Self(0x0F);
     pub const REAL_TIME_LIGHTINGS_BUFFER: Self = Self(0x22);
     pub const INDICATION_REAL_TIME_LIGHTINGS_BUFFER: Self = Self(0x2E);
 }

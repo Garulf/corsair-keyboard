@@ -1,0 +1,19 @@
+[package]
+name = "onboard"
+description = "Onboard (hardware) profile storage for the Corsair K100"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+bragi.workspace = true
+k100.workspace = true
+engine.workspace = true
+actions.workspace = true
+ipc.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+toml.workspace = true

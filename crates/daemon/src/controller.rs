@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use actions::{
     Action, Assignment, BrightnessChange, Dispatcher, Intent, Key, MacroStep, OutputCommand, ProfileTarget,
@@ -8,10 +8,11 @@ use actions::{
 use bragi::{PollingRate, PropertyId};
 use engine::{Compositor, KeyPress, Layout};
 use ipc::{
-    AudioState, DaemonState, Debounce, DeviceState, Event, MAX_DEBOUNCE_TIMEOUT, PROTOCOL_VERSION, Profile, Reply,
-    Request, SettingsPatch,
+    AudioState, DaemonState, Debounce, DeviceState, Event, MAX_DEBOUNCE_TIMEOUT, OnboardRequest, PROTOCOL_VERSION,
+    Profile, Reply, Request, SettingsPatch,
 };
 use k100::{DeviceError, Frame, IndicatorRecord, InputEvent, KeyMappings, Session, Transport, led};
+use onboard::{Backups, FileStore};
 
 use crate::audio::{AudioPort, NoAudio, uses_audio};
 use crate::config::{ConfigDir, Settings, default_profile, profile_file_name};
@@ -57,6 +58,9 @@ pub trait DeviceLink: Send {
     fn key_count(&self) -> usize;
     fn ping(&mut self) -> Result<(), DeviceError>;
     fn release(&mut self) -> Result<(), DeviceError>;
+    fn files(&mut self) -> Option<&mut dyn FileStore> {
+        None
+    }
 }
 
 impl<T: Transport> DeviceLink for Session<T> {
@@ -94,6 +98,10 @@ impl<T: Transport> DeviceLink for Session<T> {
 
     fn release(&mut self) -> Result<(), DeviceError> {
         Session::release(self)
+    }
+
+    fn files(&mut self) -> Option<&mut dyn FileStore> {
+        Some(self.device_mut())
     }
 }
 
@@ -381,6 +389,7 @@ impl Controller {
                 Reply::Done
             }
             Request::Subscribe | Request::SubscribeFrames => Reply::Done,
+            Request::Onboard { request } => self.onboard(&request, config),
         }
     }
 
@@ -870,19 +879,45 @@ impl Controller {
         self.with_link(|link| link.set_property(PropertyId::BRIGHTNESS, value))
     }
 
+    fn onboard(&mut self, request: &OnboardRequest, config: &ConfigDir) -> Reply {
+        if self.device == DeviceState::Released {
+            return error(
+                "k100d has released the keyboard; run k100 reacquire, or quit k100d to use onboard commands directly"
+                    .into(),
+            );
+        }
+        let Some(link) = self.link.as_deref_mut() else { return error("no keyboard connected".into()) };
+        let Some(store) = link.files() else {
+            return error("this keyboard connection cannot reach onboard memory".into());
+        };
+        let profiles = &self.profiles;
+        let named = |name: &str| profiles.get(name).cloned();
+        let result = onboard::execute(store, request, &named, &Backups::under(config.root()), SystemTime::now());
+        result.unwrap_or_else(|failure| {
+            if let Some(device_failure) = failure.device() {
+                self.link_failed(device_failure);
+            }
+            error(failure.to_string())
+        })
+    }
+
     fn with_link(
         &mut self,
         operation: impl FnOnce(&mut dyn DeviceLink) -> Result<(), DeviceError>,
     ) -> Result<(), DeviceError> {
         let Some(link) = self.link.as_deref_mut() else { return Ok(()) };
         let result = operation(link);
-        if let Err(failure) = &result
-            && failure.status().is_none()
-        {
+        if let Err(failure) = &result {
+            self.link_failed(failure);
+        }
+        result
+    }
+
+    fn link_failed(&mut self, failure: &DeviceError) {
+        if failure.status().is_none() {
             self.drop_link();
             self.set_state(DeviceState::Paused { reason: failure.to_string() });
         }
-        result
     }
 
     fn set_state(&mut self, state: DeviceState) {
@@ -922,12 +957,15 @@ fn works_without_output(action: &Action) -> bool {
 #[cfg(test)]
 mod tests {
     use std::io;
+    use std::path::Path;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
 
     use actions::{Action, Assignment, Key, MacroStep, OutputCommand, RecorderState, RepeatMode};
     use engine::Spectrum;
+    use ipc::OnboardRequest;
     use k100::{IndicatorRecord, Rgb, led};
+    use onboard::{Failure, MemoryStore};
 
     use super::*;
     use crate::config::default_profile;
@@ -1054,6 +1092,57 @@ mod tests {
         let log = Arc::new(Mutex::new(Log::default()));
         controller.attach(Box::new(FakeLink(log.clone())), info(Some(PollingRate::Hz8000)), Duration::ZERO);
         Rig { controller, log, output, _temp: temp, config }
+    }
+
+    struct StoreLink {
+        inner: FakeLink,
+        store: MemoryStore,
+    }
+
+    impl DeviceLink for StoreLink {
+        fn write_frame(&mut self, frame: &Frame) -> Result<(), DeviceError> {
+            self.inner.write_frame(frame)
+        }
+        fn write_indicators(&mut self, records: &[k100::IndicatorRecord]) -> Result<(), DeviceError> {
+            self.inner.write_indicators(records)
+        }
+        fn set_key_mappings(&mut self, mappings: &k100::KeyMappings) -> Result<(), DeviceError> {
+            self.inner.set_key_mappings(mappings)
+        }
+        fn get_property(&mut self, property: PropertyId) -> Result<u32, DeviceError> {
+            self.inner.get_property(property)
+        }
+        fn set_property(&mut self, property: PropertyId, value: u32) -> Result<(), DeviceError> {
+            self.inner.set_property(property, value)
+        }
+        fn try_set_property(&mut self, property: PropertyId, value: u32) -> Result<bool, DeviceError> {
+            self.inner.try_set_property(property, value)
+        }
+        fn key_count(&self) -> usize {
+            self.inner.key_count()
+        }
+        fn ping(&mut self) -> Result<(), DeviceError> {
+            self.inner.ping()
+        }
+        fn release(&mut self) -> Result<(), DeviceError> {
+            self.inner.release()
+        }
+        fn files(&mut self) -> Option<&mut dyn FileStore> {
+            Some(&mut self.store)
+        }
+    }
+
+    fn rig_with_store(profiles: Vec<Profile>) -> (Rig, MemoryStore) {
+        let temp = tempfile::tempdir().unwrap();
+        let config = ConfigDir::new(temp.path().to_path_buf());
+        let output = FakeOutput::default();
+        let settings = Settings { brightness: 80, ..Settings::default() };
+        let mut controller = Controller::new(settings, profiles, vec![], Box::new(output.clone()));
+        let log = Arc::new(Mutex::new(Log::default()));
+        let store = MemoryStore::with_files([(0x0F, vec![0x13, 0, 0, 0])]);
+        let link = StoreLink { inner: FakeLink(log.clone()), store: store.clone() };
+        controller.attach(Box::new(link), info(Some(PollingRate::Hz8000)), Duration::ZERO);
+        (Rig { controller, log, output, _temp: temp, config }, store)
     }
 
     fn controller() -> (Controller, Arc<Mutex<Log>>, tempfile::TempDir, ConfigDir) {
@@ -2249,5 +2338,84 @@ mod tests {
         rig.audio.set_state(AudioState::Off);
         assert_eq!(rig.controller.handle(Request::Release, &rig.config), Reply::Done);
         assert!(rig.controller.take_events().contains(&Event::Audio { state: AudioState::Off }));
+    }
+
+    #[test]
+    fn onboard_save_and_list_go_through_the_link_and_back_up_into_the_config_dir() {
+        let (mut rig, store) = rig_with_store(vec![profile("default")]);
+        let save = Request::Onboard { request: OnboardRequest::Save { profile: "default".into(), slot: None } };
+        let Reply::OnboardDone { backup: Some(backup), .. } = rig.controller.handle(save, &rig.config) else {
+            panic!("expected done")
+        };
+        assert!(Path::new(&backup).starts_with(rig.config.root().join("onboard-backup")));
+        let list = rig.controller.handle(Request::Onboard { request: OnboardRequest::List }, &rig.config);
+        assert!(
+            matches!(list, Reply::OnboardSlots { ref slots, .. } if slots.len() == 1 && slots[0].name == "default")
+        );
+        assert!(store.files().len() > 1);
+    }
+
+    #[test]
+    fn onboard_requests_need_a_keyboard_with_file_access() {
+        let mut rig = rig(vec![profile("default")]);
+        let list = || Request::Onboard { request: OnboardRequest::List };
+        assert!(
+            matches!(rig.controller.handle(list(), &rig.config), Reply::Error { message } if message.contains("onboard"))
+        );
+        rig.controller.handle(Request::Release, &rig.config);
+        assert!(
+            matches!(rig.controller.handle(list(), &rig.config), Reply::Error { message } if message.contains("released"))
+        );
+    }
+
+    #[test]
+    fn onboard_requests_without_a_keyboard_say_so() {
+        let mut controller =
+            Controller::new(Settings::default(), vec![profile("default")], vec![], Box::new(DiscardOutput));
+        let temp = tempfile::tempdir().unwrap();
+        let config = ConfigDir::new(temp.path().to_path_buf());
+        let reply = controller.handle(Request::Onboard { request: OnboardRequest::List }, &config);
+        assert_eq!(reply, Reply::Error { message: "no keyboard connected".into() });
+    }
+
+    #[test]
+    fn losing_the_keyboard_during_an_onboard_write_pauses_the_device() {
+        let (mut rig, store) = rig_with_store(vec![profile("default")]);
+        store.fail_writes_from(1, Failure::Timeout);
+        let save = Request::Onboard { request: OnboardRequest::Save { profile: "default".into(), slot: None } };
+        assert!(matches!(rig.controller.handle(save, &rig.config), Reply::Error { .. }));
+        assert!(matches!(rig.controller.state().device, DeviceState::Paused { .. }));
+    }
+
+    #[test]
+    fn a_failed_onboard_save_replies_with_the_backup_to_restore() {
+        let (mut rig, store) = rig_with_store(vec![profile("default")]);
+        store.fail_writes_from(1, Failure::Status(bragi::Status::HardwareError));
+        let save = Request::Onboard { request: OnboardRequest::Save { profile: "default".into(), slot: None } };
+        let Reply::Error { message } = rig.controller.handle(save, &rig.config) else { panic!("expected an error") };
+        let backups = rig.config.root().join("onboard-backup");
+        assert!(message.contains("k100 onboard restore \"") && message.contains(&backups.display().to_string()));
+        assert!(matches!(rig.controller.state().device, DeviceState::Connected { .. }));
+    }
+
+    #[test]
+    fn an_onboard_error_the_keyboard_answered_keeps_the_link() {
+        let (mut rig, _store) = rig_with_store(vec![profile("default")]);
+        let delete = Request::Onboard { request: OnboardRequest::Delete { slot: 4 } };
+        assert_eq!(
+            rig.controller.handle(delete, &rig.config),
+            Reply::Error { message: "there is no onboard slot 4".into() }
+        );
+        assert!(matches!(rig.controller.state().device, DeviceState::Connected { .. }));
+    }
+
+    #[test]
+    fn frames_keep_flowing_after_an_onboard_save() {
+        let (mut rig, _store) = rig_with_store(vec![profile("default")]);
+        let save = Request::Onboard { request: OnboardRequest::Save { profile: "default".into(), slot: None } };
+        rig.controller.handle(save, &rig.config);
+        let frames = rig.log.lock().unwrap().frames;
+        rig.controller.tick(ms(16), &[], &rig.config);
+        assert_eq!(rig.log.lock().unwrap().frames, frames + 1);
     }
 }

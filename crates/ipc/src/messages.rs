@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::settings::{Settings, SettingsPatch};
 
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -54,6 +54,41 @@ pub enum Request {
     Reacquire,
     Subscribe,
     SubscribeFrames,
+    Onboard {
+        request: OnboardRequest,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum OnboardRequest {
+    List,
+    Save {
+        profile: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        slot: Option<u32>,
+    },
+    Delete {
+        slot: u32,
+    },
+    Activate {
+        slot: u32,
+    },
+    Backup {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        to: Option<String>,
+    },
+    Restore {
+        from: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OnboardSlot {
+    pub index: u32,
+    pub name: String,
+    pub files: u32,
+    pub bytes: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -67,6 +102,8 @@ pub enum Reply {
     Done,
     Error { message: String },
     Event { event: Event },
+    OnboardSlots { slots: Vec<OnboardSlot>, active: Option<u32>, free_bytes: Option<u32> },
+    OnboardDone { message: String, backup: Option<String>, notes: Vec<String> },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -247,6 +284,35 @@ mod tests {
         let stop = serde_json::to_string(&Request::StopRecording).unwrap();
         assert_eq!(stop, r#"{"type":"stop_recording"}"#);
         assert_eq!(serde_json::from_str::<Request>(&stop).unwrap(), Request::StopRecording);
+    }
+
+    #[test]
+    fn onboard_requests_nest_their_operation() {
+        let save = Request::Onboard { request: OnboardRequest::Save { profile: "games".into(), slot: None } };
+        assert_eq!(
+            serde_json::to_string(&save).unwrap(),
+            r#"{"type":"onboard","request":{"op":"save","profile":"games"}}"#
+        );
+        let restore = Request::Onboard { request: OnboardRequest::Restore { from: "/b/1".into() } };
+        assert_eq!(serde_json::from_str::<Request>(&serde_json::to_string(&restore).unwrap()).unwrap(), restore);
+        let slot = OnboardSlot { index: 0, name: "HW Profile 2".into(), files: 16, bytes: 570 };
+        let slots = Reply::OnboardSlots { slots: vec![slot], active: Some(0), free_bytes: None };
+        assert_eq!(serde_json::from_str::<Reply>(&serde_json::to_string(&slots).unwrap()).unwrap(), slots);
+    }
+
+    #[test]
+    fn onboard_replies_and_optional_fields_round_trip() {
+        let backup = Request::Onboard { request: OnboardRequest::Backup { to: None } };
+        assert_eq!(serde_json::to_string(&backup).unwrap(), r#"{"type":"onboard","request":{"op":"backup"}}"#);
+        let overwrite: Request =
+            serde_json::from_str(r#"{"type":"onboard","request":{"op":"save","profile":"a","slot":2}}"#).unwrap();
+        assert_eq!(
+            overwrite,
+            Request::Onboard { request: OnboardRequest::Save { profile: "a".into(), slot: Some(2) } }
+        );
+        let done = Reply::OnboardDone { message: "deleted slot 1".into(), backup: Some("/b".into()), notes: vec![] };
+        assert_eq!(serde_json::from_str::<Reply>(&serde_json::to_string(&done).unwrap()).unwrap(), done);
+        assert_eq!(PROTOCOL_VERSION, 4);
     }
 
     #[test]

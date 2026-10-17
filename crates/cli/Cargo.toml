@@ -16,10 +16,15 @@ audio.workspace = true
 bragi.workspace = true
 k100.workspace = true
 clap.workspace = true
+daemon.workspace = true
 ctrlc.workspace = true
 engine.workspace = true
 gui.workspace = true
 install.workspace = true
 ipc.workspace = true
+onboard.workspace = true
 serde.workspace = true
 toml.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

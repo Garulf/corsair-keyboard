@@ -21,6 +21,7 @@ k100.workspace = true
 engine.workspace = true
 install.workspace = true
 ipc.workspace = true
+onboard.workspace = true
 interprocess.workspace = true
 serde.workspace = true
 serde_json.workspace = true

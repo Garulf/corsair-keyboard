@@ -1,6 +1,7 @@
 mod diag;
 mod effect;
 mod launch;
+mod onboard_cmd;
 mod remote;
 
 use clap::{Parser, Subcommand};
@@ -57,6 +58,8 @@ enum Command {
     Keys,
     /// Print key, dial and state events until Ctrl-C
     Events,
+    /// Manage the profiles stored on the keyboard
+    Onboard(onboard_cmd::OnboardArgs),
     /// Low-level hardware checks that talk to the keyboard directly (stop k100d first, except for `diag audio`)
     #[command(subcommand)]
     Diag(diag::Diag),
@@ -87,6 +90,7 @@ fn main() {
             Ok(())
         }
         Command::Events => remote::events(),
+        Command::Onboard(args) => onboard_cmd::run(args),
         Command::Diag(diag) => diag::run(diag),
     };
     if let Err(error) = result {
@@ -100,6 +104,7 @@ mod tests {
     use clap::CommandFactory;
 
     use super::*;
+    use crate::onboard_cmd::OnboardCommand;
 
     #[test]
     fn the_command_line_definition_is_valid() {
@@ -124,6 +129,32 @@ mod tests {
     #[test]
     fn gui_is_a_plain_subcommand() {
         assert!(matches!(Cli::try_parse_from(["k100", "gui"]).unwrap().command, Command::Gui));
+    }
+
+    #[test]
+    fn onboard_commands_parse() {
+        let cli = Cli::try_parse_from([
+            "k100",
+            "onboard",
+            "--config-dir",
+            "cfg",
+            "save",
+            "games",
+            "--slot",
+            "2",
+            "--dry-run",
+        ])
+        .unwrap();
+        let Command::Onboard(args) = cli.command else { panic!("expected onboard") };
+        assert_eq!(args.config_dir.as_deref(), Some(std::path::Path::new("cfg")));
+        assert!(
+            matches!(args.command, OnboardCommand::Save { ref profile, slot: Some(2), dry_run: true } if profile == "games")
+        );
+        for words in [&["list"][..], &["delete", "1"], &["activate", "0"], &["backup", "--to", "d"], &["restore", "d"]]
+        {
+            let line = ["k100", "onboard"].iter().chain(words);
+            assert!(Cli::try_parse_from(line).is_ok(), "{words:?}");
+        }
     }
 
     #[test]
