@@ -36,10 +36,14 @@ fn hex_ids(ids: &[u16]) -> String {
 
 impl OnboardError {
     pub fn lost_device(&self) -> bool {
+        self.device().is_some_and(|error| error.status().is_none())
+    }
+
+    pub fn device(&self) -> Option<&DeviceError> {
         match self {
-            Self::Device(error) => error.status().is_none(),
-            Self::PartlyUndone { error, .. } => error.lost_device(),
-            _ => false,
+            Self::Device(error) => Some(error),
+            Self::PartlyUndone { error, .. } => error.device(),
+            _ => None,
         }
     }
 
@@ -74,6 +78,8 @@ mod tests {
         let cause = OnboardError::Device(DeviceError::Timeout(Command::WriteBufferBegin));
         let error = OnboardError::PartlyUndone { error: Box::new(cause), leftovers: vec![0x6D6F, 0x6D71] };
         assert!(error.lost_device());
+        assert!(matches!(error.device(), Some(DeviceError::Timeout(Command::WriteBufferBegin))));
+        assert!(OnboardError::Verify(0x6D71).device().is_none());
         assert_eq!(error.leftovers(), [0x6D6F, 0x6D71]);
         assert!(error.to_string().ends_with("; left on the keyboard: 0x6d6f, 0x6d71"), "{error}");
         assert!(OnboardError::LastSlot.leftovers().is_empty());

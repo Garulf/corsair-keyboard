@@ -49,6 +49,10 @@ impl<T: Transport> Session<T> {
         self.model
     }
 
+    pub fn device_mut(&mut self) -> &mut Device<T> {
+        &mut self.device
+    }
+
     pub fn write_frame(&mut self, frame: &Frame) -> Result<(), DeviceError> {
         self.write_lighting(LIGHTING_HANDLE, FileId::REAL_TIME_LIGHTINGS_BUFFER, &encode_frame(frame))
     }

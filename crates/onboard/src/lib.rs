@@ -9,6 +9,7 @@ mod lighting;
 mod mappings;
 mod memory;
 mod root;
+mod service;
 mod store;
 mod tree;
 mod usage;
@@ -31,6 +32,7 @@ pub use lighting::{
 pub use mappings::{AssignmentEntry, AssignmentMap, DialAction, DialModeEntry, DialModes, StoredKeyMappings};
 pub use memory::{Failure, MemoryStore, Operation};
 pub use root::{ProfileRoot, ProfilesList, Section};
+pub use service::execute;
 pub use store::{
     Changed, FileStore, STORE_HANDLE, Saved, SlotList, SlotSummary, StoredTree, activate, delete, list, read_tree,
     replay_hardware_profile, restore, save, snapshot,

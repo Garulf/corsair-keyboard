@@ -945,6 +945,7 @@ dependencies = [
  "ipc",
  "k100",
  "notify",
+ "onboard",
  "serde",
  "serde_json",
  "sysinfo",
