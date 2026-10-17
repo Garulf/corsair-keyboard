@@ -73,7 +73,7 @@ pub fn recording_text(state: RecorderState) -> String {
         RecorderState::AwaitingKey => "Press the G key to record into".into(),
         RecorderState::Recording { key } => {
             let name = Key::from_index(key).map_or(key.to_string(), |key| key.name().to_owned());
-            format!("Recording into {name}: press the same G key again to finish")
+            format!("Recording into {name}: type the macro, then click Stop")
         }
     }
 }
@@ -106,6 +106,17 @@ pub fn recording_blocker(model: &Model) -> Option<String> {
         return Some("Switch to this profile first: macros are recorded into the active profile.".into());
     }
     None
+}
+
+pub fn record_target(model: &Model) -> Result<Key, String> {
+    if let Some(reason) = recording_blocker(model) {
+        return Err(reason);
+    }
+    selected_key(model).ok_or_else(|| "Select one key on the keyboard that can hold a macro.".into())
+}
+
+fn selected_key(model: &Model) -> Option<Key> {
+    single(&model.selection).and_then(|led| assignability(led).ok())
 }
 
 fn single(selection: &BTreeSet<u8>) -> Option<u8> {
@@ -211,22 +222,41 @@ fn recorder(ui: &mut egui::Ui, model: &mut Model) {
     ui.strong("Macro recorder");
     let state = model.state.as_ref().map_or(RecorderState::Idle, |state| state.recording);
     match state {
-        RecorderState::Idle => {
-            let blocker = recording_blocker(model);
-            if ui.add_enabled(blocker.is_none(), egui::Button::new("Record a macro")).clicked() {
-                model.send(Request::StartRecording { key: None });
-            }
-            match blocker {
-                Some(reason) => ui.weak(reason),
-                None => ui.weak("Press a G key, type the keys, then press the same G key again. The macro is saved into the active profile."),
-            };
-        }
-        RecorderState::AwaitingKey | RecorderState::Recording { .. } => {
+        RecorderState::Idle => record_button(ui, model),
+        RecorderState::AwaitingKey => {
             ui.label(recording_text(state));
-            if ui.button("Cancel recording").clicked() {
-                model.send(Request::CancelRecording);
-            }
+            cancel_button(ui, model);
         }
+        RecorderState::Recording { .. } => {
+            ui.label(recording_text(state));
+            ui.horizontal(|ui| {
+                if ui.button("Stop").clicked() {
+                    model.send(Request::StopRecording);
+                }
+                cancel_button(ui, model);
+            });
+        }
+    }
+}
+
+fn record_button(ui: &mut egui::Ui, model: &mut Model) {
+    let target = record_target(model);
+    let label =
+        selected_key(model).map_or_else(|| "Record a macro".to_owned(), |key| format!("Record macro for {key}"));
+    if ui.add_enabled(target.is_ok(), egui::Button::new(label)).clicked()
+        && let Ok(key) = target.as_ref()
+    {
+        model.send(Request::StartRecording { key: key.index() });
+    }
+    match target {
+        Err(reason) => ui.weak(reason),
+        Ok(_) => ui.weak("Type the macro, then click Stop. The macro is saved into the active profile."),
+    };
+}
+
+fn cancel_button(ui: &mut egui::Ui, model: &mut Model) {
+    if ui.button("Cancel recording").clicked() {
+        model.send(Request::CancelRecording);
     }
 }
 
@@ -297,7 +327,10 @@ mod tests {
     fn recording_text_names_the_target_key() {
         assert_eq!(recording_text(RecorderState::Idle), "Not recording");
         assert!(recording_text(RecorderState::AwaitingKey).contains("G key"));
-        assert!(recording_text(RecorderState::Recording { key: 131 }).contains("g1"));
+        assert_eq!(
+            recording_text(RecorderState::Recording { key: 131 }),
+            "Recording into g1: type the macro, then click Stop"
+        );
     }
 
     #[test]
@@ -312,6 +345,20 @@ mod tests {
         model.draft = Some(crate::model::Draft::new(crate::testing::profile("p")));
         model.state.as_mut().unwrap().device = DeviceState::Disconnected;
         assert!(recording_blocker(&model).unwrap().contains("No keyboard"));
+    }
+
+    #[test]
+    fn recording_needs_exactly_one_assignable_key() {
+        let mut model = online("p", &["p"]);
+        assert!(record_target(&model).unwrap_err().contains("Select one key"));
+        model.selection = BTreeSet::from([131, 132]);
+        assert!(record_target(&model).unwrap_err().contains("Select one key"));
+        model.selection = BTreeSet::from([137]);
+        assert!(record_target(&model).unwrap_err().contains("Select one key"));
+        model.selection = BTreeSet::from([132]);
+        assert_eq!(record_target(&model), Ok(key("g2")));
+        model.draft.as_mut().unwrap().profile.apps.push("x.exe".into());
+        assert!(record_target(&model).unwrap_err().contains("Apply or revert"));
     }
 
     #[test]
@@ -368,15 +415,47 @@ mod tests {
     }
 
     #[test]
-    fn the_recorder_starts_and_cancels_through_the_daemon() {
-        let mut harness = harness(keys_model(131), keys);
+    fn the_record_button_names_the_selected_key_and_records_into_it() {
+        let mut harness = harness(keys_model(132), keys);
         harness.run();
-        harness.get_by_label("Record a macro").click();
+        harness.get_by_label("Record macro for g2").click();
         harness.run();
-        assert_eq!(sent(harness.state_mut()), [ipc::Request::StartRecording { key: None }]);
-        harness.state_mut().state.as_mut().unwrap().recording = RecorderState::AwaitingKey;
+        assert_eq!(sent(harness.state_mut()), [ipc::Request::StartRecording { key: Some(132) }]);
+    }
+
+    #[test]
+    fn the_record_button_asks_for_one_key_when_the_selection_does_not_name_one() {
+        let mut model = online("p", &["p"]);
+        model.selection = BTreeSet::from([131, 132]);
+        let mut harness = harness(model, keys);
+        harness.run();
+        assert!(harness.get_by_label("Record a macro").accesskit_node().is_disabled());
+        harness.get_by_label_contains("Select one key");
+    }
+
+    #[test]
+    fn a_recording_is_stopped_or_cancelled_from_the_pane() {
+        let mut model = keys_model(132);
+        model.state.as_mut().unwrap().recording = RecorderState::Recording { key: 132 };
+        let mut harness = harness(model, keys);
+        harness.run();
+        harness.get_by_label("Recording into g2: type the macro, then click Stop");
+        harness.get_by_label("Stop").click();
+        harness.run();
+        assert_eq!(sent(harness.state_mut()), [ipc::Request::StopRecording]);
+        harness.get_by_label("Cancel recording").click();
+        harness.run();
+        assert_eq!(sent(harness.state_mut()), [ipc::Request::CancelRecording]);
+    }
+
+    #[test]
+    fn a_hardware_started_recording_can_still_be_cancelled_while_it_waits_for_a_key() {
+        let mut model = keys_model(4);
+        model.state.as_mut().unwrap().recording = RecorderState::AwaitingKey;
+        let mut harness = harness(model, keys);
         harness.run();
         harness.get_by_label("Press the G key to record into");
+        assert!(harness.query_by_label("Stop").is_none());
         harness.get_by_label("Cancel recording").click();
         harness.run();
         assert_eq!(sent(harness.state_mut()), [ipc::Request::CancelRecording]);
@@ -418,7 +497,7 @@ mod tests {
         model.draft.as_mut().unwrap().profile.apps.push("x.exe".into());
         let mut harness = harness(model, keys);
         harness.run();
-        assert!(harness.get_by_label("Record a macro").accesskit_node().is_disabled());
+        assert!(harness.get_by_label("Record macro for g1").accesskit_node().is_disabled());
         harness.get_by_label_contains("Apply or revert");
     }
 
