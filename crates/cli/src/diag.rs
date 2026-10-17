@@ -57,12 +57,21 @@ pub enum Diag {
         #[arg(long, default_value_t = 60)]
         fps: u32,
     },
+    /// Show the captured system audio spectrum as text (needs no keyboard)
+    Audio {
+        #[arg(long, default_value_t = 10)]
+        seconds: u64,
+    },
 }
 
 pub fn run(command: Diag) -> Result<()> {
     let stop = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&stop);
     ctrlc::set_handler(move || flag.store(true, Ordering::SeqCst))?;
+
+    if let Diag::Audio { seconds } = command {
+        return audio(seconds, &stop);
+    }
 
     let OpenedDevice { commands, input, model } = open_device()?;
     println!("found {} (pid {:04x}){}", model.name, model.pid, if model.tested { "" } else { " [untested]" });
@@ -79,6 +88,7 @@ pub fn run(command: Diag) -> Result<()> {
         Diag::Preview { file, seconds, fps } => {
             preview(Session::start(commands, model)?, input, &file, seconds, fps, &stop)
         }
+        Diag::Audio { .. } => unreachable!("handled before the keyboard is opened"),
     }
 }
 
@@ -284,6 +294,47 @@ fn preview(
     Ok(session.release()?)
 }
 
+const METER_RAMP: &[u8] = b" .:-=+*#%@";
+const METER_INTERVAL: Duration = Duration::from_millis(100);
+
+pub fn band_line(spectrum: &engine::Spectrum) -> String {
+    spectrum
+        .bands
+        .iter()
+        .map(|level| char::from(METER_RAMP[(level * (METER_RAMP.len() - 1) as f32).round() as usize]))
+        .collect()
+}
+
+fn status_line(status: &audio::Status) -> String {
+    match status {
+        audio::Status::Starting => "audio: starting".to_string(),
+        audio::Status::Capturing { device } => format!("audio: capturing ({device})"),
+        audio::Status::Failed { reason } => format!("audio: failed: {reason}"),
+    }
+}
+
+fn audio(seconds: u64, stop: &AtomicBool) -> Result<()> {
+    let handle = audio::AudioHandle::spawn(audio::system_capture());
+    let deadline = Instant::now() + Duration::from_secs(seconds);
+    let mut last_status = None;
+    loop {
+        let status = handle.status();
+        if last_status.as_ref() != Some(&status) {
+            println!("{}", status_line(&status));
+            last_status = Some(status);
+        }
+        println!("{}", band_line(&handle.spectrum()));
+        if Instant::now() >= deadline || stop.load(Ordering::SeqCst) {
+            break;
+        }
+        thread::sleep(METER_INTERVAL);
+    }
+    match handle.status() {
+        audio::Status::Failed { reason } => Err(reason.into()),
+        _ => Ok(()),
+    }
+}
+
 pub fn format_version(raw: u32) -> String {
     let [major, minor, build_lo, build_hi] = raw.to_le_bytes();
     format!("{major}.{minor}.{}", u16::from_le_bytes([build_lo, build_hi]))
@@ -372,5 +423,12 @@ mod tests {
         assert_eq!(frame[29], Rgb::new(255, 0, 0));
         assert_eq!(frame[4], Rgb::new(60, 60, 60));
         assert!(highlight_frame(None).iter().all(|&c| c == Rgb::new(60, 60, 60)));
+    }
+
+    #[test]
+    fn band_line_draws_one_character_per_band_by_level() {
+        assert_eq!(band_line(&engine::Spectrum::SILENT), " ".repeat(32));
+        assert_eq!(band_line(&engine::Spectrum::from_levels([1.0; engine::SPECTRUM_BANDS])), "@".repeat(32));
+        assert_eq!(band_line(&engine::Spectrum::from_levels([0.5; engine::SPECTRUM_BANDS])), "+".repeat(32));
     }
 }
