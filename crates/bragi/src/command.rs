@@ -8,6 +8,8 @@ pub enum Command {
     WriteBuffer = 0x07,
     ReadBuffer = 0x08,
     DescribeBuffer = 0x09,
+    CreateFile = 0x0B,
+    RemoveFile = 0x0C,
     OpenFile = 0x0D,
     Ping = 0x12,
 }

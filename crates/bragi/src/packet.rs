@@ -45,6 +45,14 @@ impl Request {
         Self::new(Command::OpenFile, &[handle, lo, hi])
     }
 
+    pub fn create_file(file: FileId) -> Self {
+        Self::new(Command::CreateFile, &file.0.to_le_bytes())
+    }
+
+    pub fn remove_file(file: FileId) -> Self {
+        Self::new(Command::RemoveFile, &file.0.to_le_bytes())
+    }
+
     pub fn unbind_buffers(handle: u8) -> Self {
         Self::new(Command::UnbindBuffers, &[UNBIND_SUBCOMMAND, handle])
     }
@@ -192,6 +200,17 @@ mod tests {
         assert_eq!(prefix(&describe, 3), [0x08, 0x09, 0x03]);
         assert!(tail_is_zero(&describe, 3));
         assert_eq!(describe.command(), Command::DescribeBuffer);
+    }
+
+    #[test]
+    fn create_and_remove_file_carry_the_file_id() {
+        let create = Request::create_file(FileId(0x6D71));
+        assert_eq!(prefix(&create, 4), [0x08, 0x0B, 0x71, 0x6D]);
+        assert!(tail_is_zero(&create, 4));
+        assert_eq!(create.command(), Command::CreateFile);
+        let remove = Request::remove_file(FileId(0x6D71));
+        assert_eq!(prefix(&remove, 4), [0x08, 0x0C, 0x71, 0x6D]);
+        assert_eq!(remove.command(), Command::RemoveFile);
     }
 
     #[test]
