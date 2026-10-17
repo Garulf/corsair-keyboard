@@ -1,3 +1,4 @@
+use std::ffi::CStr;
 use std::io::{BufRead, BufReader, Cursor, ErrorKind, Read};
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -10,7 +11,7 @@ use pulseaudio::protocol::{
 };
 
 use crate::Samples;
-use crate::capture::{Capture, DEVICE_CHECK_EVERY, Exit, SampleSink};
+use crate::capture::{Capture, DEVICE_CHECK_EVERY, Exit, SampleSink, follow_moved_default};
 
 const NO_SERVER: &str = "no PulseAudio or PipeWire (pipewire-pulse) server found";
 const RATE: u32 = 48_000;
@@ -32,32 +33,21 @@ impl Capture for PulseMonitor {
         if stream.sample_spec.format != SampleFormat::Float32Le {
             return Err(format!("unsupported sample format {:?}", stream.sample_spec.format));
         }
-        let channels = u16::from(stream.sample_spec.channels);
-        let rate = stream.sample_spec.sample_rate;
         connection.set_read_timeout(READ_TIMEOUT)?;
         device(display_name(&output));
 
-        let mut decoder = FrameDecoder::new(channels);
-        let mut packet = Vec::new();
-        let mut next_check = Instant::now() + DEVICE_CHECK_EVERY;
-        loop {
-            if stop.load(Ordering::Relaxed) {
-                return Ok(Exit::Stopped);
-            }
-            if Instant::now() >= next_check {
-                next_check += DEVICE_CHECK_EVERY;
-                if Connection::open()?.default_sink()?.name != output.name {
-                    return Ok(Exit::DeviceChanged);
-                }
-            }
-            let Some(channel) = connection.read_packet(&mut packet)? else { continue };
-            if channel == stream.channel {
-                sink(Samples { data: decoder.decode(&packet), channels, rate });
-            } else if channel == COMMAND_CHANNEL && connection.is_stream_killed(&packet) {
-                return Err("the PulseAudio server closed the recording stream".to_string());
-            }
-        }
+        let outcome = connection.stream_until_exit(&stream, &output.name, stop, &mut sink);
+        follow_moved_default(outcome, || default_moved_from(&output.name))
     }
+}
+
+fn default_moved_from(captured: &CStr) -> bool {
+    let current = Connection::open().and_then(|mut connection| connection.default_sink()).ok();
+    has_moved(captured, current.as_ref().map(|sink| sink.name.as_c_str()))
+}
+
+fn has_moved(captured: &CStr, current_default: Option<&CStr>) -> bool {
+    current_default.is_some_and(|name| name != captured)
 }
 
 fn display_name(sink: &SinkInfo) -> String {
@@ -104,6 +94,37 @@ impl Connection {
             flags: StreamFlags { adjust_latency: true, ..Default::default() },
             ..Default::default()
         }))
+    }
+
+    fn stream_until_exit(
+        &mut self,
+        stream: &CreateRecordStreamReply,
+        captured: &CStr,
+        stop: &AtomicBool,
+        sink: &mut SampleSink,
+    ) -> Result<Exit, String> {
+        let channels = u16::from(stream.sample_spec.channels);
+        let rate = stream.sample_spec.sample_rate;
+        let mut decoder = FrameDecoder::new(channels);
+        let mut packet = Vec::new();
+        let mut next_check = Instant::now() + DEVICE_CHECK_EVERY;
+        loop {
+            if stop.load(Ordering::Relaxed) {
+                return Ok(Exit::Stopped);
+            }
+            if Instant::now() >= next_check {
+                next_check += DEVICE_CHECK_EVERY;
+                if default_moved_from(captured) {
+                    return Ok(Exit::DeviceChanged);
+                }
+            }
+            let Some(channel) = self.read_packet(&mut packet)? else { continue };
+            if channel == stream.channel {
+                sink(Samples { data: decoder.decode(&packet), channels, rate });
+            } else if channel == COMMAND_CHANNEL && self.is_stream_killed(&packet) {
+                return Err("the PulseAudio server closed the recording stream".to_string());
+            }
+        }
     }
 
     fn request<T: CommandReply>(&mut self, command: &Command) -> Result<T, String> {
@@ -175,6 +196,21 @@ mod tests {
 
     fn little_endian(samples: &[f32]) -> Vec<u8> {
         samples.iter().flat_map(|sample| sample.to_le_bytes()).collect()
+    }
+
+    #[test]
+    fn a_different_default_sink_has_moved() {
+        assert!(has_moved(c"speakers", Some(c"headphones")));
+    }
+
+    #[test]
+    fn the_same_default_sink_has_not_moved() {
+        assert!(!has_moved(c"speakers", Some(c"speakers")));
+    }
+
+    #[test]
+    fn a_failed_default_sink_check_counts_as_no_change() {
+        assert!(!has_moved(c"speakers", None));
     }
 
     #[test]

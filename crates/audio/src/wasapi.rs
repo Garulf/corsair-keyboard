@@ -9,7 +9,7 @@ use cpal::{
 };
 
 use crate::Samples;
-use crate::capture::{Capture, DEVICE_CHECK_EVERY, Exit, SampleSink};
+use crate::capture::{Capture, DEVICE_CHECK_EVERY, Exit, SampleSink, follow_moved_default};
 
 const POLL_EVERY: Duration = Duration::from_millis(50);
 
@@ -40,7 +40,7 @@ impl Capture for Wasapi {
                 return Ok(Exit::Stopped);
             }
             if let Some(ending) = ending.lock().unwrap().take() {
-                return ending;
+                return follow_moved_default(ending, || default_output_id(&host).as_ref() != Some(&id));
             }
             if Instant::now() >= next_check {
                 next_check += DEVICE_CHECK_EVERY;

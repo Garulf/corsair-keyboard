@@ -126,6 +126,16 @@ impl Worker {
     }
 }
 
+pub(crate) fn follow_moved_default(
+    outcome: Result<Exit, String>,
+    default_moved: impl FnOnce() -> bool,
+) -> Result<Exit, String> {
+    match outcome {
+        Err(_) if default_moved() => Ok(Exit::DeviceChanged),
+        outcome => outcome,
+    }
+}
+
 fn set_status(status: &Mutex<Status>, next: Status) {
     *status.lock().unwrap() = next;
 }
@@ -337,6 +347,23 @@ mod tests {
         drop(handle);
 
         assert!(dropping.elapsed() < DEADLINE, "drop took {:?}", dropping.elapsed());
+    }
+
+    #[test]
+    fn an_error_after_the_default_device_moved_is_a_device_change() {
+        assert_eq!(follow_moved_default(Err("gone".to_string()), || true), Ok(Exit::DeviceChanged));
+    }
+
+    #[test]
+    fn an_error_on_an_unchanged_default_device_stays_an_error() {
+        assert_eq!(follow_moved_default(Err("gone".to_string()), || false), Err("gone".to_string()));
+    }
+
+    #[test]
+    fn a_clean_exit_does_not_check_the_default_device() {
+        let checked = || -> bool { panic!("the default device was checked") };
+        assert_eq!(follow_moved_default(Ok(Exit::Stopped), checked), Ok(Exit::Stopped));
+        assert_eq!(follow_moved_default(Ok(Exit::DeviceChanged), checked), Ok(Exit::DeviceChanged));
     }
 
     #[test]
