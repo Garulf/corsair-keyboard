@@ -353,7 +353,7 @@ fn layer_editor(ui: &mut egui::Ui, model: &mut Model) {
 
 fn audio_status_label(audio: &AudioState) -> String {
     match audio {
-        AudioState::Off => "Audio off".to_owned(),
+        AudioState::Off => "Audio off (starts when this profile is active and the keyboard is connected)".to_owned(),
         AudioState::Starting => "Audio starting".to_owned(),
         AudioState::Capturing { device } => format!("Audio capturing: {device}"),
         AudioState::Failed { reason } => format!("Audio failed: {reason}"),
@@ -622,6 +622,13 @@ mod tests {
             self::harness(visualizer_model(AudioState::Capturing { device: "Speakers".into() }), lighting);
         harness.run();
         harness.get_by_label("Audio capturing: Speakers");
+    }
+
+    #[test]
+    fn the_visualizer_editor_explains_when_audio_is_off() {
+        let mut harness = harness(visualizer_model(AudioState::Off), lighting);
+        harness.run();
+        harness.get_by_label("Audio off (starts when this profile is active and the keyboard is connected)");
     }
 
     #[test]
