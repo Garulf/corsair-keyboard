@@ -5,7 +5,8 @@ use k100::Rgb;
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 pub const LAYER_NAME: &str = "cli-effect";
-const EFFECTS: &str = "solid, rainbow_wave, spiral_rainbow, color_wave, visor, color_pulse, rain, type, ripple, off";
+const EFFECTS: &str =
+    "solid, rainbow_wave, spiral_rainbow, color_wave, visor, color_pulse, rain, type, ripple, audio_visualizer, off";
 
 pub fn parse_color(text: &str) -> std::result::Result<Rgb, String> {
     let hex = text.strip_prefix('#').unwrap_or(text);
@@ -33,8 +34,19 @@ pub fn build(name: &str, color: Option<Rgb>) -> std::result::Result<EffectConfig
         "ripple" => {
             EffectConfig::Ripple { color: need()?, background: black, speed: 1500.0, width: 120.0, lifetime_ms: 1500 }
         }
+        "audio_visualizer" => audio_visualizer(color),
         other => return Err(format!("unknown effect {other:?} (choose one of: {EFFECTS})")),
     })
+}
+
+fn audio_visualizer(color: Option<Rgb>) -> EffectConfig {
+    EffectConfig::AudioVisualizer {
+        low: color.unwrap_or(Rgb::new(0x00, 0xFF, 0x40)),
+        high: color.unwrap_or(Rgb::new(0xFF, 0x00, 0x00)),
+        background: Rgb::BLACK,
+        gain: 1.0,
+        decay_ms: 400,
+    }
 }
 
 pub fn apply(profile: &mut Profile, effect: EffectConfig) {
@@ -105,6 +117,27 @@ mod tests {
         assert_eq!(build("solid", red).unwrap(), EffectConfig::Solid { color: Rgb::new(255, 0, 0) });
         let unknown = build("sparkle", red).unwrap_err();
         assert!(unknown.contains("sparkle") && unknown.contains("ripple"), "{unknown}");
+    }
+
+    #[test]
+    fn the_audio_visualizer_builds_with_defaults_and_a_colour_overrides_both_ends() {
+        let defaults = build("audio_visualizer", None).unwrap();
+        assert_eq!(
+            defaults,
+            EffectConfig::AudioVisualizer {
+                low: Rgb::new(0x00, 0xFF, 0x40),
+                high: Rgb::new(0xFF, 0x00, 0x00),
+                background: Rgb::BLACK,
+                gain: 1.0,
+                decay_ms: 400,
+            }
+        );
+        let pink = Rgb::new(255, 0, 128);
+        let EffectConfig::AudioVisualizer { low, high, decay_ms, .. } = build("audio_visualizer", Some(pink)).unwrap()
+        else {
+            panic!("not the audio visualizer");
+        };
+        assert_eq!((low, high, decay_ms), (pink, pink, 400));
     }
 
     #[test]
