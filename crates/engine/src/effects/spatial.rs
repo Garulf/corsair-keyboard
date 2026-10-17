@@ -141,13 +141,19 @@ mod tests {
     use super::*;
     use crate::effects::{EffectConfig, KeyColor};
     use crate::layout::Layout;
+    use crate::spectrum::Spectrum;
     use k100::{LED_COUNT, Rgb};
 
     fn render(config: EffectConfig, seconds: f32) -> Frame {
         let layout = Layout::ansi();
         let mut effect = config.build();
         let mut out = [Rgb::BLACK; LED_COUNT];
-        let ctx = FrameCtx { time: Duration::from_secs_f32(seconds), layout: &layout, presses: &[] };
+        let ctx = FrameCtx {
+            time: Duration::from_secs_f32(seconds),
+            layout: &layout,
+            presses: &[],
+            spectrum: &Spectrum::SILENT,
+        };
         effect.render(&ctx, &mut out);
         out
     }

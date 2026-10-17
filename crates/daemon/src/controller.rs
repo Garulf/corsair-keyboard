@@ -6,7 +6,7 @@ use actions::{
     RecorderState, RepeatMode,
 };
 use bragi::{PollingRate, PropertyId};
-use engine::{Compositor, KeyPress, Layout};
+use engine::{Compositor, KeyPress, Layout, Spectrum};
 use ipc::{
     DaemonState, Debounce, DeviceState, Event, MAX_DEBOUNCE_TIMEOUT, PROTOCOL_VERSION, Profile, Reply, Request,
     SettingsPatch,
@@ -296,7 +296,7 @@ impl Controller {
         if self.link.is_none() {
             return;
         }
-        let frame = self.compositor.render(now, presses);
+        let frame = self.compositor.render(now, presses, &Spectrum::SILENT);
         self.last_frame = Some(frame);
         let _ = self.with_link(|link| link.write_frame(&frame));
         let records = self.indicators.records(now);

@@ -272,7 +272,7 @@ fn preview(
                 _ => None,
             }));
         }
-        session.write_frame(&compositor.render(started.elapsed(), &presses))?;
+        session.write_frame(&compositor.render(started.elapsed(), &presses, &engine::Spectrum::SILENT))?;
         frames += 1;
         if last_ping.elapsed() >= k100::PING_INTERVAL {
             session.ping()?;
