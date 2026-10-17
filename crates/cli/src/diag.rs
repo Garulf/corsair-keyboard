@@ -60,6 +60,13 @@ pub enum KeyboardDiag {
     },
     /// Enter software mode and exit without restoring, to observe firmware revert
     Kill,
+    /// Read an onboard file without changing it and print it as hex
+    File {
+        #[arg(value_parser = parse_file_id)]
+        id: u16,
+        #[arg(long)]
+        out: Option<std::path::PathBuf>,
+    },
     /// Play a layer file on the keyboard (effects react to key presses)
     Preview {
         file: std::path::PathBuf,
@@ -94,6 +101,7 @@ fn keyboard(command: KeyboardDiag, stop: &AtomicBool) -> Result<()> {
         KeyboardDiag::Mask { key, seconds } => mask(Session::start(commands, model)?, key, seconds, stop),
         KeyboardDiag::Watch { seconds } => watch(Session::start(commands, model)?, input, seconds, stop),
         KeyboardDiag::Kill => kill(Session::start(commands, model)?),
+        KeyboardDiag::File { id, out } => read_file(commands, id, out.as_deref()),
         KeyboardDiag::Preview { file, seconds, fps } => {
             preview(Session::start(commands, model)?, input, &file, seconds, fps, stop)
         }
@@ -227,6 +235,44 @@ fn kill(mut session: Session<HidTransport>) -> Result<()> {
     println!("software mode with magenta lights; exiting without restoring");
     std::mem::forget(session);
     std::process::exit(0);
+}
+
+const READ_HANDLE: u8 = 3;
+
+fn read_file(commands: HidTransport, id: u16, out: Option<&std::path::Path>) -> Result<()> {
+    let data = Device::new(commands).read_file(READ_HANDLE, bragi::FileId(id))?;
+    println!("{}", hex_dump(&data));
+    if let Some(path) = out {
+        std::fs::write(path, &data)?;
+        println!("wrote {} bytes to {}", data.len(), path.display());
+    }
+    Ok(())
+}
+
+fn hex_dump(bytes: &[u8]) -> String {
+    let shown = bytes.iter().rposition(|&b| b != 0).map_or(0, |i| (i / 16 + 1) * 16).min(bytes.len());
+    let mut lines: Vec<String> = bytes[..shown]
+        .chunks(16)
+        .enumerate()
+        .map(|(row, chunk)| {
+            let hex: Vec<String> = chunk.iter().map(|b| format!("{b:02x}")).collect();
+            format!("{:04x}  {}", row * 16, hex.join(" "))
+        })
+        .collect();
+    let hidden = bytes.len() - shown;
+    lines.push(match hidden {
+        0 => format!("({} bytes total)", bytes.len()),
+        _ => format!("({} bytes total, {hidden} trailing zero bytes not shown)", bytes.len()),
+    });
+    lines.join("\n")
+}
+
+fn parse_file_id(text: &str) -> std::result::Result<u16, String> {
+    let parsed = match text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
+        Some(hex) => u16::from_str_radix(hex, 16),
+        None => text.parse(),
+    };
+    parsed.map_err(|error| format!("invalid file id {text:?}: {error}"))
 }
 
 fn sleep_unless_stopped(duration: Duration, stop: &AtomicBool) {
@@ -475,6 +521,28 @@ mod tests {
         assert!(matches!(audio, Diag::Audio { seconds: 3 }));
         let info = Cli::try_parse_from(["diag", "info"]).unwrap().diag;
         assert!(matches!(info, Diag::Keyboard(KeyboardDiag::Info)));
+        let file = Cli::try_parse_from(["diag", "file", "0x0f"]).unwrap().diag;
+        assert!(matches!(file, Diag::Keyboard(KeyboardDiag::File { id: 0x0F, out: None })));
+        let decimal = Cli::try_parse_from(["diag", "file", "17", "--out", "x.bin"]).unwrap().diag;
+        assert!(matches!(decimal, Diag::Keyboard(KeyboardDiag::File { id: 17, out: Some(_) })));
+    }
+
+    #[test]
+    fn hex_dump_prints_offset_rows_up_to_the_last_nonzero_row() {
+        let mut bytes = vec![0u8; 64];
+        bytes[0] = 0x13;
+        bytes[17] = 0xAB;
+        assert_eq!(
+            hex_dump(&bytes),
+            [
+                "0000  13 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00",
+                "0010  00 ab 00 00 00 00 00 00 00 00 00 00 00 00 00 00",
+                "(64 bytes total, 32 trailing zero bytes not shown)",
+            ]
+            .join("\n")
+        );
+        assert_eq!(hex_dump(&[0u8; 4]), "(4 bytes total, 4 trailing zero bytes not shown)");
+        assert_eq!(hex_dump(&[1, 2]), "0000  01 02\n(2 bytes total)");
     }
 
     #[test]
