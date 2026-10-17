@@ -78,6 +78,21 @@ pub fn recording_text(state: RecorderState) -> String {
     }
 }
 
+pub fn recording_lock(state: RecorderState, key: Key) -> Option<&'static str> {
+    let index = key.index()?;
+    match state {
+        RecorderState::Idle => None,
+        RecorderState::AwaitingKey if (k100::led::G1..=k100::led::G6).contains(&index) => {
+            Some("The recorder is waiting for a G key; G keys can be edited once it finishes.")
+        }
+        RecorderState::AwaitingKey => None,
+        RecorderState::Recording { key } if key == index => {
+            Some("A macro is being recorded into this key; it can be edited once the recording ends.")
+        }
+        RecorderState::Recording { .. } => None,
+    }
+}
+
 pub fn recording_blocker(model: &Model) -> Option<String> {
     let connected = model.state.as_ref().is_some_and(|state| matches!(state.device, DeviceState::Connected { .. }));
     if !connected {
@@ -142,9 +157,18 @@ fn key_editor(ui: &mut egui::Ui, model: &mut Model) {
         Err(reason) => {
             ui.label(reason);
         }
-        Ok(key) => assignment_editor(ui, model, key),
+        Ok(key) => locked_assignment_editor(ui, model, key),
     }
     recorder(ui, model);
+}
+
+fn locked_assignment_editor(ui: &mut egui::Ui, model: &mut Model, key: Key) {
+    let state = model.state.as_ref().map_or(RecorderState::Idle, |state| state.recording);
+    let lock = recording_lock(state, key);
+    if let Some(reason) = lock {
+        ui.weak(reason);
+    }
+    ui.add_enabled_ui(lock.is_none(), |ui| assignment_editor(ui, model, key));
 }
 
 fn assignment_editor(ui: &mut egui::Ui, model: &mut Model, key: Key) {
@@ -291,6 +315,15 @@ mod tests {
     }
 
     #[test]
+    fn only_the_key_being_recorded_into_is_locked() {
+        assert_eq!(recording_lock(RecorderState::Idle, key("g2")), None);
+        assert!(recording_lock(RecorderState::Recording { key: 132 }, key("g2")).is_some());
+        assert_eq!(recording_lock(RecorderState::Recording { key: 132 }, key("g1")), None);
+        assert!(recording_lock(RecorderState::AwaitingKey, key("g1")).is_some(), "any G key may become the target");
+        assert_eq!(recording_lock(RecorderState::AwaitingKey, key("a")), None);
+    }
+
+    #[test]
     fn an_unassigned_key_can_be_given_an_action() {
         let mut harness = harness(keys_model(131), keys);
         harness.run();
@@ -347,6 +380,36 @@ mod tests {
         harness.get_by_label("Cancel recording").click();
         harness.run();
         assert_eq!(sent(harness.state_mut()), [ipc::Request::CancelRecording]);
+    }
+
+    #[test]
+    fn the_key_being_recorded_into_cannot_be_edited_until_the_recording_ends() {
+        let mut model = keys_model(132);
+        model.draft.as_mut().unwrap().profile.assignments =
+            vec![assigned("g1", Action::NextProfile), assigned("g2", Action::NextProfile)];
+        model.state.as_mut().unwrap().recording = RecorderState::Recording { key: 132 };
+        let mut harness = harness(model, keys);
+        harness.run();
+        assert!(harness.get_by_label("Clear assignment").accesskit_node().is_disabled());
+        harness.get_by_label_contains("being recorded");
+        harness.state_mut().selection = BTreeSet::from([131]);
+        harness.run();
+        assert!(!harness.get_by_label("Clear assignment").accesskit_node().is_disabled());
+        harness.state_mut().selection = BTreeSet::from([132]);
+        harness.state_mut().state.as_mut().unwrap().recording = RecorderState::Idle;
+        harness.run();
+        assert!(!harness.get_by_label("Clear assignment").accesskit_node().is_disabled());
+    }
+
+    #[test]
+    fn an_unassigned_key_being_recorded_into_cannot_be_given_an_action() {
+        let mut model = keys_model(132);
+        model.state.as_mut().unwrap().recording = RecorderState::Recording { key: 132 };
+        let mut harness = harness(model, keys);
+        harness.run();
+        harness.get_by_label("Assign an action").click();
+        harness.run();
+        assert!(assignments(harness.state()).is_empty());
     }
 
     #[test]
