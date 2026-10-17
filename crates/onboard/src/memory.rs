@@ -33,6 +33,7 @@ pub enum Operation {
 struct State {
     files: BTreeMap<u16, Vec<u8>>,
     properties: BTreeMap<u16, u32>,
+    read_failures: BTreeMap<u16, Failure>,
     create_failures: BTreeMap<u16, Failure>,
     remove_failures: BTreeMap<u16, Failure>,
     set_property_failures: BTreeMap<u16, Failure>,
@@ -91,6 +92,10 @@ impl MemoryStore {
         self.fail_create(id, Failure::Status(Status::InvalidArgument));
     }
 
+    pub fn fail_read(&self, id: u16, failure: Failure) {
+        self.state().read_failures.insert(id, failure);
+    }
+
     pub fn fail_create(&self, id: u16, failure: Failure) {
         self.state().create_failures.insert(id, failure);
     }
@@ -105,6 +110,7 @@ impl MemoryStore {
 
     pub fn stop_failing(&self) {
         let mut state = self.state();
+        state.read_failures.clear();
         state.create_failures.clear();
         state.remove_failures.clear();
         state.set_property_failures.clear();
@@ -141,7 +147,11 @@ fn missing(command: Command) -> DeviceError {
 
 impl FileStore for MemoryStore {
     fn read(&mut self, file: FileId) -> Result<Vec<u8>, DeviceError> {
-        self.state().files.get(&file.0).cloned().ok_or_else(|| missing(Command::OpenFile))
+        let state = self.state();
+        if let Some(failure) = state.read_failures.get(&file.0) {
+            return Err(failure.error(Command::OpenFile));
+        }
+        state.files.get(&file.0).cloned().ok_or_else(|| missing(Command::OpenFile))
     }
 
     fn write(&mut self, file: FileId, data: &[u8]) -> Result<(), DeviceError> {
@@ -168,10 +178,7 @@ impl FileStore for MemoryStore {
         if let Some(failure) = state.create_failures.get(&file.0) {
             return Err(failure.error(Command::CreateFile));
         }
-        if state.files.contains_key(&file.0) {
-            return Err(Failure::Status(Status::InvalidArgument).error(Command::CreateFile));
-        }
-        state.files.insert(file.0, Vec::new());
+        state.files.entry(file.0).or_default();
         Ok(())
     }
 
@@ -224,8 +231,25 @@ mod tests {
         assert_eq!(status(store.read(FileId(0x6D61))), Some(Status::InvalidDeviceAddress));
         assert_eq!(status(store.write(FileId(0x6D61), &[1])), Some(Status::InvalidDeviceAddress));
         assert_eq!(status(store.remove(FileId(0x6D61))), Some(Status::InvalidDeviceAddress));
-        assert_eq!(status(store.create(FileId(0x6D60))), Some(Status::InvalidArgument));
         assert_eq!(status(store.get_property(PropertyId::FREE_STORAGE_SIZE)), Some(Status::PropertyNotSupported));
+    }
+
+    #[test]
+    fn creating_an_id_that_exists_succeeds_like_the_firmware_and_keeps_its_bytes() {
+        let mut store = MemoryStore::with_files([(0x6D60, vec![1, 2])]);
+        store.create(FileId(0x6D60)).unwrap();
+        assert_eq!(store.files()[&0x6D60], [1, 2]);
+    }
+
+    #[test]
+    fn failing_reads_report_their_failure_until_failures_stop() {
+        let mut store = MemoryStore::with_files([(0x6D60, vec![1])]);
+        store.fail_read(0x6D60, Failure::Status(Status::HardwareError));
+        store.fail_read(0x6D61, Failure::Timeout);
+        assert_eq!(status(store.read(FileId(0x6D60))), Some(Status::HardwareError));
+        assert!(matches!(store.read(FileId(0x6D61)), Err(DeviceError::Timeout(Command::OpenFile))));
+        store.stop_failing();
+        assert_eq!(store.read(FileId(0x6D60)).unwrap(), [1]);
     }
 
     #[test]

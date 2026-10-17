@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use bragi::{FileId, OperatingMode, PropertyId};
+use bragi::{FileId, OperatingMode, PropertyId, Status};
 use k100::{Device, DeviceError, Transport};
 
 use crate::{Backups, FREE_USE_IDS, OnboardError, OnboardTree, ProfileRoot, ProfilesList, Snapshot, decode_file};
@@ -229,6 +229,9 @@ fn write_new_tree<S: FileStore + ?Sized>(
     let mut candidates = FREE_USE_IDS.filter(|id| !used.contains(id));
     while created.len() < tree.file_count() {
         let id = candidates.next().ok_or(OnboardError::NoFreeIds)?;
+        if read_if_present(store, id)?.is_some() {
+            continue;
+        }
         match store.create(FileId(id)) {
             Ok(()) => created.push(id),
             Err(refused) if refused.status().is_some() => {}
@@ -418,7 +421,7 @@ fn walk_tree<S: FileStore + ?Sized>(store: &mut S, root: u16) -> Result<Walk, On
 fn read_if_present<S: FileStore + ?Sized>(store: &mut S, id: u16) -> Result<Option<Vec<u8>>, OnboardError> {
     match store.read(FileId(id)) {
         Ok(bytes) => Ok(Some(bytes)),
-        Err(unreadable) if unreadable.status().is_some() => Ok(None),
+        Err(missing) if missing.status() == Some(Status::InvalidDeviceAddress) => Ok(None),
         Err(error) => Err(error.into()),
     }
 }
@@ -574,6 +577,31 @@ mod tests {
         store.refuse_create(0x6D6F);
         assert_eq!(save(&mut store, &backups, &red_tree(), None, now()).unwrap().root, 0x6D76);
         assert!(!store.files().contains_key(&0x6D6F));
+    }
+
+    #[test]
+    fn an_unreferenced_file_at_the_first_free_id_is_skipped_and_left_untouched() {
+        let (mut store, backups, _temp) = rig();
+        let stray = vec![0x6E, 0x07, 0x02, 0, 0, 0, 0, 0, 0x03];
+        store.insert(0x6D6F, stray.clone());
+        let saved = save(&mut store, &backups, &red_tree(), None, now()).unwrap();
+        assert_eq!(saved.root, 0x6D76);
+        assert_eq!(store.files()[&0x6D6F], stray);
+        let touches_stray = |op: &Operation| matches!(op, Operation::Create(0x6D6F) | Operation::Write(0x6D6F));
+        assert!(!store.operations().iter().any(touches_stray), "{:?}", store.operations());
+    }
+
+    #[test]
+    fn a_probe_the_keyboard_does_not_answer_with_missing_aborts_the_save_and_removes_what_it_created() {
+        for failure in [Failure::Status(Status::HardwareError), Failure::Timeout] {
+            let (mut store, backups, _temp) = rig();
+            let before = store.files();
+            store.fail_read(0x6D72, failure);
+            let error = save(&mut store, &backups, &red_tree(), None, now()).unwrap_err();
+            assert_eq!(error.lost_device(), failure == Failure::Timeout, "{error}");
+            assert_eq!(store.files(), before);
+            assert!(!store.operations().contains(&Operation::Create(0x6D72)), "{:?}", store.operations());
+        }
     }
 
     #[test]
@@ -866,6 +894,21 @@ mod tests {
         changed.write_to(&dir).unwrap();
         store.fail_write(2, Failure::Status(Status::HardwareError));
         assert!(matches!(restore(&mut store, &backups, &dir, now()), Err(OnboardError::Device(_))));
+        assert_eq!(store.files(), before);
+    }
+
+    #[test]
+    fn restore_stops_when_a_file_read_fails_for_a_reason_other_than_missing() {
+        let (mut store, backups, temp) = rig();
+        store.insert(0x6D80, vec![0x6E, 0x07, 0x02, 0, 0, 0, 0, 0, 0x03]);
+        let before = store.files();
+        let mut with_extra = snapshot(&mut store).unwrap();
+        with_extra.files.insert(0x6D80, vec![0x6E, 0x07, 0x02, 0, 0, 0, 0, 0, 0x04]);
+        let dir = temp.path().join("extra");
+        with_extra.write_to(&dir).unwrap();
+        store.fail_read(0x6D80, Failure::Status(Status::HardwareError));
+        let error = restore(&mut store, &backups, &dir, now()).unwrap_err();
+        assert_eq!(error.device().and_then(DeviceError::status), Some(Status::HardwareError), "{error}");
         assert_eq!(store.files(), before);
     }
 
