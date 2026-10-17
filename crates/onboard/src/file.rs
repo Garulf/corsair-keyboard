@@ -24,10 +24,16 @@ pub enum StoredFile {
     Other { header: u16 },
 }
 
+fn header(bytes: &[u8]) -> Option<u16> {
+    match bytes {
+        [low, high, ..] => Some(u16::from_le_bytes([*low, *high])),
+        _ => None,
+    }
+}
+
 pub fn decode(bytes: &[u8]) -> Result<StoredFile, DecodeError> {
-    let header = match bytes {
-        [low, high, ..] => u16::from_le_bytes([*low, *high]),
-        _ => return Err(DecodeError(format!("a stored file needs a 2 byte header, got {} bytes", bytes.len()))),
+    let Some(header) = header(bytes) else {
+        return Err(DecodeError(format!("a stored file needs a 2 byte header, got {} bytes", bytes.len())));
     };
     Ok(match header {
         ProfilesList::HEADER => StoredFile::ProfilesList(ProfilesList::decode(bytes)?),
@@ -43,6 +49,21 @@ pub fn decode(bytes: &[u8]) -> Result<StoredFile, DecodeError> {
         other if EffectKind::from_header(other).is_some() => StoredFile::Lighting(CommonLighting::decode(bytes)?),
         other => StoredFile::Other { header: other },
     })
+}
+
+pub fn children_of(bytes: &[u8]) -> Result<Vec<u16>, DecodeError> {
+    match decode(bytes) {
+        Ok(file) => Ok(file.children()),
+        Err(error) if names_children(bytes) => Err(error),
+        Err(_) => Ok(Vec::new()),
+    }
+}
+
+fn names_children(bytes: &[u8]) -> bool {
+    matches!(
+        header(bytes),
+        Some(ProfileRoot::HEADER | AssignmentMap::HEADER | LightingsList::HEADER | DialModes::HEADER | BLOB_HEADER)
+    )
 }
 
 fn decode_blob(bytes: &[u8]) -> Result<StoredFile, DecodeError> {
@@ -145,6 +166,29 @@ mod tests {
         }
         assert_eq!(decode(file(0x6D61)).unwrap().encode(), None);
         assert_eq!(decode(file(0x6D6D)).unwrap().encode(), None);
+    }
+
+    fn with_extra_byte(id: u16) -> Vec<u8> {
+        let mut bytes = file(id).to_vec();
+        bytes.push(0xFF);
+        bytes
+    }
+
+    #[test]
+    fn a_file_that_names_children_but_fails_to_decode_has_no_known_children() {
+        for id in [0x6D70, 0x6D69, 0x6D6C, 0x6D6E] {
+            assert!(children_of(&with_extra_byte(id)).is_err(), "{id:#x}");
+        }
+        assert!(children_of(&[0x0B, 0xB1, 0x01, 1, 0, 0, 0, 0, 2, 0x60]).is_err());
+        assert_eq!(children_of(file(0x6D6C)).unwrap(), [0x6D6B]);
+    }
+
+    #[test]
+    fn a_leaf_or_unknown_file_that_fails_to_decode_has_no_children() {
+        assert_eq!(children_of(&with_extra_byte(0x6D62)), Ok(Vec::new()));
+        assert_eq!(children_of(&with_extra_byte(0x6D6B)), Ok(Vec::new()));
+        assert_eq!(children_of(&[0x87, 0x00, 0x01]), Ok(Vec::new()));
+        assert_eq!(children_of(&[]), Ok(Vec::new()));
     }
 
     #[test]

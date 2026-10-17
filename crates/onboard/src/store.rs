@@ -5,7 +5,7 @@ use std::time::SystemTime;
 use bragi::{FileId, OperatingMode, PropertyId, Status};
 use k100::{Device, DeviceError, Transport};
 
-use crate::{Backups, FREE_USE_IDS, OnboardError, OnboardTree, ProfileRoot, ProfilesList, Snapshot, decode_file};
+use crate::{Backups, FREE_USE_IDS, OnboardError, OnboardTree, ProfileRoot, ProfilesList, Snapshot, children_of};
 
 pub const STORE_HANDLE: u8 = 3;
 
@@ -155,7 +155,7 @@ pub fn read_tree<S: FileStore + ?Sized>(store: &mut S, root: u16) -> Result<Stor
     let mut files = BTreeMap::new();
     let mut pending = VecDeque::from([(root, root_bytes)]);
     while let Some((id, bytes)) = pending.pop_front() {
-        for child in children(&bytes) {
+        for child in children_of(&bytes).map_err(|error| OnboardError::Decode(id, error))? {
             if child != root && !files.contains_key(&child) && !pending.iter().any(|(queued, _)| *queued == child) {
                 pending.push_back((child, store.read(FileId(child))?));
             }
@@ -163,10 +163,6 @@ pub fn read_tree<S: FileStore + ?Sized>(store: &mut S, root: u16) -> Result<Stor
         files.insert(id, bytes);
     }
     Ok(StoredTree { root, name, files })
-}
-
-fn children(bytes: &[u8]) -> Vec<u16> {
-    decode_file(bytes).map(|file| file.children()).unwrap_or_default()
 }
 
 pub fn snapshot<S: FileStore + ?Sized>(store: &mut S) -> Result<Snapshot, OnboardError> {
@@ -408,10 +404,10 @@ fn walk_tree<S: FileStore + ?Sized>(store: &mut S, root: u16) -> Result<Walk, On
             walk.complete = false;
             continue;
         };
-        if id == root && ProfileRoot::decode(&bytes).is_err() {
-            walk.complete = false;
-        } else {
-            pending.extend(children(&bytes));
+        let unreadable_root = id == root && ProfileRoot::decode(&bytes).is_err();
+        match children_of(&bytes) {
+            Ok(children) if !unreadable_root => pending.extend(children),
+            _ => walk.complete = false,
         }
         walk.files.insert(id, bytes);
     }
@@ -436,7 +432,7 @@ fn validated_roots(snapshot: &Snapshot, dir: &Path) -> Result<Vec<u16>, OnboardE
     }
     while let Some(id) = pending.pop() {
         if seen.insert(id) {
-            pending.extend(children(snapshot.files.get(&id).ok_or_else(not_a_backup)?));
+            pending.extend(children_of(snapshot.files.get(&id).ok_or_else(not_a_backup)?).map_err(|_| not_a_backup())?);
         }
     }
     Ok(list.roots)
@@ -546,6 +542,25 @@ mod tests {
         assert!(
             matches!(&error, OnboardError::Device(device) if device.status() == Some(Status::InvalidDeviceAddress))
         );
+    }
+
+    fn with_extra_byte(store: &crate::MemoryStore, id: u16) {
+        let mut bytes = store.files()[&id].clone();
+        bytes.push(0xFF);
+        store.insert(id, bytes);
+    }
+
+    #[test]
+    fn a_slot_whose_dial_modes_file_fails_to_decode_blocks_changes_and_is_named() {
+        let (mut store, backups, _temp) = rig();
+        with_extra_byte(&store, 0x6D6E);
+        let before = store.files();
+        let error = save(&mut store, &backups, &red_tree(), None, now()).unwrap_err();
+        assert!(matches!(error, OnboardError::Decode(0x6D6E, _)), "{error}");
+        assert!(error.to_string().contains("0x6d6e"), "{error}");
+        assert!(matches!(list(&mut store), Err(OnboardError::Decode(0x6D6E, _))));
+        assert_eq!(store.files(), before);
+        assert!(!backups.root().exists());
     }
 
     #[test]
@@ -942,6 +957,27 @@ mod tests {
         assert!(ICUE_TREE.iter().all(|id| files[id] == original[id]));
         assert!(RED_IDS.iter().all(|id| files.contains_key(id)));
         assert!(changed.backup.join("6d75.bin").exists());
+    }
+
+    #[test]
+    fn restore_leaves_a_slot_with_an_undecodable_list_alone_and_reports_its_files() {
+        let (mut store, backups, _temp) = rig();
+        let original = store.files();
+        let saved = save(&mut store, &backups, &red_tree(), None, now()).unwrap();
+        let files = store.files();
+        let lightings = RED_IDS
+            .into_iter()
+            .find(|id| matches!(crate::decode_file(&files[id]), Ok(crate::StoredFile::LightingsList(_))))
+            .unwrap();
+        let hidden = children_of(&files[&lightings]).unwrap();
+        with_extra_byte(&store, lightings);
+        let changed = restore(&mut store, &backups, &saved.backup, now()).unwrap();
+        let visible: Vec<u16> = RED_IDS.into_iter().filter(|id| !hidden.contains(id)).collect();
+        assert_eq!(changed.leftovers, visible);
+        let files = store.files();
+        assert!(RED_IDS.iter().all(|id| files.contains_key(id)));
+        assert!(ICUE_TREE.iter().all(|id| files[id] == original[id]));
+        assert_eq!(files[&0x0F], original[&0x0F]);
     }
 
     #[test]

@@ -24,7 +24,7 @@ pub use convert::{
     ActionFile, Conversion, KeyAction, MAX_EFFECTS, Report, convert, convert_assignments, convert_dial, convert_layers,
 };
 pub use error::OnboardError;
-pub use file::{StoredFile, decode as decode_file};
+pub use file::{StoredFile, children_of, decode as decode_file};
 pub use lighting::{
     CommonLighting, Direction, EffectDuration, EffectKind, HwColor, LightingEntry, LightingsList, SPECIFIED_COLORS,
     START_WITH_PROFILE, Speed,
