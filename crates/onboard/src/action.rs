@@ -418,6 +418,29 @@ mod tests {
         assert_eq!(&action.encode()[16..20], [0x0D, 0x14, 0x00, 0x05]);
     }
 
+    fn first_word(event: MacroEvent) -> [u8; WORD_LEN] {
+        MacroAction { events: vec![event] }.encode()[16..].try_into().unwrap()
+    }
+
+    #[test]
+    fn sixteen_and_twenty_four_bit_delays_encode_little_endian() {
+        assert_eq!(first_word(MacroEvent::Delay16(300)), [0x07, 0x2C, 0x01, 0, 0, 0, 0, 0]);
+        assert_eq!(first_word(MacroEvent::Delay16(0xFFFF)), [0x07, 0xFF, 0xFF, 0, 0, 0, 0, 0]);
+        assert_eq!(
+            first_word(MacroEvent::RandomDelay16 { min: 5000, max: 9000 }),
+            [0x08, 0x88, 0x13, 0x28, 0x23, 0, 0, 0]
+        );
+        assert_eq!(first_word(MacroEvent::Delay24(70_000)), [0x0E, 0x70, 0x11, 0x01, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn scroll_events_encode_their_signed_step() {
+        assert_eq!(first_word(MacroEvent::VerticalScroll(-2)), [0x0A, 0xFE, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(first_word(MacroEvent::VerticalScroll(3)), [0x0A, 0x03, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(first_word(MacroEvent::HorizontalScroll(-1)), [0x09, 0xFF, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(first_word(MacroEvent::HorizontalScroll(5)), [0x09, 0x05, 0, 0, 0, 0, 0, 0]);
+    }
+
     #[test]
     fn delays_use_the_smallest_opcode() {
         assert_eq!(MacroEvent::delay(50), MacroEvent::Delay8(50));
