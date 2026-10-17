@@ -22,7 +22,7 @@ impl AudioVisualizer {
     fn follow(&mut self, ctx: &FrameCtx) {
         let elapsed = self.last.map_or(Duration::ZERO, |last| ctx.time.saturating_sub(last));
         self.last = Some(ctx.time);
-        let gain = self.gain.clamp(GAIN_RANGE.0, GAIN_RANGE.1);
+        let gain = if self.gain.is_finite() { self.gain } else { 1.0 }.clamp(GAIN_RANGE.0, GAIN_RANGE.1);
         let fall = if self.decay.is_zero() { 1.0 } else { elapsed.as_secs_f32() / self.decay.as_secs_f32() };
         for (level, band) in self.levels.iter_mut().zip(ctx.spectrum.bands) {
             let target = (band * gain).min(1.0);
@@ -145,6 +145,13 @@ mod tests {
         let maximum = render(&mut *visualizer(10.0, 400), 0.0, &flat(0.2));
         assert_eq!(clamped, maximum);
         assert_ne!(maximum[LIGHT_BAR_FIRST], BACKGROUND, "0.2 at gain 10 fills the column");
+    }
+
+    #[test]
+    fn a_non_finite_gain_draws_as_unit_gain() {
+        let unit = render(&mut *visualizer(1.0, 400), 0.0, &flat(0.2));
+        let nan = render(&mut *visualizer(f32::NAN, 400), 0.0, &flat(0.2));
+        assert_eq!(nan, unit);
     }
 
     #[test]
