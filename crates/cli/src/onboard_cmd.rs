@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use clap::{Args, Subcommand};
-use daemon::config::ConfigDir;
-use ipc::{Client, ClientError, InstanceLock, OnboardRequest, OnboardSlot, Reply, Request, lock_path};
+use daemon::config::{ConfigDir, profile_file_name};
+use ipc::{Client, ClientError, InstanceLock, OnboardRequest, OnboardSlot, Profile, Reply, Request, lock_path};
 use k100::Device;
 use k100::hid::{OpenedDevice, open_device};
 use onboard::{Backups, Conversion, convert, execute, replay_hardware_profile};
@@ -121,7 +121,10 @@ fn through_daemon(mut client: Client, request: &OnboardRequest) -> Result<()> {
 fn direct(request: &OnboardRequest, config_dir: Option<PathBuf>) -> Result<()> {
     let _lock = direct_lock(&lock_path())?;
     let config = config_folder(config_dir)?;
-    let (profiles, _load_errors) = config.load_profiles();
+    let profiles = match request {
+        OnboardRequest::Save { profile, .. } => vec![find_profile(&config, profile)?],
+        _ => Vec::new(),
+    };
     let OpenedDevice { commands, model, .. } = open_device()?;
     let mut device = Device::new(commands);
     let named = |name: &str| profiles.iter().find(|profile| profile.name == name).cloned();
@@ -154,13 +157,26 @@ fn config_folder(config_dir: Option<PathBuf>) -> Result<ConfigDir> {
 fn dry_run(name: &str, route: Route, config_dir: Option<PathBuf>) -> Result<()> {
     let profile = match route {
         Route::Daemon(mut client) => remote::fetch(&mut client, name.to_owned())?,
-        Route::Direct => {
-            let (profiles, _load_errors) = config_folder(config_dir)?.load_profiles();
-            profiles.into_iter().find(|profile| profile.name == name).ok_or(format!("no profile named {name:?}"))?
-        }
+        Route::Direct => find_profile(&config_folder(config_dir)?, name)?,
     };
     println!("{}", dry_run_text(&convert(&profile)));
     Ok(())
+}
+
+fn find_profile(config: &ConfigDir, name: &str) -> Result<Profile> {
+    let (profiles, load_errors) = config.load_profiles();
+    let found = profiles.into_iter().find(|profile| profile.name == name);
+    found.ok_or_else(|| unknown_profile(config, name, &load_errors).into())
+}
+
+fn unknown_profile(config: &ConfigDir, name: &str, load_errors: &[String]) -> String {
+    let own_file = format!("{}:", config.profiles_dir().join(profile_file_name(name)).display());
+    let quoted_name = format!("{name:?}");
+    let own_error = load_errors.iter().find(|error| error.starts_with(&own_file) || error.contains(&quoted_name));
+    match own_error {
+        Some(error) => format!("profile {name:?} could not be loaded: {error}"),
+        None => format!("no profile named {name:?}"),
+    }
 }
 
 fn render(reply: Reply) -> Result<String> {
@@ -264,6 +280,32 @@ mod tests {
         assert!(refusal.contains("k100d") && refusal.contains("did not answer"), "{refusal}");
         drop(held);
         direct_lock(&path).unwrap();
+    }
+
+    fn config_with(files: &[(&str, &str)]) -> (tempfile::TempDir, ConfigDir) {
+        let temp = tempfile::tempdir().unwrap();
+        let config = ConfigDir::new(temp.path().to_path_buf());
+        std::fs::create_dir_all(config.profiles_dir()).unwrap();
+        for (file, text) in files {
+            std::fs::write(config.profiles_dir().join(file), text).unwrap();
+        }
+        (temp, config)
+    }
+
+    #[test]
+    fn a_profile_that_failed_to_load_reports_its_load_error() {
+        let (_temp, config) = config_with(&[("games.toml", "name = \"games\"\n[[layers]\n")]);
+        let error = find_profile(&config, "games").unwrap_err().to_string();
+        assert!(error.contains("games.toml") && error.contains("TOML parse error"), "{error}");
+        assert!(!error.contains("no profile named"), "{error}");
+    }
+
+    #[test]
+    fn a_profile_that_does_not_exist_is_named_and_others_load() {
+        let red = "name = \"red\"\n";
+        let (_temp, config) = config_with(&[("red.toml", red), ("broken.toml", "name = ")]);
+        assert_eq!(find_profile(&config, "games").unwrap_err().to_string(), "no profile named \"games\"");
+        assert_eq!(find_profile(&config, "red").unwrap().name, "red");
     }
 
     #[test]
