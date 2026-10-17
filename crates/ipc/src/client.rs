@@ -39,6 +39,13 @@ pub fn socket_path() -> Option<PathBuf> {
     Some(dir.join("k100d.sock"))
 }
 
+pub fn lock_path() -> PathBuf {
+    match socket_path() {
+        Some(socket) => socket.with_extension("lock"),
+        None => std::env::temp_dir().join("k100d.lock"),
+    }
+}
+
 #[derive(Debug)]
 pub struct Client {
     reader: BufReader<Stream>,

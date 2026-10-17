@@ -1,0 +1,17 @@
+[package]
+name = "install"
+description = "Autostart entries for k100d on Windows and Linux"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+winreg.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+directories.workspace = true
+
+[dev-dependencies]
+ipc.workspace = true
+tempfile.workspace = true

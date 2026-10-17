@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=K100 daemon
+Comment=Lighting and key actions for the Corsair K100
+Exec=k100 daemon
+Terminal=false
+X-GNOME-Autostart-enabled=true

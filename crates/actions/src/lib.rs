@@ -6,7 +6,7 @@ mod config;
 
 pub use config::{
     Action, Assignment, DialConfig, DialMode, DialModeKind, MacroStep, MouseButton, PassThrough, RepeatMode,
-    key_mappings, validate,
+    assignable, key_mappings, validate,
 };
 
 mod player;

@@ -3,9 +3,10 @@ use std::time::Duration;
 
 use k100::{InputEvent, led};
 
-use crate::config::{Assignment, DialConfig, DialMode};
+use crate::config::{Assignment, DialConfig, DialMode, assignable};
 use crate::dial::Dial;
 use crate::intent::{Intent, ProfileTarget, action_intents};
+use crate::keys::Key;
 use crate::recorder::{Recorder, RecorderOutcome, RecorderState};
 
 pub struct Dispatcher {
@@ -50,6 +51,23 @@ impl Dispatcher {
         self.recorder.state()
     }
 
+    pub fn arm_recording(&mut self) -> RecorderState {
+        self.recorder.arm();
+        self.recorder.state()
+    }
+
+    pub fn record_into(&mut self, index: u8) -> Result<RecorderState, String> {
+        let key = Key::from_index(index).ok_or_else(|| format!("{index} is not a key on the keyboard"))?;
+        assignable(key)?;
+        self.recorder.record_into(index);
+        Ok(self.recorder.state())
+    }
+
+    pub fn stop_recording(&mut self) -> Vec<Intent> {
+        let outcome = self.recorder.stop();
+        self.outcome_intents(outcome).unwrap_or_default()
+    }
+
     pub fn dial_mode(&self) -> &DialMode {
         self.dial.mode()
     }
@@ -79,6 +97,9 @@ impl Dispatcher {
         }
         if let Some(intents) = self.recorder_intents(index, true, now) {
             return intents;
+        }
+        if self.recorder.state().recorded_target() == Some(index) {
+            return Vec::new();
         }
         if index == led::PROFILE && self.recorder.cancel() {
             return vec![Intent::Recording(RecorderState::Idle)];
@@ -116,7 +137,12 @@ impl Dispatcher {
     }
 
     fn recorder_intents(&mut self, index: u8, down: bool, now: Duration) -> Option<Vec<Intent>> {
-        match self.recorder.key(index, down, now) {
+        let outcome = self.recorder.key(index, down, now);
+        self.outcome_intents(outcome)
+    }
+
+    fn outcome_intents(&self, outcome: RecorderOutcome) -> Option<Vec<Intent>> {
+        match outcome {
             RecorderOutcome::Pass => None,
             RecorderOutcome::Consumed => Some(Vec::new()),
             RecorderOutcome::Started { .. } => Some(vec![Intent::Recording(self.recorder.state())]),
@@ -166,6 +192,14 @@ mod tests {
         dispatcher.poll(ms(at + 500));
         dispatcher.handle(&InputEvent::KeyUp(137), ms(at + 600));
         assert_eq!(dispatcher.recorder_state(), RecorderState::AwaitingKey);
+    }
+
+    #[test]
+    fn arming_from_outside_makes_the_next_g_key_the_target() {
+        let mut dispatcher = Dispatcher::new(&[], &DialConfig::default());
+        assert_eq!(dispatcher.arm_recording(), RecorderState::AwaitingKey);
+        let intents = dispatcher.handle(&InputEvent::KeyDown(led::G1), Duration::ZERO);
+        assert_eq!(intents, [Intent::Recording(RecorderState::Recording { key: led::G1 })]);
     }
 
     #[test]
@@ -325,6 +359,57 @@ mod tests {
         arm(&mut dispatcher, 0);
         assert!(dispatcher.cancel_recording());
         assert_eq!(dispatcher.recorder_state(), RecorderState::Idle);
+    }
+
+    #[test]
+    fn recording_into_a_chosen_key_skips_the_wait_and_stop_saves_it() {
+        let mut dispatcher = Dispatcher::new(&[], &DialConfig::default());
+        assert_eq!(dispatcher.record_into(132), Ok(RecorderState::Recording { key: 132 }));
+        dispatcher.handle(&InputEvent::KeyDown(4), ms(0));
+        dispatcher.handle(&InputEvent::KeyUp(4), ms(40));
+        let steps = vec![MacroStep::Down(key("a")), MacroStep::Delay(40), MacroStep::Up(key("a"))];
+        assert_eq!(
+            dispatcher.stop_recording(),
+            [Intent::SaveMacro { key: key("g2"), steps }, Intent::Recording(RecorderState::Idle)]
+        );
+        assert!(dispatcher.stop_recording().is_empty(), "stopping again does nothing");
+    }
+
+    #[test]
+    fn a_bound_target_that_is_not_a_g_key_is_recorded_without_firing_its_binding() {
+        let mut dispatcher = Dispatcher::new(&[escape_on_caps()], &DialConfig::default());
+        dispatcher.record_into(57).unwrap();
+        assert!(dispatcher.handle(&InputEvent::KeyDown(57), ms(0)).is_empty());
+        assert!(dispatcher.handle(&InputEvent::KeyUp(57), ms(30)).is_empty());
+        assert_eq!(dispatcher.recorder_state(), RecorderState::Recording { key: 57 });
+        let steps = vec![MacroStep::Down(key("caps_lock")), MacroStep::Delay(30), MacroStep::Up(key("caps_lock"))];
+        assert_eq!(
+            dispatcher.stop_recording(),
+            [Intent::SaveMacro { key: key("caps_lock"), steps }, Intent::Recording(RecorderState::Idle)]
+        );
+    }
+
+    #[test]
+    fn other_bound_keys_keep_firing_while_a_key_is_recorded_into() {
+        let mut dispatcher = Dispatcher::new(&[escape_on_caps()], &DialConfig::default());
+        dispatcher.record_into(4).unwrap();
+        let program = Program::remap(key("escape"), &[]);
+        assert_eq!(
+            dispatcher.handle(&InputEvent::KeyDown(57), ms(0)),
+            [Intent::Output(OutputCommand::Press { source: 57, program })]
+        );
+        assert!(dispatcher.handle(&InputEvent::KeyDown(4), ms(10)).is_empty());
+        assert_eq!(dispatcher.recorder_state(), RecorderState::Recording { key: 4 });
+    }
+
+    #[test]
+    fn only_assignable_keys_can_be_recorded_into() {
+        let mut dispatcher = Dispatcher::new(&[], &DialConfig::default());
+        assert!(dispatcher.record_into(led::DIAL_KEY).unwrap_err().contains("cannot be reassigned"));
+        assert!(dispatcher.record_into(led::WIN_LOCK).is_err());
+        assert!(dispatcher.record_into(250).is_err());
+        assert_eq!(dispatcher.recorder_state(), RecorderState::Idle);
+        assert!(dispatcher.record_into(4).is_ok());
     }
 
     #[test]

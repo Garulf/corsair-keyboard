@@ -12,7 +12,14 @@ use daemon::shutdown::{self, ReleaseSignal};
 use notify::{RecursiveMode, Watcher};
 
 fn main() -> ExitCode {
-    match run() {
+    let instance = match ipc::InstanceLock::acquire(&ipc::lock_path()) {
+        Ok(instance) => instance,
+        Err(error) => {
+            eprintln!("k100d: {error}");
+            return ExitCode::from(ipc::startup_exit_code(&error));
+        }
+    };
+    match run(instance) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("k100d: {error}");
@@ -21,13 +28,15 @@ fn main() -> ExitCode {
     }
 }
 
-fn run() -> Result<(), Box<dyn std::error::Error>> {
+fn run(instance: ipc::InstanceLock) -> Result<(), Box<dyn std::error::Error>> {
     let mut config_dir = None;
     let mut exit_after = None;
+    let mut no_tray = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--config-dir" => config_dir = args.next().map(PathBuf::from),
+            "--no-tray" => no_tray = true,
             "--exit-after" => exit_after = args.next().map(|s| s.parse::<u64>()).transpose()?,
             other => return Err(format!("unknown argument {other:?}").into()),
         }
@@ -43,7 +52,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("k100d: config: {error}");
     }
 
-    let listener = server::bind()?;
+    let listener = server::bind(&instance)?;
     let (sender, receiver) = mpsc::channel();
 
     let released = ReleaseSignal::default();
@@ -78,16 +87,39 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     };
     let (output, output_thread) = actions::spawn(sink);
     let mut controller = Controller::new(settings, profiles, errors, Box::new(output));
+    controller.set_autostart(autostart_port());
     if let Some(warning) = sink_warning {
         eprintln!("k100d: {warning}");
         controller.add_warning(warning);
         controller.set_output_available(false);
     }
 
+    #[cfg(any(windows, feature = "tray"))]
+    let tray = if no_tray {
+        None
+    } else {
+        daemon::tray::spawn(sender.clone()).map_err(|failure| eprintln!("k100d: tray unavailable: {failure}")).ok()
+    };
+    #[cfg(not(any(windows, feature = "tray")))]
+    let _ = no_tray;
+
     eprintln!("k100d: config in {}", config.root().display());
     runtime::run(controller, config, receiver, sender, HidConnector);
+    #[cfg(any(windows, feature = "tray"))]
+    if let Some(tray) = tray {
+        tray.stop();
+    }
     let _ = output_thread.join();
     released.notify();
+    drop(instance);
     eprintln!("k100d: stopped");
     Ok(())
+}
+
+fn autostart_port() -> Box<dyn install::Autostart> {
+    let k100 = match ipc::launcher::sibling_binary("k100") {
+        Ok(path) if path.exists() => path,
+        _ => return Box::new(install::Unavailable("k100 was not found next to k100d".into())),
+    };
+    install::platform(k100).unwrap_or_else(|failure| Box::new(install::Unavailable(failure.to_string())))
 }

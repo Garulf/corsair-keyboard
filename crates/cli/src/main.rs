@@ -1,4 +1,6 @@
 mod diag;
+mod effect;
+mod launch;
 mod remote;
 
 use clap::{Parser, Subcommand};
@@ -15,6 +17,8 @@ struct Cli {
 enum Command {
     /// Show daemon and keyboard status
     Status,
+    /// Open the graphical interface
+    Gui,
     /// Manage profiles
     #[command(subcommand)]
     Profile(remote::ProfileCommand),
@@ -26,6 +30,24 @@ enum Command {
     Release,
     /// Take the keyboard back after a release
     Reacquire,
+    /// Start k100d in the background, or run it in the foreground
+    Daemon {
+        #[arg(long)]
+        foreground: bool,
+        #[arg(last = true)]
+        args: Vec<String>,
+    },
+    /// Put a lighting effect on top of the active profile ("off" removes it)
+    Effect {
+        name: String,
+        #[arg(long)]
+        color: Option<String>,
+    },
+    /// Start k100d at login (on), stop doing so (off) or show the setting (status)
+    Autostart {
+        #[arg(value_enum)]
+        action: launch::AutostartAction,
+    },
     /// Turn WinLock on or off
     Winlock {
         #[arg(value_enum)]
@@ -50,11 +72,15 @@ fn main() {
     let cli = Cli::parse();
     let result = match cli.command {
         Command::Status => remote::status(),
+        Command::Gui => gui::run().map_err(Into::into),
         Command::Profile(command) => remote::profile(command),
         Command::Brightness { percent } => remote::simple(Request::SetBrightness { percent }),
         Command::Polling { hz } => remote::simple(Request::SetPollingRate { hz }),
         Command::Release => remote::simple(Request::Release),
         Command::Reacquire => remote::simple(Request::Reacquire),
+        Command::Daemon { foreground, args } => launch::daemon(foreground, &args),
+        Command::Effect { name, color } => effect::run(&name, color.as_deref()),
+        Command::Autostart { action } => launch::autostart(action),
         Command::Winlock { state } => remote::simple(Request::SetWinLock { enabled: matches!(state, Switch::On) }),
         Command::Keys => {
             println!("{}", remote::key_list());
@@ -66,5 +92,45 @@ fn main() {
     if let Err(error) = result {
         eprintln!("error: {error}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::CommandFactory;
+
+    use super::*;
+
+    #[test]
+    fn the_command_line_definition_is_valid() {
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn daemon_forwards_arguments_after_the_separator() {
+        let cli = Cli::try_parse_from(["k100", "daemon", "--foreground", "--", "--config-dir", "x"]).unwrap();
+        let Command::Daemon { foreground, args } = cli.command else { panic!("expected daemon") };
+        assert!(foreground);
+        assert_eq!(args, ["--config-dir", "x"]);
+    }
+
+    #[test]
+    fn effect_takes_a_name_and_an_optional_colour() {
+        let cli = Cli::try_parse_from(["k100", "effect", "solid", "--color", "#ff0000"]).unwrap();
+        let Command::Effect { name, color } = cli.command else { panic!("expected effect") };
+        assert_eq!((name.as_str(), color.as_deref()), ("solid", Some("#ff0000")));
+    }
+
+    #[test]
+    fn gui_is_a_plain_subcommand() {
+        assert!(matches!(Cli::try_parse_from(["k100", "gui"]).unwrap().command, Command::Gui));
+    }
+
+    #[test]
+    fn autostart_takes_on_off_or_status() {
+        for word in ["on", "off", "status"] {
+            assert!(Cli::try_parse_from(["k100", "autostart", word]).is_ok(), "{word}");
+        }
+        assert!(Cli::try_parse_from(["k100", "autostart", "maybe"]).is_err());
     }
 }

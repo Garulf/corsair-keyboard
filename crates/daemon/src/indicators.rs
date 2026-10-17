@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use actions::RecorderState;
+pub use ipc::DialRing;
 use k100::{IndicatorRecord, Rgb, led};
-use serde::{Deserialize, Serialize};
 
 pub const FLASH: Duration = Duration::from_secs(3);
 const BLINK: Duration = Duration::from_millis(250);
@@ -27,14 +27,6 @@ const INDICATION_LEDS: [u8; 14] = [
     188,
     189,
 ];
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DialRing {
-    #[default]
-    Temporary,
-    Continuous,
-}
 
 pub struct Indicators {
     ring: DialRing,

@@ -1,13 +1,13 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, SyncSender, TrySendError};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, SyncSender};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use bragi::Notification;
 use engine::KeyPress;
 use ipc::{DeviceState, Event, Reply, Request};
-use k100::{InputEvent, InputSource, KeyStateTracker, Session};
+use k100::{Frame, InputEvent, InputSource, KeyStateTracker, Session};
 
 use crate::config::ConfigDir;
 use crate::conflict::{remove_ignored, running_conflicts};
@@ -16,10 +16,11 @@ use crate::controller::{Controller, DeviceLink, LinkInfo};
 const RECONNECT_INTERVAL: Duration = Duration::from_secs(2);
 const INPUT_POLL: Duration = Duration::from_millis(100);
 pub const SUBSCRIBER_QUEUE: usize = 256;
+pub const FRAME_EVENT_INTERVAL: Duration = Duration::from_millis(50);
 
 pub enum Command {
     Request(Request, Sender<Reply>),
-    Subscribe(SyncSender<Reply>),
+    Subscribe { events: SyncSender<Reply>, frames: bool },
     Input(InputEvent),
     Reload,
     Focus(Option<String>),
@@ -79,7 +80,7 @@ pub fn run(
     mut connector: impl Connector,
 ) {
     let started = Instant::now();
-    let mut subscribers: Vec<SyncSender<Reply>> = Vec::new();
+    let mut subscribers = Subscribers::default();
     let mut presses: Vec<KeyPress> = Vec::new();
     let mut input_stop: Option<Arc<AtomicBool>> = None;
     let mut next_frame = Instant::now();
@@ -92,14 +93,14 @@ pub fn run(
             Ok(Command::Request(request, reply)) => {
                 let _ = reply.send(controller.handle(request, &config));
             }
-            Ok(Command::Subscribe(events)) => subscribers.push(events),
+            Ok(Command::Subscribe { events, frames }) => subscribers.add(events, frames),
             Ok(Command::Input(event)) => {
                 if let InputEvent::KeyDown(led) = event {
                     presses.push(KeyPress { led, at: started.elapsed() });
                 }
                 controller.input(event, started.elapsed(), &config);
                 if let Some(event) = input_event(event) {
-                    broadcast(&mut subscribers, event);
+                    subscribers.broadcast(event);
                 }
             }
             Ok(Command::Reload) => {
@@ -113,6 +114,7 @@ pub fn run(
 
         if Instant::now() >= next_frame {
             controller.tick(started.elapsed(), &presses, &config);
+            subscribers.publish_frame(controller.last_frame(), Instant::now());
             presses.clear();
             next_frame += controller.frame_interval();
             if next_frame < Instant::now() {
@@ -143,7 +145,7 @@ pub fn run(
         }
 
         for event in controller.take_events() {
-            broadcast(&mut subscribers, event);
+            subscribers.broadcast(event);
         }
     }
 
@@ -153,11 +155,49 @@ pub fn run(
     controller.shutdown();
 }
 
-fn broadcast(subscribers: &mut Vec<SyncSender<Reply>>, event: Event) {
-    subscribers.retain(|subscriber| match subscriber.try_send(Reply::Event { event: event.clone() }) {
-        Ok(()) => true,
-        Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => false,
-    });
+struct Subscriber {
+    events: SyncSender<Reply>,
+    frames: bool,
+}
+
+#[derive(Default)]
+struct Subscribers {
+    list: Vec<Subscriber>,
+    last_frame: Option<Frame>,
+    next_frame: Option<Instant>,
+}
+
+impl Subscribers {
+    fn add(&mut self, events: SyncSender<Reply>, frames: bool) {
+        if frames {
+            self.last_frame = None;
+        }
+        self.list.push(Subscriber { events, frames });
+    }
+
+    fn broadcast(&mut self, event: Event) {
+        let reply = Reply::Event { event };
+        self.list.retain(|subscriber| subscriber.events.try_send(reply.clone()).is_ok());
+    }
+
+    fn publish_frame(&mut self, frame: Option<Frame>, now: Instant) {
+        let Some(frame) = frame else { return };
+        if !self.list.iter().any(|subscriber| subscriber.frames) {
+            return;
+        }
+        if self.next_frame.is_some_and(|due| now < due) || self.last_frame == Some(frame) {
+            return;
+        }
+        self.next_frame = Some(now + FRAME_EVENT_INTERVAL);
+        self.last_frame = Some(frame);
+        let reply = Reply::Event { event: Event::Frame { rgb: ipc::encode_frame(&frame) } };
+        self.list.retain(|subscriber| !subscriber.frames || subscriber.events.try_send(reply.clone()).is_ok());
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.list.len()
+    }
 }
 
 fn input_event(event: InputEvent) -> Option<Event> {
@@ -268,7 +308,7 @@ mod tests {
         };
         let (sender, receiver) = mpsc::channel();
         let (events_tx, events_rx) = mpsc::sync_channel(SUBSCRIBER_QUEUE);
-        sender.send(Command::Subscribe(events_tx)).unwrap();
+        sender.send(Command::Subscribe { events: events_tx, frames: false }).unwrap();
         let loop_sender = sender.clone();
         let handle = std::thread::spawn(move || run(controller, config, receiver, loop_sender, connector));
 
@@ -297,11 +337,85 @@ mod tests {
     fn stuck_subscribers_are_dropped_instead_of_buffering_forever() {
         let (stuck_tx, _stuck_rx) = mpsc::sync_channel(2);
         let (live_tx, live_rx) = mpsc::sync_channel(SUBSCRIBER_QUEUE);
-        let mut subscribers = vec![stuck_tx, live_tx];
+        let mut subscribers = Subscribers::default();
+        subscribers.add(stuck_tx, false);
+        subscribers.add(live_tx, false);
         for _ in 0..5 {
-            broadcast(&mut subscribers, Event::Dial { clockwise: true });
+            subscribers.broadcast(Event::Dial { clockwise: true });
             while live_rx.try_recv().is_ok() {}
         }
         assert_eq!(subscribers.len(), 1);
+    }
+
+    #[test]
+    fn identical_frames_are_not_resent_and_the_interval_is_respected() {
+        let (tx, rx) = mpsc::sync_channel(SUBSCRIBER_QUEUE);
+        let mut subscribers = Subscribers::default();
+        subscribers.add(tx, true);
+        let start = Instant::now();
+        let mut frame = [k100::Rgb::BLACK; k100::LED_COUNT];
+        subscribers.publish_frame(Some(frame), start);
+        assert_eq!(rx.try_iter().count(), 1);
+        frame[0] = k100::Rgb::new(1, 1, 1);
+        subscribers.publish_frame(Some(frame), start + Duration::from_millis(10));
+        assert_eq!(rx.try_iter().count(), 0, "too soon");
+        subscribers.publish_frame(Some(frame), start + Duration::from_millis(60));
+        assert_eq!(rx.try_iter().count(), 1);
+        subscribers.publish_frame(Some(frame), start + Duration::from_millis(200));
+        assert_eq!(rx.try_iter().count(), 0, "unchanged");
+    }
+
+    #[test]
+    fn a_late_frame_subscriber_gets_the_current_frame() {
+        let mut subscribers = Subscribers::default();
+        let (first_tx, first_rx) = mpsc::sync_channel(SUBSCRIBER_QUEUE);
+        subscribers.add(first_tx, true);
+        let start = Instant::now();
+        let frame = [k100::Rgb::new(9, 9, 9); k100::LED_COUNT];
+        subscribers.publish_frame(Some(frame), start);
+        let (late_tx, late_rx) = mpsc::sync_channel(SUBSCRIBER_QUEUE);
+        subscribers.add(late_tx, true);
+        subscribers.publish_frame(Some(frame), start + Duration::from_millis(60));
+        assert_eq!(late_rx.try_iter().count(), 1);
+        assert_eq!(first_rx.try_iter().count(), 2);
+    }
+
+    #[test]
+    fn a_stalled_frame_subscriber_is_dropped() {
+        let (stuck_tx, _stuck_rx) = mpsc::sync_channel(1);
+        let mut subscribers = Subscribers::default();
+        subscribers.add(stuck_tx, true);
+        let start = Instant::now();
+        for step in 0..4u8 {
+            let frame = [k100::Rgb::new(step, 0, 0); k100::LED_COUNT];
+            subscribers.publish_frame(Some(frame), start + Duration::from_millis(60 * u64::from(step)));
+        }
+        assert_eq!(subscribers.len(), 0);
+    }
+
+    #[test]
+    fn frame_subscribers_get_throttled_frames_and_plain_subscribers_get_none() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = ConfigDir::new(temp.path().to_path_buf());
+        let controller = Controller::new(Settings::default(), vec![default_profile()], vec![], Box::new(DiscardOutput));
+        let connector = ScriptedConnector { attempts: vec![], frames: Arc::new(Mutex::new(0)) };
+        let (sender, receiver) = mpsc::channel();
+        let (frames_tx, frames_rx) = mpsc::sync_channel(SUBSCRIBER_QUEUE);
+        let (plain_tx, plain_rx) = mpsc::sync_channel(SUBSCRIBER_QUEUE);
+        sender.send(Command::Subscribe { events: frames_tx, frames: true }).unwrap();
+        sender.send(Command::Subscribe { events: plain_tx, frames: false }).unwrap();
+        let loop_sender = sender.clone();
+        let started = Instant::now();
+        let handle = std::thread::spawn(move || run(controller, config, receiver, loop_sender, connector));
+        std::thread::sleep(Duration::from_millis(600));
+        sender.send(Command::Shutdown).unwrap();
+        handle.join().unwrap();
+        let elapsed = started.elapsed();
+        let is_frame = |reply: &Reply| matches!(reply, Reply::Event { event: Event::Frame { .. } });
+        let frames = frames_rx.try_iter().filter(is_frame).count();
+        let plain = plain_rx.try_iter().filter(is_frame).count();
+        let ceiling = (elapsed.as_millis() / FRAME_EVENT_INTERVAL.as_millis()) as usize + 1;
+        assert!((2..=ceiling).contains(&frames), "{frames} frames in {elapsed:?}");
+        assert_eq!(plain, 0);
     }
 }
