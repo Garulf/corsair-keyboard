@@ -15,6 +15,17 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 #[derive(Debug, Subcommand)]
 pub enum Diag {
+    #[command(flatten)]
+    Keyboard(KeyboardDiag),
+    /// Show the captured system audio spectrum as text (needs no keyboard)
+    Audio {
+        #[arg(long, default_value_t = 10)]
+        seconds: u64,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum KeyboardDiag {
     /// Read identity and settings without changing anything
     Info,
     /// Force the keyboard back to hardware mode with all keys normal
@@ -57,11 +68,6 @@ pub enum Diag {
         #[arg(long, default_value_t = 60)]
         fps: u32,
     },
-    /// Show the captured system audio spectrum as text (needs no keyboard)
-    Audio {
-        #[arg(long, default_value_t = 10)]
-        seconds: u64,
-    },
 }
 
 pub fn run(command: Diag) -> Result<()> {
@@ -69,26 +75,28 @@ pub fn run(command: Diag) -> Result<()> {
     let flag = Arc::clone(&stop);
     ctrlc::set_handler(move || flag.store(true, Ordering::SeqCst))?;
 
-    if let Diag::Audio { seconds } = command {
-        return audio(seconds, &stop);
+    match command {
+        Diag::Audio { seconds } => audio(seconds, &stop),
+        Diag::Keyboard(command) => keyboard(command, &stop),
     }
+}
 
+fn keyboard(command: KeyboardDiag, stop: &AtomicBool) -> Result<()> {
     let OpenedDevice { commands, input, model } = open_device()?;
     println!("found {} (pid {:04x}){}", model.name, model.pid, if model.tested { "" } else { " [untested]" });
     match command {
-        Diag::Info => info(commands),
-        Diag::Release => release(commands, model.key_count),
-        Diag::Lights { colors, hold_ms } => lights(Session::start(commands, model)?, &colors, hold_ms, &stop),
-        Diag::Indicators => indicators(Session::start(commands, model)?),
-        Diag::Fps { frames } => fps(Session::start(commands, model)?, frames, &stop),
-        Diag::Props => props(commands),
-        Diag::Mask { key, seconds } => mask(Session::start(commands, model)?, key, seconds, &stop),
-        Diag::Watch { seconds } => watch(Session::start(commands, model)?, input, seconds, &stop),
-        Diag::Kill => kill(Session::start(commands, model)?),
-        Diag::Preview { file, seconds, fps } => {
-            preview(Session::start(commands, model)?, input, &file, seconds, fps, &stop)
+        KeyboardDiag::Info => info(commands),
+        KeyboardDiag::Release => release(commands, model.key_count),
+        KeyboardDiag::Lights { colors, hold_ms } => lights(Session::start(commands, model)?, &colors, hold_ms, stop),
+        KeyboardDiag::Indicators => indicators(Session::start(commands, model)?),
+        KeyboardDiag::Fps { frames } => fps(Session::start(commands, model)?, frames, stop),
+        KeyboardDiag::Props => props(commands),
+        KeyboardDiag::Mask { key, seconds } => mask(Session::start(commands, model)?, key, seconds, stop),
+        KeyboardDiag::Watch { seconds } => watch(Session::start(commands, model)?, input, seconds, stop),
+        KeyboardDiag::Kill => kill(Session::start(commands, model)?),
+        KeyboardDiag::Preview { file, seconds, fps } => {
+            preview(Session::start(commands, model)?, input, &file, seconds, fps, stop)
         }
-        Diag::Audio { .. } => unreachable!("handled before the keyboard is opened"),
     }
 }
 
@@ -313,17 +321,27 @@ fn status_line(status: &audio::Status) -> String {
     }
 }
 
+fn meter_lines(previous: Option<&audio::Status>, status: &audio::Status, spectrum: &engine::Spectrum) -> Vec<String> {
+    let mut lines = Vec::new();
+    if previous != Some(status) {
+        lines.push(status_line(status));
+    }
+    if matches!(status, audio::Status::Capturing { .. }) {
+        lines.push(band_line(spectrum));
+    }
+    lines
+}
+
 fn audio(seconds: u64, stop: &AtomicBool) -> Result<()> {
     let handle = audio::AudioHandle::spawn(audio::system_capture());
     let deadline = Instant::now() + Duration::from_secs(seconds);
     let mut last_status = None;
     loop {
         let status = handle.status();
-        if last_status.as_ref() != Some(&status) {
-            println!("{}", status_line(&status));
-            last_status = Some(status);
+        for line in meter_lines(last_status.as_ref(), &status, &handle.spectrum()) {
+            println!("{line}");
         }
-        println!("{}", band_line(&handle.spectrum()));
+        last_status = Some(status);
         if Instant::now() >= deadline || stop.load(Ordering::SeqCst) {
             break;
         }
@@ -423,6 +441,40 @@ mod tests {
         assert_eq!(frame[29], Rgb::new(255, 0, 0));
         assert_eq!(frame[4], Rgb::new(60, 60, 60));
         assert!(highlight_frame(None).iter().all(|&c| c == Rgb::new(60, 60, 60)));
+    }
+
+    #[test]
+    fn the_meter_prints_a_new_status_once_and_bands_only_while_capturing() {
+        let starting = audio::Status::Starting;
+        let failed = audio::Status::Failed { reason: "no sink".to_string() };
+        let capturing = audio::Status::Capturing { device: "Speakers".to_string() };
+        let full = engine::Spectrum::from_levels([1.0; engine::SPECTRUM_BANDS]);
+
+        assert_eq!(meter_lines(None, &starting, &full), ["audio: starting"]);
+        assert!(meter_lines(Some(&starting), &starting, &full).is_empty());
+        assert_eq!(meter_lines(Some(&starting), &failed, &full), ["audio: failed: no sink"]);
+        assert!(meter_lines(Some(&failed), &failed, &full).is_empty());
+        assert_eq!(
+            meter_lines(Some(&failed), &capturing, &full),
+            ["audio: capturing (Speakers)".to_string(), "@".repeat(32)]
+        );
+        assert_eq!(meter_lines(Some(&capturing), &capturing, &full), ["@".repeat(32)]);
+    }
+
+    #[test]
+    fn audio_and_keyboard_checks_parse_as_diag_subcommands() {
+        use clap::Parser;
+
+        #[derive(Parser)]
+        struct Cli {
+            #[command(subcommand)]
+            diag: Diag,
+        }
+
+        let audio = Cli::try_parse_from(["diag", "audio", "--seconds", "3"]).unwrap().diag;
+        assert!(matches!(audio, Diag::Audio { seconds: 3 }));
+        let info = Cli::try_parse_from(["diag", "info"]).unwrap().diag;
+        assert!(matches!(info, Diag::Keyboard(KeyboardDiag::Info)));
     }
 
     #[test]
