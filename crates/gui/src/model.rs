@@ -304,6 +304,9 @@ impl Model {
         if self.recording() {
             return Err("Finish or cancel the recording first".into());
         }
+        if self.pending_macro.is_some() {
+            return Err("Waiting for the recorded macro to load.".into());
+        }
         if self.renaming() {
             return Err("Wait for the rename to finish.".into());
         }
@@ -477,6 +480,12 @@ impl Model {
                     draft.saving = false;
                     draft.rejected = Some(profile);
                     self.save_ended(false);
+                }
+                self.toast(message);
+            }
+            (Request::GetProfile { name }, Reply::Error { message }) => {
+                if self.draft.as_ref().is_some_and(|draft| draft.profile.name == name) {
+                    self.pending_macro = None;
                 }
                 self.toast(message);
             }
@@ -768,6 +777,58 @@ mod tests {
             (saved.apps.as_slice(), &saved.assignments),
             (["game.exe".to_owned()].as_slice(), &recorded.assignments)
         );
+    }
+
+    fn tap_a_on_g2() -> actions::Assignment {
+        let tap_a = actions::MacroStep::Tap(actions::Key::named("a").unwrap());
+        let action = actions::Action::Macro { steps: vec![tap_a], mode: actions::RepeatMode::Once };
+        actions::Assignment { key: actions::Key::named("g2").unwrap(), action, pass_through: vec![] }
+    }
+
+    fn recorded_on_g2() -> Profile {
+        let key = |name| actions::Key::named(name).unwrap();
+        let steps =
+            vec![actions::MacroStep::Down(key("a")), actions::MacroStep::Delay(60), actions::MacroStep::Up(key("a"))];
+        let action = actions::Action::Macro { steps, mode: actions::RepeatMode::Once };
+        let mut recorded = profile("default");
+        recorded.assignments.push(actions::Assignment { key: key("g2"), action, pass_through: vec![] });
+        recorded
+    }
+
+    #[test]
+    fn a_draft_edited_during_recording_is_not_saved_before_the_recorded_macro_is_merged() {
+        let mut model = online("default", &["default"]);
+        model.tick(Duration::ZERO);
+        model.state.as_mut().unwrap().recording = RecorderState::Recording { key: 132 };
+        model.draft.as_mut().unwrap().profile.assignments.push(tap_a_on_g2());
+        model.tick(Duration::from_secs(1));
+        assert!(sent(&mut model).is_empty());
+        model.apply(Inbox::Event(Event::ProfileEdited { name: "default".into() }));
+        model.apply(Inbox::Event(Event::MacroRecorded { key: "g2".into() }));
+        model.apply(Inbox::Event(Event::Recording { state: RecorderState::Idle }));
+        model.tick(Duration::from_secs(5));
+        let requests = sent(&mut model);
+        assert!(
+            !requests.iter().any(|request| matches!(request, Request::SaveProfile { .. })),
+            "no save may leave before the recorded macro is merged into the draft: {requests:?}"
+        );
+        assert!(model.can_save().unwrap_err().contains("recorded macro"));
+        let recorded = recorded_on_g2();
+        model.apply(Inbox::reply(get_profile("default"), Reply::Profile { profile: recorded.clone() }));
+        model.apply(Inbox::reply(get_profile("default"), Reply::Profile { profile: recorded.clone() }));
+        assert_eq!(model.draft.as_ref().unwrap().profile.assignments, recorded.assignments);
+        assert!(model.can_save().is_err_and(|reason| !reason.contains("recorded macro")));
+    }
+
+    #[test]
+    fn a_refused_reload_after_a_recording_releases_the_save_hold() {
+        let mut model = online("default", &["default"]);
+        edit(&mut model);
+        model.apply(Inbox::Event(Event::MacroRecorded { key: "g2".into() }));
+        sent(&mut model);
+        assert!(model.can_save().is_err());
+        model.apply(Inbox::reply(get_profile("default"), Reply::Error { message: "no profile named default".into() }));
+        assert!(model.can_save().is_ok());
     }
 
     #[test]
