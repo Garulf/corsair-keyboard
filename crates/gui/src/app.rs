@@ -44,17 +44,6 @@ impl App {
         Self { model: Model::new(), backend, started: Instant::now() }
     }
 
-    fn pump(&mut self, ctx: &egui::Context) {
-        for message in self.backend.drain() {
-            self.model.apply(message);
-        }
-        self.model.tick(self.started.elapsed());
-        if ctx.input(|input| input.viewport().close_requested()) && !self.model.allow_close() {
-            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-        }
-        self.flush(ctx);
-    }
-
     fn flush(&mut self, ctx: &egui::Context) {
         for effect in self.model.take_effects() {
             match effect {
@@ -67,13 +56,36 @@ impl App {
 }
 
 impl eframe::App for App {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        let ctx = ui.ctx().clone();
-        self.pump(&ctx);
-        root(ui, &mut self.model);
-        self.flush(&ctx);
-        ui.ctx().request_repaint_after(REPAINT_EVERY);
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        for message in self.backend.drain() {
+            self.model.apply(message);
+        }
+        self.model.tick(self.started.elapsed());
+        let model = &mut self.model;
+        for command in ctx.input(|input| close_commands(model, input.viewport())) {
+            ctx.send_viewport_cmd(command);
+        }
+        self.flush(ctx);
+        ctx.request_repaint_after(REPAINT_EVERY);
     }
+
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        root(ui, &mut self.model);
+        if self.model.has_effects() {
+            ui.ctx().request_repaint();
+        }
+    }
+}
+
+pub fn close_commands(model: &mut Model, viewport: &egui::ViewportInfo) -> Vec<egui::ViewportCommand> {
+    if !viewport.close_requested() || model.allow_close() {
+        return Vec::new();
+    }
+    let mut commands = vec![egui::ViewportCommand::CancelClose];
+    if viewport.minimized == Some(true) || viewport.occluded == Some(true) {
+        commands.extend([egui::ViewportCommand::Minimized(false), egui::ViewportCommand::Focus]);
+    }
+    commands
 }
 
 fn start_daemon(inbox: Sender<Inbox>, launch: impl FnOnce() -> Result<Launched, LaunchError> + Send + 'static) {
@@ -306,6 +318,74 @@ mod tests {
         start_daemon(inbox, || Err(LaunchError::Missing("k100d".into())));
         let failed = messages.recv_timeout(Duration::from_secs(5)).unwrap();
         assert!(matches!(failed, Inbox::LaunchFailed(message) if message.contains("k100d")));
+    }
+
+    fn close_request(minimized: bool) -> egui::ViewportInfo {
+        egui::ViewportInfo {
+            events: vec![egui::ViewportEvent::Close],
+            minimized: Some(minimized),
+            ..egui::ViewportInfo::default()
+        }
+    }
+
+    fn unsaved() -> Model {
+        let mut model = online("games", &["games"]);
+        model.draft.as_mut().unwrap().profile.apps.push("x.exe".into());
+        model
+    }
+
+    #[test]
+    fn a_close_request_over_unsaved_edits_is_cancelled_and_brings_a_hidden_window_back() {
+        use egui::ViewportCommand::{CancelClose, Focus, Minimized};
+
+        let mut visible = unsaved();
+        assert_eq!(close_commands(&mut visible, &close_request(false)), [CancelClose]);
+        assert_eq!(visible.closing, crate::model::Closing::Asking);
+
+        let mut minimized = unsaved();
+        assert_eq!(close_commands(&mut minimized, &close_request(true)), [CancelClose, Minimized(false), Focus]);
+        assert_eq!(minimized.closing, crate::model::Closing::Asking);
+
+        let mut occluded = unsaved();
+        let behind = egui::ViewportInfo { occluded: Some(true), ..close_request(false) };
+        assert_eq!(close_commands(&mut occluded, &behind), [CancelClose, Minimized(false), Focus]);
+
+        let mut clean = online("games", &["games"]);
+        assert!(close_commands(&mut clean, &close_request(true)).is_empty());
+        let mut not_closing = unsaved();
+        assert!(close_commands(&mut not_closing, &egui::ViewportInfo::default()).is_empty());
+        assert_eq!(not_closing.closing, crate::model::Closing::Open);
+    }
+
+    fn offline_app(model: Model) -> App {
+        let connector: Connector = Arc::new(|| Err(ipc::ClientError::Closed));
+        let mut app = App::new(Backend::spawn(connector, Arc::new(|| {}), Duration::from_secs(60)));
+        app.model = model;
+        app
+    }
+
+    fn logic_pass(app: &mut App, viewport: egui::ViewportInfo) -> Vec<egui::ViewportCommand> {
+        let ctx = egui::Context::default();
+        let mut input = egui::RawInput::default();
+        input.viewports.insert(egui::ViewportId::ROOT, viewport);
+        let mut frame = eframe::Frame::_new_kittest();
+        let mut output = ctx.run_logic(&input, |ctx| eframe::App::logic(app, ctx, &mut frame));
+        output.viewport_commands.remove(&egui::ViewportId::ROOT).unwrap_or_default()
+    }
+
+    #[test]
+    fn the_logic_pass_alone_keeps_a_minimized_window_with_unsaved_edits_open() {
+        let mut app = offline_app(unsaved());
+        let commands = logic_pass(&mut app, close_request(true));
+        assert!(commands.contains(&egui::ViewportCommand::CancelClose), "{commands:?}");
+        assert!(commands.contains(&egui::ViewportCommand::Minimized(false)), "{commands:?}");
+        assert!(commands.contains(&egui::ViewportCommand::Focus), "{commands:?}");
+        assert_eq!(app.model.closing, crate::model::Closing::Asking);
+
+        app.model.close_without_saving();
+        let commands = logic_pass(&mut app, egui::ViewportInfo::default());
+        assert!(commands.contains(&egui::ViewportCommand::Close), "{commands:?}");
+        assert!(logic_pass(&mut app, close_request(true)).is_empty(), "the confirmed close goes ahead");
     }
 
     #[test]
