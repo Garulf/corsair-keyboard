@@ -49,6 +49,14 @@ impl Request {
         Self::new(Command::UnbindBuffers, &[UNBIND_SUBCOMMAND, handle])
     }
 
+    pub fn read_buffer(handle: u8) -> Self {
+        Self::new(Command::ReadBuffer, &[handle])
+    }
+
+    pub fn describe_buffer(handle: u8) -> Self {
+        Self::new(Command::DescribeBuffer, &[handle])
+    }
+
     pub fn ping() -> Self {
         Self::new(Command::Ping, &[])
     }
@@ -121,6 +129,10 @@ impl Response {
         Status::check(self.status)
     }
 
+    pub fn payload(&self) -> &[u8] {
+        &self.payload
+    }
+
     pub fn value_u32(&self) -> u32 {
         let mut value = [0u8; 4];
         let len = self.payload.len().min(4);
@@ -171,6 +183,18 @@ mod tests {
     }
 
     #[test]
+    fn read_and_describe_buffer_carry_only_the_handle() {
+        let read = Request::read_buffer(3);
+        assert_eq!(prefix(&read, 3), [0x08, 0x08, 0x03]);
+        assert!(tail_is_zero(&read, 3));
+        assert_eq!(read.command(), Command::ReadBuffer);
+        let describe = Request::describe_buffer(3);
+        assert_eq!(prefix(&describe, 3), [0x08, 0x09, 0x03]);
+        assert!(tail_is_zero(&describe, 3));
+        assert_eq!(describe.command(), Command::DescribeBuffer);
+    }
+
+    #[test]
     fn write_fits_in_one_packet() {
         let data = [0xAAu8; 581];
         let packets = write_buffer_packets(0, &data);
@@ -212,6 +236,12 @@ mod tests {
         assert_eq!(response.command_byte(), 0x02);
         assert_eq!(response.status(), Ok(()));
         assert_eq!(response.value_u32(), 1000);
+    }
+
+    #[test]
+    fn payload_is_everything_after_the_status_byte() {
+        let response = Response::parse(&[0x00, 0x08, 0x00, 0x13, 0x00, 0x02]).unwrap();
+        assert_eq!(response.payload(), [0x13, 0x00, 0x02]);
     }
 
     #[test]

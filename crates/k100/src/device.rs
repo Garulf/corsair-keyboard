@@ -92,9 +92,48 @@ impl<T: Transport> Device<T> {
         Ok(())
     }
 
+    pub fn describe_buffer(&mut self, handle: u8) -> Result<Vec<u8>, DeviceError> {
+        Ok(self.exchange(&Request::describe_buffer(handle))?.payload().to_vec())
+    }
+
+    pub fn read_buffer(&mut self, handle: u8) -> Result<Vec<u8>, DeviceError> {
+        Ok(self.exchange(&Request::read_buffer(handle))?.payload().to_vec())
+    }
+
+    pub fn read_file(&mut self, handle: u8, file: FileId) -> Result<Vec<u8>, DeviceError> {
+        self.open_file(handle, file)?;
+        let contents = self.read_open_file(handle);
+        let unbound = self.unbind(handle);
+        let contents = contents?;
+        unbound?;
+        Ok(contents)
+    }
+
+    fn read_open_file(&mut self, handle: u8) -> Result<Vec<u8>, DeviceError> {
+        let size = described_size(&self.describe_buffer(handle)?);
+        let mut contents = Vec::with_capacity(size);
+        while contents.len() < size {
+            let chunk = self.read_buffer(handle)?;
+            if chunk.is_empty() {
+                break;
+            }
+            contents.extend(chunk);
+        }
+        contents.truncate(size);
+        Ok(contents)
+    }
+
     pub fn ping(&mut self) -> Result<(), DeviceError> {
         self.exchange(&Request::ping()).map(drop)
     }
+}
+
+fn described_size(payload: &[u8]) -> usize {
+    let mut size = [0u8; 4];
+    if let Some(bytes) = payload.get(2..6) {
+        size.copy_from_slice(bytes);
+    }
+    u32::from_le_bytes(size) as usize
 }
 
 #[cfg(test)]
@@ -151,6 +190,90 @@ mod tests {
         let commands: Vec<u8> = log.iter().map(|report| report[1]).collect();
         assert_eq!(commands, [0x0D, 0x06, 0x07]);
         assert_eq!(ok_reply(&log[0])[1], 0x0D);
+    }
+
+    #[test]
+    fn read_and_describe_buffer_return_the_reply_payload() {
+        let fake = FakeTransport::with_responder(|request| {
+            let mut reply = ok_reply(request);
+            reply.extend_from_slice(&[request[1], 0xAB]);
+            vec![reply]
+        });
+        let log = fake.log();
+        let mut device = Device::new(fake);
+        assert_eq!(&device.describe_buffer(4).unwrap()[..2], [0x09, 0xAB]);
+        assert_eq!(&device.read_buffer(4).unwrap()[..2], [0x08, 0xAB]);
+        let log = log.lock().unwrap();
+        assert_eq!([log[0][2], log[1][2]], [4, 4]);
+    }
+
+    fn file_responder(contents: Vec<u8>) -> impl FnMut(&[u8]) -> Vec<Vec<u8>> + Send + 'static {
+        let mut offset = 0;
+        move |request| {
+            let mut reply = ok_reply(request);
+            match request[1] {
+                0x09 => reply.extend_from_slice(&[0, 0, contents.len() as u8, 0, 0, 0]),
+                0x08 => {
+                    let end = (offset + 1021).min(contents.len());
+                    reply.extend_from_slice(&contents[offset..end]);
+                    reply.resize(1024, 0);
+                    offset = end;
+                }
+                _ => {}
+            }
+            vec![reply]
+        }
+    }
+
+    #[test]
+    fn read_file_reads_the_described_size_and_unbinds() {
+        let contents: Vec<u8> = (0..200u8).collect();
+        let fake = FakeTransport::with_responder(file_responder(contents.clone()));
+        let log = fake.log();
+        let mut device = Device::new(fake);
+        assert_eq!(device.read_file(3, FileId(0x6D70)).unwrap(), contents);
+        let commands: Vec<u8> = log.lock().unwrap().iter().map(|report| report[1]).collect();
+        assert_eq!(commands, [0x0D, 0x09, 0x08, 0x05]);
+    }
+
+    #[test]
+    fn read_file_of_an_empty_file_sends_no_read() {
+        let fake = FakeTransport::with_responder(file_responder(Vec::new()));
+        let log = fake.log();
+        let mut device = Device::new(fake);
+        assert!(device.read_file(3, FileId(0x0F)).unwrap().is_empty());
+        let commands: Vec<u8> = log.lock().unwrap().iter().map(|report| report[1]).collect();
+        assert_eq!(commands, [0x0D, 0x09, 0x05]);
+    }
+
+    #[test]
+    fn read_file_unbinds_even_when_a_read_fails() {
+        let fake = FakeTransport::with_responder(|request| match request[1] {
+            0x08 => vec![status_reply(request, 3)],
+            0x09 => {
+                let mut reply = ok_reply(request);
+                reply.extend_from_slice(&[0, 0, 10, 0, 0, 0]);
+                vec![reply]
+            }
+            _ => vec![ok_reply(request)],
+        });
+        let log = fake.log();
+        let mut device = Device::new(fake);
+        assert!(device.read_file(3, FileId(0x11)).is_err());
+        assert_eq!(log.lock().unwrap().last().unwrap()[1], 0x05);
+    }
+
+    #[test]
+    fn read_file_stops_when_reads_return_nothing() {
+        let fake = FakeTransport::with_responder(|request| {
+            let mut reply = ok_reply(request);
+            if request[1] == 0x09 {
+                reply.extend_from_slice(&[0, 0, 10, 0, 0, 0]);
+            }
+            vec![reply]
+        });
+        let mut device = Device::new(fake);
+        assert!(device.read_file(3, FileId(0x25)).unwrap().is_empty());
     }
 
     struct Chatty;
