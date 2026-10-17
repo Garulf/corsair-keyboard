@@ -58,6 +58,22 @@ fn detach(command: &mut Command) {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     command.creation_flags(CREATE_NO_WINDOW);
+    keep_std_handles_private();
+}
+
+#[cfg(windows)]
+fn keep_std_handles_private() {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::{HANDLE_FLAG_INHERIT, SetHandleInformation};
+
+    for handle in [io::stdin().as_raw_handle(), io::stdout().as_raw_handle(), io::stderr().as_raw_handle()] {
+        if handle.is_null() {
+            continue;
+        }
+        // SAFETY: handle is one of this process's standard handles; clearing its inherit flag only changes whether
+        // children created with handle inheritance receive it, and failure (an invalid handle) is harmless.
+        unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) };
+    }
 }
 
 #[cfg(unix)]
@@ -188,6 +204,24 @@ mod tests {
                 .unwrap_err();
         assert!(matches!(error, LaunchError::Missing(_)));
         assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn spawning_stops_the_callers_std_handles_from_reaching_the_child() {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Foundation::{GetHandleInformation, HANDLE_FLAG_INHERIT, SetHandleInformation};
+
+        let handle = io::stderr().as_raw_handle();
+        // SAFETY: handle is this process's own stderr handle, which stays open for the whole test.
+        if unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) } == 0 {
+            return;
+        }
+        keep_std_handles_private();
+        let mut flags = 0u32;
+        // SAFETY: handle is still open and flags is a valid out pointer.
+        assert_ne!(unsafe { GetHandleInformation(handle, &raw mut flags) }, 0);
+        assert_eq!(flags & HANDLE_FLAG_INHERIT, 0);
     }
 
     #[cfg(unix)]
