@@ -227,19 +227,24 @@ impl DialConfig {
     }
 }
 
+pub fn assignable(key: Key) -> Result<u8, String> {
+    let Some(index) = key.index() else {
+        return Err(format!("{key} is not a key on the keyboard"));
+    };
+    if !key.is_on_k100() {
+        return Err(format!("{key} is not on the K100"));
+    }
+    if PROTECTED_KEYS.contains(&index) {
+        return Err(format!("{key} cannot be reassigned"));
+    }
+    Ok(index)
+}
+
 pub fn validate(assignments: &[Assignment], dial: &DialConfig) -> Result<(), String> {
     let mut seen = Vec::new();
     for assignment in assignments {
         let key = assignment.key;
-        let Some(index) = key.index() else {
-            return Err(format!("{key} is not a key on the keyboard"));
-        };
-        if !key.is_on_k100() {
-            return Err(format!("{key} is not on the K100"));
-        }
-        if PROTECTED_KEYS.contains(&index) {
-            return Err(format!("{key} cannot be reassigned"));
-        }
+        let index = assignable(key)?;
         if seen.contains(&index) {
             return Err(format!("{key} is assigned twice"));
         }

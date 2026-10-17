@@ -53,6 +53,31 @@ impl Recorder {
         was_active
     }
 
+    pub fn record_into(&mut self, index: u8) {
+        self.state = RecorderState::Recording { key: index };
+        self.events.clear();
+    }
+
+    pub fn stop(&mut self) -> RecorderOutcome {
+        match self.state {
+            RecorderState::Idle => RecorderOutcome::Pass,
+            RecorderState::AwaitingKey => {
+                self.cancel();
+                RecorderOutcome::Cancelled
+            }
+            RecorderState::Recording { key } => self.finish(key),
+        }
+    }
+
+    fn finish(&mut self, index: u8) -> RecorderOutcome {
+        let steps = build_steps(&self.events);
+        self.cancel();
+        match Key::from_index(index) {
+            Some(target) if !steps.is_empty() => RecorderOutcome::Finished { key: target, steps },
+            _ => RecorderOutcome::Cancelled,
+        }
+    }
+
     pub fn key(&mut self, index: u8, down: bool, now: Duration) -> RecorderOutcome {
         match self.state {
             RecorderState::Idle => RecorderOutcome::Pass,
@@ -66,14 +91,10 @@ impl Recorder {
             }
             RecorderState::AwaitingKey => RecorderOutcome::Pass,
             RecorderState::Recording { key } if key == index => {
-                if !down {
-                    return RecorderOutcome::Consumed;
-                }
-                let steps = build_steps(&self.events);
-                self.cancel();
-                match Key::from_index(index) {
-                    Some(target) if !steps.is_empty() => RecorderOutcome::Finished { key: target, steps },
-                    _ => RecorderOutcome::Cancelled,
+                if down {
+                    self.finish(index)
+                } else {
+                    RecorderOutcome::Consumed
                 }
             }
             RecorderState::Recording { .. } => {
@@ -175,6 +196,56 @@ mod tests {
         recorder.key(131, true, at(0));
         recorder.key(131, false, at(10));
         assert_eq!(recorder.key(131, true, at(20)), RecorderOutcome::Cancelled);
+        assert_eq!(recorder.state(), RecorderState::Idle);
+    }
+
+    #[test]
+    fn typing_abc_records_eleven_down_up_delay_steps() {
+        let mut recorder = Recorder::default();
+        recorder.arm();
+        recorder.key(132, true, at(0));
+        recorder.key(132, false, at(20));
+        for (i, index) in [4u8, 5, 6].into_iter().enumerate() {
+            let t = 100 + i as u64 * 200;
+            recorder.key(index, true, at(t));
+            recorder.key(index, false, at(t + 60));
+        }
+        let RecorderOutcome::Finished { steps, .. } = recorder.key(132, true, at(900)) else { panic!() };
+        assert_eq!(steps.len(), 11);
+        assert!(!steps.iter().any(|step| matches!(step, MacroStep::Tap(_))));
+    }
+
+    #[test]
+    fn a_chosen_key_records_at_once_and_stop_finishes_it() {
+        let mut recorder = Recorder::default();
+        recorder.record_into(4);
+        assert_eq!(recorder.state(), RecorderState::Recording { key: 4 });
+        assert_eq!(recorder.key(5, true, at(0)), RecorderOutcome::Pass);
+        assert_eq!(recorder.key(5, false, at(30)), RecorderOutcome::Pass);
+        let steps = vec![MacroStep::Down(key("b")), MacroStep::Delay(30), MacroStep::Up(key("b"))];
+        assert_eq!(recorder.stop(), RecorderOutcome::Finished { key: key("a"), steps });
+        assert_eq!(recorder.state(), RecorderState::Idle);
+    }
+
+    #[test]
+    fn the_chosen_key_still_finishes_a_recording_when_pressed() {
+        let mut recorder = Recorder::default();
+        recorder.record_into(132);
+        recorder.key(4, true, at(0));
+        recorder.key(4, false, at(10));
+        assert!(matches!(recorder.key(132, true, at(20)), RecorderOutcome::Finished { .. }));
+        assert_eq!(recorder.key(132, false, at(30)), RecorderOutcome::Pass);
+    }
+
+    #[test]
+    fn stopping_without_a_target_or_keys_cancels_and_stopping_idle_does_nothing() {
+        let mut recorder = Recorder::default();
+        assert_eq!(recorder.stop(), RecorderOutcome::Pass);
+        recorder.arm();
+        assert_eq!(recorder.stop(), RecorderOutcome::Cancelled);
+        assert_eq!(recorder.state(), RecorderState::Idle);
+        recorder.record_into(131);
+        assert_eq!(recorder.stop(), RecorderOutcome::Cancelled);
         assert_eq!(recorder.state(), RecorderState::Idle);
     }
 
