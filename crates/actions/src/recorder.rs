@@ -17,6 +17,15 @@ pub enum RecorderState {
     },
 }
 
+impl RecorderState {
+    pub fn recorded_target(self) -> Option<u8> {
+        match self {
+            RecorderState::Recording { key } if !is_g_key(key) => Some(key),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RecorderOutcome {
     Pass,
@@ -90,7 +99,7 @@ impl Recorder {
                 }
             }
             RecorderState::AwaitingKey => RecorderOutcome::Pass,
-            RecorderState::Recording { key } if key == index => {
+            RecorderState::Recording { key } if key == index && is_g_key(index) => {
                 if down {
                     self.finish(index)
                 } else {
@@ -235,6 +244,26 @@ mod tests {
         recorder.key(4, false, at(10));
         assert!(matches!(recorder.key(132, true, at(20)), RecorderOutcome::Finished { .. }));
         assert_eq!(recorder.key(132, false, at(30)), RecorderOutcome::Pass);
+    }
+
+    #[test]
+    fn a_target_that_is_not_a_g_key_is_recorded_like_any_other_key() {
+        let mut recorder = Recorder::default();
+        recorder.record_into(4);
+        assert_eq!(recorder.key(4, true, at(0)), RecorderOutcome::Pass);
+        assert_eq!(recorder.key(4, false, at(25)), RecorderOutcome::Pass);
+        assert_eq!(recorder.state(), RecorderState::Recording { key: 4 });
+        assert_eq!(recorder.state().recorded_target(), Some(4));
+        let steps = vec![MacroStep::Down(key("a")), MacroStep::Delay(25), MacroStep::Up(key("a"))];
+        assert_eq!(recorder.stop(), RecorderOutcome::Finished { key: key("a"), steps });
+    }
+
+    #[test]
+    fn only_a_target_that_is_not_a_g_key_has_its_presses_recorded() {
+        assert_eq!(RecorderState::Idle.recorded_target(), None);
+        assert_eq!(RecorderState::AwaitingKey.recorded_target(), None);
+        assert_eq!(RecorderState::Recording { key: 132 }.recorded_target(), None);
+        assert_eq!(RecorderState::Recording { key: 57 }.recorded_target(), Some(57));
     }
 
     #[test]

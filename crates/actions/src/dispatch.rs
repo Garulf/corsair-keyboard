@@ -98,6 +98,9 @@ impl Dispatcher {
         if let Some(intents) = self.recorder_intents(index, true, now) {
             return intents;
         }
+        if self.recorder.state().recorded_target() == Some(index) {
+            return Vec::new();
+        }
         if index == led::PROFILE && self.recorder.cancel() {
             return vec![Intent::Recording(RecorderState::Idle)];
         }
@@ -370,6 +373,33 @@ mod tests {
             [Intent::SaveMacro { key: key("g2"), steps }, Intent::Recording(RecorderState::Idle)]
         );
         assert!(dispatcher.stop_recording().is_empty(), "stopping again does nothing");
+    }
+
+    #[test]
+    fn a_bound_target_that_is_not_a_g_key_is_recorded_without_firing_its_binding() {
+        let mut dispatcher = Dispatcher::new(&[escape_on_caps()], &DialConfig::default());
+        dispatcher.record_into(57).unwrap();
+        assert!(dispatcher.handle(&InputEvent::KeyDown(57), ms(0)).is_empty());
+        assert!(dispatcher.handle(&InputEvent::KeyUp(57), ms(30)).is_empty());
+        assert_eq!(dispatcher.recorder_state(), RecorderState::Recording { key: 57 });
+        let steps = vec![MacroStep::Down(key("caps_lock")), MacroStep::Delay(30), MacroStep::Up(key("caps_lock"))];
+        assert_eq!(
+            dispatcher.stop_recording(),
+            [Intent::SaveMacro { key: key("caps_lock"), steps }, Intent::Recording(RecorderState::Idle)]
+        );
+    }
+
+    #[test]
+    fn other_bound_keys_keep_firing_while_a_key_is_recorded_into() {
+        let mut dispatcher = Dispatcher::new(&[escape_on_caps()], &DialConfig::default());
+        dispatcher.record_into(4).unwrap();
+        let program = Program::remap(key("escape"), &[]);
+        assert_eq!(
+            dispatcher.handle(&InputEvent::KeyDown(57), ms(0)),
+            [Intent::Output(OutputCommand::Press { source: 57, program })]
+        );
+        assert!(dispatcher.handle(&InputEvent::KeyDown(4), ms(10)).is_empty());
+        assert_eq!(dispatcher.recorder_state(), RecorderState::Recording { key: 4 });
     }
 
     #[test]
