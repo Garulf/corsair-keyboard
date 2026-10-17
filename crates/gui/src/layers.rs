@@ -4,7 +4,7 @@ use actions::Action;
 use eframe::egui;
 use engine::effects::KeyColor;
 use engine::{BlendMode, EffectConfig, LayerConfig, NamedZone, Zone};
-use ipc::Profile;
+use ipc::{AudioState, Profile};
 use k100::Rgb;
 
 use crate::colors::color_button;
@@ -51,10 +51,11 @@ pub enum EffectKind {
     Rain,
     Type,
     Ripple,
+    AudioVisualizer,
 }
 
 impl EffectKind {
-    pub const ALL: [EffectKind; 12] = [
+    pub const ALL: [EffectKind; 13] = [
         Self::Solid,
         Self::StaticCustom,
         Self::Gradient,
@@ -67,6 +68,7 @@ impl EffectKind {
         Self::Rain,
         Self::Type,
         Self::Ripple,
+        Self::AudioVisualizer,
     ];
 
     pub fn label(self) -> &'static str {
@@ -83,6 +85,7 @@ impl EffectKind {
             Self::Rain => "Rain",
             Self::Type => "Type",
             Self::Ripple => "Ripple",
+            Self::AudioVisualizer => "Audio visualizer",
         }
     }
 
@@ -100,6 +103,7 @@ impl EffectKind {
             EffectConfig::Rain { .. } => Self::Rain,
             EffectConfig::Type { .. } => Self::Type,
             EffectConfig::Ripple { .. } => Self::Ripple,
+            EffectConfig::AudioVisualizer { .. } => Self::AudioVisualizer,
         }
     }
 
@@ -127,6 +131,13 @@ impl EffectKind {
                 speed: 1500.0,
                 width: 120.0,
                 lifetime_ms: 1500,
+            },
+            Self::AudioVisualizer => EffectConfig::AudioVisualizer {
+                low: Rgb::new(0x00, 0xFF, 0x40),
+                high: Rgb::new(0xFF, 0x00, 0x00),
+                background: black,
+                gain: 1.0,
+                decay_ms: 400,
             },
         }
     }
@@ -288,6 +299,7 @@ fn layer_list(ui: &mut egui::Ui, model: &mut Model) {
 
 fn layer_editor(ui: &mut egui::Ui, model: &mut Model) {
     let selection = model.selection.clone();
+    let audio = model.state.as_ref().map(|state| state.audio.clone()).unwrap_or_default();
     let Some(draft) = model.draft.as_mut() else { return };
     if draft.profile.layers.is_empty() {
         return;
@@ -334,6 +346,18 @@ fn layer_editor(ui: &mut egui::Ui, model: &mut Model) {
     }
     ui.separator();
     effect_params(ui, &mut layer.effect, &selection, &mut model.paint);
+    if matches!(layer.effect, EffectConfig::AudioVisualizer { .. }) {
+        ui.label(audio_status_label(&audio));
+    }
+}
+
+fn audio_status_label(audio: &AudioState) -> String {
+    match audio {
+        AudioState::Off => "Audio off (starts when this profile is active and the keyboard is connected)".to_owned(),
+        AudioState::Starting => "Audio starting".to_owned(),
+        AudioState::Capturing { device } => format!("Audio capturing: {device}"),
+        AudioState::Failed { reason } => format!("Audio failed: {reason}"),
+    }
 }
 
 fn colour_row(ui: &mut egui::Ui, label: &str, color: &mut Rgb) {
@@ -438,6 +462,13 @@ pub fn effect_params(ui: &mut egui::Ui, effect: &mut EffectConfig, selection: &B
             ui.add(egui::Slider::new(width, 20.0..=400.0).text("Ring width"));
             ui.add(egui::Slider::new(lifetime_ms, 200..=4000).text("Lifetime (ms)"));
         }
+        EffectConfig::AudioVisualizer { low, high, background, gain, decay_ms } => {
+            colour_row(ui, "Bottom colour", low);
+            colour_row(ui, "Top colour", high);
+            colour_row(ui, "Background", background);
+            ui.add(egui::Slider::new(gain, 0.1..=10.0).logarithmic(true).text("Gain"));
+            ui.add(egui::Slider::new(decay_ms, 0..=2000).text("Decay (ms)"));
+        }
     }
 }
 
@@ -474,7 +505,7 @@ mod tests {
 
     #[test]
     fn every_effect_kind_round_trips_and_builds() {
-        assert_eq!(EffectKind::ALL.len(), 12);
+        assert_eq!(EffectKind::ALL.len(), 13);
         for kind in EffectKind::ALL {
             let config = kind.default_config();
             assert_eq!(EffectKind::of(&config), kind);
@@ -550,6 +581,63 @@ mod tests {
         harness.run();
         assert_eq!(names(harness.state()), ["base", "Rainbow wave 1"]);
         assert_eq!(harness.state().layer, 1);
+    }
+
+    #[test]
+    fn choosing_the_audio_visualizer_in_the_effect_combo_installs_its_defaults() {
+        let mut harness = harness(with_layers(vec![solid("base")]), lighting);
+        harness.run();
+        harness.get_by_label("Effect").click();
+        harness.run();
+        harness.get_by_label("Audio visualizer").click_accesskit();
+        harness.run();
+        let layer = &harness.state().draft.as_ref().unwrap().profile.layers[0];
+        assert_eq!(layer.effect, EffectKind::AudioVisualizer.default_config());
+        assert_eq!(
+            layer.effect,
+            EffectConfig::AudioVisualizer {
+                low: Rgb::new(0x00, 0xFF, 0x40),
+                high: Rgb::new(0xFF, 0x00, 0x00),
+                background: Rgb::BLACK,
+                gain: 1.0,
+                decay_ms: 400,
+            }
+        );
+    }
+
+    fn visualizer_model(audio: AudioState) -> Model {
+        let mut model =
+            with_layers(vec![LayerConfig { effect: EffectKind::AudioVisualizer.default_config(), ..solid("bars") }]);
+        model.state.as_mut().unwrap().audio = audio;
+        model
+    }
+
+    #[test]
+    fn the_visualizer_editor_shows_the_audio_status() {
+        let mut harness = harness(visualizer_model(AudioState::Failed { reason: "boom".into() }), lighting);
+        harness.run();
+        harness.get_by_label("Audio failed: boom");
+
+        let mut harness =
+            self::harness(visualizer_model(AudioState::Capturing { device: "Speakers".into() }), lighting);
+        harness.run();
+        harness.get_by_label("Audio capturing: Speakers");
+    }
+
+    #[test]
+    fn the_visualizer_editor_explains_when_audio_is_off() {
+        let mut harness = harness(visualizer_model(AudioState::Off), lighting);
+        harness.run();
+        harness.get_by_label("Audio off (starts when this profile is active and the keyboard is connected)");
+    }
+
+    #[test]
+    fn other_editors_do_not_show_the_audio_status() {
+        let mut model = with_layers(vec![solid("base")]);
+        model.state.as_mut().unwrap().audio = AudioState::Failed { reason: "boom".into() };
+        let mut harness = harness(model, lighting);
+        harness.run();
+        assert!(harness.query_by_label("Audio failed: boom").is_none());
     }
 
     #[test]

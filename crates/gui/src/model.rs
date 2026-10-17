@@ -595,6 +595,7 @@ impl Model {
             Event::DialMode { name } => self.update_state(|current| current.dial_mode = name),
             Event::Recording { state } => self.update_state(|current| current.recording = state),
             Event::Brightness { percent } => self.update_state(|current| current.brightness = percent),
+            Event::Audio { state } => self.update_state(|current| current.audio = state),
             Event::Key { .. } | Event::Dial { .. } => {}
         }
     }
@@ -1089,7 +1090,9 @@ mod tests {
         model.apply(Inbox::Event(Event::DialMode { name: "zoom".into() }));
         model.apply(Inbox::Event(Event::Recording { state: actions::RecorderState::AwaitingKey }));
         model.apply(Inbox::Event(Event::DeviceState { state: DeviceState::Released }));
+        model.apply(Inbox::Event(Event::Audio { state: ipc::AudioState::Failed { reason: "boom".into() } }));
         let state = model.state.as_ref().unwrap();
+        assert_eq!(state.audio, ipc::AudioState::Failed { reason: "boom".into() });
         assert_eq!(state.brightness, 40);
         assert_eq!(state.winlock, Some(true));
         assert_eq!(state.dial_mode, "zoom");

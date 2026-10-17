@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::color::{lerp, unit};
 use crate::effects::EffectConfig;
 use crate::layout::Layout;
+use crate::spectrum::Spectrum;
 use crate::zone::{Mask, Zone};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -45,6 +46,7 @@ pub struct FrameCtx<'a> {
     pub time: Duration,
     pub layout: &'a Layout,
     pub presses: &'a [KeyPress],
+    pub spectrum: &'a Spectrum,
 }
 
 pub trait Effect: Send {
@@ -148,8 +150,8 @@ impl Compositor {
         }
     }
 
-    pub fn render(&mut self, time: Duration, presses: &[KeyPress]) -> Frame {
-        let ctx = FrameCtx { time, layout: &self.layout, presses };
+    pub fn render(&mut self, time: Duration, presses: &[KeyPress], spectrum: &Spectrum) -> Frame {
+        let ctx = FrameCtx { time, layout: &self.layout, presses, spectrum };
         let mut out = [Rgb::BLACK; LED_COUNT];
         let mut scratch = [Rgb::BLACK; LED_COUNT];
         for layer in &mut self.layers {
@@ -184,7 +186,7 @@ mod tests {
         let blue = Rgb::new(0, 0, 255);
         let layers = [solid(Zone::Named(NamedZone::All), red), solid(Zone::Named(NamedZone::Wasd), blue)];
         let mut compositor = Compositor::new(Layout::ansi(), &layers);
-        let frame = compositor.render(Duration::ZERO, &[]);
+        let frame = compositor.render(Duration::ZERO, &[], &Spectrum::SILENT);
         assert_eq!(frame[26], blue, "W");
         assert_eq!(frame[20], red, "Q");
         assert_eq!(frame[100], Rgb::BLACK, "not on ANSI");
@@ -205,7 +207,7 @@ mod tests {
     fn disabled_layers_are_skipped() {
         let mut layer = solid(Zone::Named(NamedZone::All), Rgb::new(9, 9, 9));
         layer.enabled = false;
-        let frame = Compositor::new(Layout::ansi(), &[layer]).render(Duration::ZERO, &[]);
+        let frame = Compositor::new(Layout::ansi(), &[layer]).render(Duration::ZERO, &[], &Spectrum::SILENT);
         assert!(frame.iter().all(|&c| c == Rgb::BLACK));
     }
 
@@ -217,15 +219,15 @@ mod tests {
         flash.enabled = false;
         let mut compositor = Compositor::new(Layout::ansi(), &[solid(Zone::Named(NamedZone::All), red), flash]);
         let at = Duration::from_millis;
-        assert_eq!(compositor.render(at(0), &[])[4], red);
+        assert_eq!(compositor.render(at(0), &[], &Spectrum::SILENT)[4], red);
         assert!(compositor.trigger_layer("flash", None));
-        assert_eq!(compositor.render(at(10), &[])[4], blue);
+        assert_eq!(compositor.render(at(10), &[], &Spectrum::SILENT)[4], blue);
         compositor.release_layer("flash");
-        assert_eq!(compositor.render(at(20), &[])[4], red);
+        assert_eq!(compositor.render(at(20), &[], &Spectrum::SILENT)[4], red);
         compositor.trigger_layer("flash", Some(at(100)));
-        assert_eq!(compositor.render(at(50), &[])[4], blue);
-        assert_eq!(compositor.render(at(100), &[])[4], red);
-        assert_eq!(compositor.render(at(110), &[])[4], red);
+        assert_eq!(compositor.render(at(50), &[], &Spectrum::SILENT)[4], blue);
+        assert_eq!(compositor.render(at(100), &[], &Spectrum::SILENT)[4], red);
+        assert_eq!(compositor.render(at(110), &[], &Spectrum::SILENT)[4], red);
         assert!(!compositor.trigger_layer("nope", None));
     }
 
@@ -253,7 +255,7 @@ mod tests {
         .unwrap();
         assert_eq!(profile.layers.len(), 2);
         assert_eq!(profile.layers[1].blend, BlendMode::Add);
-        let frame = Compositor::new(Layout::ansi(), &profile.layers).render(Duration::ZERO, &[]);
+        let frame = Compositor::new(Layout::ansi(), &profile.layers).render(Duration::ZERO, &[], &Spectrum::SILENT);
         assert_eq!(frame[131], Rgb::new(160, 32, 32));
         assert_eq!(frame[4], Rgb::new(32, 32, 32));
     }

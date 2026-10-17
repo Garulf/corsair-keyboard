@@ -1,0 +1,17 @@
+[package]
+name = "audio"
+description = "System audio capture and spectrum analysis for the K100 lighting engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+engine.workspace = true
+realfft.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+cpal.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+pulseaudio.workspace = true

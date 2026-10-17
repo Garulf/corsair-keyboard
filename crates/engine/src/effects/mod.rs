@@ -1,3 +1,4 @@
+mod audio;
 mod reactive;
 mod spatial;
 mod temporal;
@@ -8,6 +9,7 @@ use k100::{LED_COUNT, Rgb};
 use serde::{Deserialize, Serialize};
 
 use crate::layer::Effect;
+use crate::spectrum::SPECTRUM_BANDS;
 
 fn black() -> Rgb {
     Rgb::BLACK
@@ -43,6 +45,22 @@ fn default_ripple_width() -> f32 {
 
 fn default_lifetime_ms() -> u64 {
     1500
+}
+
+fn default_audio_low() -> Rgb {
+    Rgb::new(0x00, 0xff, 0x40)
+}
+
+fn default_audio_high() -> Rgb {
+    Rgb::new(0xff, 0x00, 0x00)
+}
+
+fn default_gain() -> f32 {
+    1.0
+}
+
+fn default_decay_ms() -> u64 {
+    400
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -138,6 +156,18 @@ pub enum EffectConfig {
         #[serde(default = "default_lifetime_ms")]
         lifetime_ms: u64,
     },
+    AudioVisualizer {
+        #[serde(default = "default_audio_low")]
+        low: Rgb,
+        #[serde(default = "default_audio_high")]
+        high: Rgb,
+        #[serde(default = "black")]
+        background: Rgb,
+        #[serde(default = "default_gain")]
+        gain: f32,
+        #[serde(default = "default_decay_ms")]
+        decay_ms: u64,
+    },
 }
 
 impl EffectConfig {
@@ -175,6 +205,17 @@ impl EffectConfig {
                 lifetime: Duration::from_millis(lifetime_ms),
                 active: Vec::new(),
             }),
+            EffectConfig::AudioVisualizer { low, high, background, gain, decay_ms } => {
+                Box::new(audio::AudioVisualizer {
+                    low,
+                    high,
+                    background,
+                    gain,
+                    decay: Duration::from_millis(decay_ms),
+                    levels: [0.0; SPECTRUM_BANDS],
+                    last: None,
+                })
+            }
         }
     }
 }

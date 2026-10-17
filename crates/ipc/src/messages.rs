@@ -82,6 +82,7 @@ pub enum Event {
     Recording { state: actions::RecorderState },
     MacroRecorded { key: String },
     Brightness { percent: u8 },
+    Audio { state: AudioState },
     Frame { rgb: String },
 }
 
@@ -99,6 +100,20 @@ pub enum DeviceState {
     },
     Released,
     Paused {
+        reason: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum AudioState {
+    #[default]
+    Off,
+    Starting,
+    Capturing {
+        device: String,
+    },
+    Failed {
         reason: String,
     },
 }
@@ -121,6 +136,8 @@ pub struct DaemonState {
     pub recording: actions::RecorderState,
     #[serde(default)]
     pub autostart: bool,
+    #[serde(default)]
+    pub audio: AudioState,
 }
 
 fn version_one() -> u32 {
@@ -180,6 +197,25 @@ mod tests {
         let old_state = r#"{"device":{"state":"released"},"active_profile":"a","profiles":[],"brightness":5,"polling_rate_hz":null,"config_errors":[]}"#;
         let state: DaemonState = serde_json::from_str(old_state).unwrap();
         assert_eq!((state.winlock, state.dial_mode.as_str()), (None, ""));
+    }
+
+    #[test]
+    fn daemon_state_without_audio_parses_as_off() {
+        let old_state = r#"{"device":{"state":"released"},"active_profile":"a","profiles":[],"brightness":5,"polling_rate_hz":null,"config_errors":[]}"#;
+        let state: DaemonState = serde_json::from_str(old_state).unwrap();
+        assert_eq!(state.audio, AudioState::Off);
+    }
+
+    #[test]
+    fn audio_states_round_trip_with_their_payloads() {
+        let failed = AudioState::Failed { reason: "no sink".into() };
+        let json = serde_json::to_string(&failed).unwrap();
+        assert_eq!(json, r#"{"state":"failed","reason":"no sink"}"#);
+        assert_eq!(serde_json::from_str::<AudioState>(&json).unwrap(), failed);
+        let event = Event::Audio { state: AudioState::Capturing { device: "Speakers".into() } };
+        let json = serde_json::to_string(&event).unwrap();
+        assert_eq!(json, r#"{"type":"audio","state":{"state":"capturing","device":"Speakers"}}"#);
+        assert_eq!(serde_json::from_str::<Event>(&json).unwrap(), event);
     }
 
     #[test]

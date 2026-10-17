@@ -85,13 +85,17 @@ mod tests {
     use crate::effects::EffectConfig;
     use crate::layer::{Effect, FrameCtx, KeyPress};
     use crate::layout::Layout;
+    use crate::spectrum::Spectrum;
     use k100::{Frame, LED_COUNT, Rgb};
 
     const RED: Rgb = Rgb::new(255, 0, 0);
 
     fn step(effect: &mut Box<dyn Effect>, layout: &Layout, ms: u64, presses: &[KeyPress]) -> Frame {
         let mut out = [Rgb::BLACK; LED_COUNT];
-        effect.render(&FrameCtx { time: Duration::from_millis(ms), layout, presses }, &mut out);
+        effect.render(
+            &FrameCtx { time: Duration::from_millis(ms), layout, presses, spectrum: &Spectrum::SILENT },
+            &mut out,
+        );
         out
     }
 
@@ -158,7 +162,12 @@ mod tests {
             let presses = [press(4, frame * 16), press(22, frame * 16)];
             let mut out = [Rgb::BLACK; LED_COUNT];
             ripple.render(
-                &FrameCtx { time: Duration::from_millis(frame * 16), layout: &layout, presses: &presses },
+                &FrameCtx {
+                    time: Duration::from_millis(frame * 16),
+                    layout: &layout,
+                    presses: &presses,
+                    spectrum: &Spectrum::SILENT,
+                },
                 &mut out,
             );
         }

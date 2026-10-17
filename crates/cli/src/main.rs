@@ -57,7 +57,7 @@ enum Command {
     Keys,
     /// Print key, dial and state events until Ctrl-C
     Events,
-    /// Low-level hardware checks that talk to the keyboard directly (stop k100d first)
+    /// Low-level hardware checks that talk to the keyboard directly (stop k100d first, except for `diag audio`)
     #[command(subcommand)]
     Diag(diag::Diag),
 }
