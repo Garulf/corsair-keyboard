@@ -117,6 +117,7 @@ pub struct Controller {
     output: Box<dyn OutputPort>,
     output_available: bool,
     indicators: Indicators,
+    native_while_recording: Option<u8>,
     link: Option<Box<dyn DeviceLink>>,
     max_polling_rate: Option<PollingRate>,
     device: DeviceState,
@@ -167,6 +168,7 @@ impl Controller {
             output,
             output_available: true,
             indicators,
+            native_while_recording: None,
             link: None,
             max_polling_rate: None,
             device: DeviceState::Disconnected,
@@ -510,8 +512,16 @@ impl Controller {
 
     fn cancel_recording(&mut self) {
         if self.dispatcher.cancel_recording() {
-            self.indicators.recording(RecorderState::Idle);
-            self.events.push(Event::Recording { state: RecorderState::Idle });
+            self.recording_changed(RecorderState::Idle);
+        }
+    }
+
+    fn recording_changed(&mut self, state: RecorderState) {
+        self.indicators.recording(state);
+        self.events.push(Event::Recording { state });
+        if state.recorded_target() != self.native_while_recording {
+            self.native_while_recording = state.recorded_target();
+            self.write_key_mappings();
         }
     }
 
@@ -554,10 +564,7 @@ impl Controller {
                 self.indicators.dial_mode(color, self.now);
                 self.events.push(Event::DialMode { name });
             }
-            Intent::Recording(state) => {
-                self.indicators.recording(state);
-                self.events.push(Event::Recording { state });
-            }
+            Intent::Recording(state) => self.recording_changed(state),
             Intent::SaveMacro { key, steps } => self.save_macro(key, steps, config),
         }
     }
@@ -651,6 +658,9 @@ impl Controller {
 
     fn write_key_mappings(&mut self) {
         let mut assignments = self.active_profile().assignments.clone();
+        if let Some(target) = self.native_while_recording {
+            assignments.retain(|assignment| assignment.key.index() != Some(target));
+        }
         if !self.output_available {
             assignments.retain(|assignment| works_without_output(&assignment.action));
         }
@@ -788,8 +798,7 @@ impl Controller {
                 Err(message) => return error(message),
             },
         };
-        self.indicators.recording(state);
-        self.events.push(Event::Recording { state });
+        self.recording_changed(state);
         Reply::Done
     }
 
@@ -1766,6 +1775,32 @@ mod tests {
         let idle_at = events.iter().position(|event| *event == Event::Recording { state: RecorderState::Idle });
         assert!(macro_at.unwrap() < idle_at.unwrap(), "{events:?}");
         assert_eq!(rig.controller.state().recording, RecorderState::Idle);
+    }
+
+    #[test]
+    fn a_bound_key_recorded_into_types_natively_and_keeps_its_presses_in_the_macro() {
+        let mut rig = rig(vec![caps_to_escape()]);
+        assert_eq!(rig.log.lock().unwrap().mappings.last().unwrap()[57], 0x00);
+        rig.output.take();
+        let start = Request::StartRecording { key: Some(57) };
+        assert_eq!(rig.controller.handle(start, &rig.config), Reply::Done);
+        assert_eq!(rig.log.lock().unwrap().mappings.last().unwrap()[57], 0x01, "caps lock types natively");
+        tap_key(&mut rig, 57, 100, 140);
+        assert!(rig.output.take().is_empty(), "the escape remap does not fire");
+        assert_eq!(rig.controller.state().recording, RecorderState::Recording { key: 57 });
+        assert_eq!(rig.controller.handle(Request::StopRecording, &rig.config), Reply::Done);
+        let steps = vec![MacroStep::Down(key("caps_lock")), MacroStep::Delay(40), MacroStep::Up(key("caps_lock"))];
+        let saved = &rig.config.load_profiles().0[0].assignments;
+        assert_eq!(saved[0].action, Action::Macro { steps, mode: RepeatMode::Once });
+        assert_eq!(rig.log.lock().unwrap().mappings.last().unwrap()[57], 0x00);
+    }
+
+    #[test]
+    fn cancelling_a_recording_into_a_bound_key_restores_its_mapping() {
+        let mut rig = rig(vec![caps_to_escape()]);
+        rig.controller.handle(Request::StartRecording { key: Some(57) }, &rig.config);
+        rig.controller.handle(Request::CancelRecording, &rig.config);
+        assert_eq!(rig.log.lock().unwrap().mappings.last().unwrap()[57], 0x00);
     }
 
     #[test]
