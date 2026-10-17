@@ -75,7 +75,7 @@ Audio capture for the audio visualizer needs a PulseAudio server or PipeWire wit
 | `k100 autostart <on\|off\|status>` | Start the daemon at login |
 | `k100 keys` | List the key names you can use in profiles |
 | `k100 events` | Print key, dial and state events |
-| `k100 diag <subcommand>` | Low-level hardware checks (stop the daemon first) |
+| `k100 diag <subcommand>` | Low-level hardware checks (stop the daemon first, except for `diag audio`) |
 | `k100 diag audio [--seconds N]` | Print the captured audio spectrum as text, with no keyboard or daemon needed |
 
 The effects are `solid`, `rainbow_wave`, `spiral_rainbow`, `color_wave`, `visor`, `color_pulse`, `rain`, `type`, `ripple` and `audio_visualizer`. All but the rainbow ones and `audio_visualizer` need `--color`. The audio visualizer shows the system audio output as 32 frequency bands across the keyboard, and `--color` gives it a single color instead of its green to red gradient.
