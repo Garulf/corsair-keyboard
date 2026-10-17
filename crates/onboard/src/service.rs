@@ -178,6 +178,49 @@ mod tests {
         assert!(!backups.root().exists());
     }
 
+    fn only_backup(backups: &Backups) -> std::path::PathBuf {
+        let mut folders: Vec<_> =
+            std::fs::read_dir(backups.root()).unwrap().map(|entry| entry.unwrap().path()).collect();
+        assert_eq!(folders.len(), 1, "{folders:?}");
+        folders.remove(0)
+    }
+
+    #[test]
+    fn a_failed_save_names_the_backup_and_how_to_put_it_back() {
+        let (mut store, backups, _temp) = rig();
+        store.fail_writes_from(1, Failure::Timeout);
+        let request = OnboardRequest::Save { profile: "red".into(), slot: None };
+        let message = execute(&mut store, &request, &red, &backups, now()).unwrap_err().to_string();
+        let restore = format!("k100 onboard restore \"{}\"", only_backup(&backups).display());
+        assert!(message.contains(&restore), "{message}");
+        assert!(!message.contains("slot list may be damaged"), "{message}");
+    }
+
+    #[test]
+    fn a_save_whose_old_slot_list_cannot_be_put_back_says_the_list_may_be_damaged() {
+        let (mut store, backups, _temp) = rig();
+        store.mangle_write(7);
+        store.fail_writes_from(8, Failure::Timeout);
+        let request = OnboardRequest::Save { profile: "red".into(), slot: None };
+        let message = execute(&mut store, &request, &red, &backups, now()).unwrap_err().to_string();
+        let restore = format!("k100 onboard restore \"{}\"", only_backup(&backups).display());
+        assert!(message.contains("slot list may be damaged") && message.contains(&restore), "{message}");
+    }
+
+    #[test]
+    fn a_failed_restore_names_the_backup_taken_before_it() {
+        let (mut store, backups, temp) = rig();
+        let folder = temp.path().join("original").display().to_string();
+        execute(&mut store, &OnboardRequest::Backup { to: Some(folder.clone()) }, &|_| None, &backups, now()).unwrap();
+        save_red(&mut store, &backups);
+        store.fail_writes_from(1, Failure::Status(bragi::Status::HardwareError));
+        let message = execute(&mut store, &OnboardRequest::Restore { from: folder }, &|_| None, &backups, now())
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains("k100 onboard restore \""), "{message}");
+        assert!(message.contains(&backups.root().display().to_string()), "{message}");
+    }
+
     #[test]
     fn overwriting_a_slot_notes_every_old_file_it_could_not_remove() {
         let (mut store, backups, _temp) = rig();

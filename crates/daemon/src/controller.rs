@@ -2388,6 +2388,17 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_onboard_save_replies_with_the_backup_to_restore() {
+        let (mut rig, store) = rig_with_store(vec![profile("default")]);
+        store.fail_writes_from(1, Failure::Status(bragi::Status::HardwareError));
+        let save = Request::Onboard { request: OnboardRequest::Save { profile: "default".into(), slot: None } };
+        let Reply::Error { message } = rig.controller.handle(save, &rig.config) else { panic!("expected an error") };
+        let backups = rig.config.root().join("onboard-backup");
+        assert!(message.contains("k100 onboard restore \"") && message.contains(&backups.display().to_string()));
+        assert!(matches!(rig.controller.state().device, DeviceState::Connected { .. }));
+    }
+
+    #[test]
     fn an_onboard_error_the_keyboard_answered_keeps_the_link() {
         let (mut rig, _store) = rig_with_store(vec![profile("default")]);
         let delete = Request::Onboard { request: OnboardRequest::Delete { slot: 4 } };

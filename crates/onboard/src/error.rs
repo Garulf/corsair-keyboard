@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use k100::DeviceError;
 
@@ -28,6 +28,17 @@ pub enum OnboardError {
     Io(#[from] std::io::Error),
     #[error("{error}; left on the keyboard: {}", hex_ids(.leftovers))]
     PartlyUndone { error: Box<OnboardError>, leftovers: Vec<u16> },
+    #[error("{error}; {}", backup_advice(.backup, *.slot_list_damaged))]
+    AfterBackup { error: Box<OnboardError>, backup: PathBuf, slot_list_damaged: bool },
+}
+
+fn backup_advice(backup: &Path, slot_list_damaged: bool) -> String {
+    let restore = format!("put it back with: k100 onboard restore \"{}\"", backup.display());
+    if slot_list_damaged {
+        format!("the keyboard's slot list may be damaged: {restore}")
+    } else {
+        format!("the backup taken before the change is in {}; {restore}", backup.display())
+    }
 }
 
 fn hex_ids(ids: &[u16]) -> String {
@@ -42,7 +53,7 @@ impl OnboardError {
     pub fn device(&self) -> Option<&DeviceError> {
         match self {
             Self::Device(error) => Some(error),
-            Self::PartlyUndone { error, .. } => error.device(),
+            Self::PartlyUndone { error, .. } | Self::AfterBackup { error, .. } => error.device(),
             _ => None,
         }
     }
@@ -50,7 +61,15 @@ impl OnboardError {
     pub fn leftovers(&self) -> &[u16] {
         match self {
             Self::PartlyUndone { leftovers, .. } => leftovers,
+            Self::AfterBackup { error, .. } => error.leftovers(),
             _ => &[],
+        }
+    }
+
+    pub fn backup(&self) -> Option<&Path> {
+        match self {
+            Self::AfterBackup { backup, .. } => Some(backup),
+            _ => None,
         }
     }
 
@@ -83,6 +102,36 @@ mod tests {
         assert_eq!(error.leftovers(), [0x6D6F, 0x6D71]);
         assert!(error.to_string().ends_with("; left on the keyboard: 0x6d6f, 0x6d71"), "{error}");
         assert!(OnboardError::LastSlot.leftovers().is_empty());
+    }
+
+    fn after_backup(error: OnboardError, slot_list_damaged: bool) -> OnboardError {
+        OnboardError::AfterBackup { error: Box::new(error), backup: PathBuf::from("/b/1"), slot_list_damaged }
+    }
+
+    #[test]
+    fn a_change_that_failed_after_the_backup_says_where_the_backup_is() {
+        let cause = OnboardError::Device(DeviceError::Timeout(Command::WriteBufferBegin));
+        let error = after_backup(cause.with_leftovers(vec![0x6D6F]), false);
+        assert_eq!(
+            error.to_string(),
+            "keyboard: no reply to WriteBufferBegin; left on the keyboard: 0x6d6f; \
+             the backup taken before the change is in /b/1; put it back with: k100 onboard restore \"/b/1\""
+        );
+        assert!(error.lost_device());
+        assert_eq!(error.leftovers(), [0x6D6F]);
+        assert_eq!(error.backup(), Some(Path::new("/b/1")));
+        assert_eq!(OnboardError::LastSlot.backup(), None);
+    }
+
+    #[test]
+    fn a_slot_list_that_could_not_be_put_back_is_called_out() {
+        let error = after_backup(OnboardError::Verify(0x0F), true);
+        assert_eq!(
+            error.to_string(),
+            "file 0x000f read back different from what was written; the keyboard's slot list may be damaged: \
+             put it back with: k100 onboard restore \"/b/1\""
+        );
+        assert!(!error.lost_device());
     }
 
     #[test]

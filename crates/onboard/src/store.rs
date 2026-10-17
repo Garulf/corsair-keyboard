@@ -188,11 +188,20 @@ pub fn save<S: FileStore + ?Sized>(
         slots.check(slot)?;
     }
     let backup = backups.save(&slots.snapshot(), now)?;
+    save_backed_up(store, &slots, tree, slot, backup.clone()).map_err(|failure| failure.backed_up_in(backup))
+}
 
+fn save_backed_up<S: FileStore + ?Sized>(
+    store: &mut S,
+    slots: &Slots,
+    tree: &OnboardTree,
+    slot: Option<usize>,
+    backup: PathBuf,
+) -> Result<Saved, ChangeFailed> {
     let mut created = Vec::new();
     let files = match write_new_tree(store, tree, &slots.used(), &mut created) {
         Ok(files) => files,
-        Err(error) => return Err(error.with_leftovers(remove_free_use(store, created))),
+        Err(error) => return Err(error.with_leftovers(remove_free_use(store, created)).into()),
     };
     let root = files.last().expect("a tree always has a root").0;
 
@@ -203,7 +212,7 @@ pub fn save<S: FileStore + ?Sized>(
     }
     let slot_count = roots.len();
     replace_profiles_list(store, Some(&slots.list_bytes), &ProfilesList { roots }.encode())
-        .map_err(|failure| failure.undo_with(|| remove_free_use(store, created)))?;
+        .map_err(|failure| failure.settle(|| remove_free_use(store, created.iter().copied()), || created.clone()))?;
 
     let leftovers = slot.map(|replaced| remove_free_use(store, slots.files_only_in(replaced))).unwrap_or_default();
     Ok(Saved {
@@ -252,8 +261,29 @@ struct ListNotWritten {
 }
 
 impl ListNotWritten {
-    fn undo_with(self, undo: impl FnOnce() -> Vec<u16>) -> OnboardError {
-        if self.previous_list_back { self.error.with_leftovers(undo()) } else { self.error }
+    fn settle(self, undo: impl FnOnce() -> Vec<u16>, written: impl FnOnce() -> Vec<u16>) -> ChangeFailed {
+        if self.previous_list_back {
+            self.error.with_leftovers(undo()).into()
+        } else {
+            ChangeFailed { error: self.error.with_leftovers(written()), slot_list_damaged: true }
+        }
+    }
+}
+
+struct ChangeFailed {
+    error: OnboardError,
+    slot_list_damaged: bool,
+}
+
+impl From<OnboardError> for ChangeFailed {
+    fn from(error: OnboardError) -> Self {
+        Self { error, slot_list_damaged: false }
+    }
+}
+
+impl ChangeFailed {
+    fn backed_up_in(self, backup: PathBuf) -> OnboardError {
+        OnboardError::AfterBackup { error: Box::new(self.error), backup, slot_list_damaged: self.slot_list_damaged }
     }
 }
 
@@ -289,7 +319,7 @@ pub fn delete<S: FileStore + ?Sized>(
     let mut roots = slots.roots();
     roots.remove(slot);
     replace_profiles_list(store, Some(&slots.list_bytes), &ProfilesList { roots }.encode())
-        .map_err(|failure| failure.error)?;
+        .map_err(|failure| failure.settle(Vec::new, Vec::new).backed_up_in(backup.clone()))?;
     let mut warnings = Vec::new();
     if let Some(active) = slots.active {
         let shifted = match (active as usize).cmp(&slot) {
@@ -331,13 +361,23 @@ pub fn restore<S: FileStore + ?Sized>(
     let restored_roots = validated_roots(&restored, from)?;
     let current = LiveState::read(store)?;
     let backup = backups.save(&current.snapshot(), now)?;
+    restore_backed_up(store, &restored, &restored_roots, &current, backup.clone())
+        .map_err(|failure| failure.backed_up_in(backup))
+}
 
+fn restore_backed_up<S: FileStore + ?Sized>(
+    store: &mut S,
+    restored: &Snapshot,
+    restored_roots: &[u16],
+    current: &LiveState,
+    backup: PathBuf,
+) -> Result<Changed, ChangeFailed> {
     let mut undo = Undo::default();
-    if let Err(error) = write_snapshot_files(store, &restored, &current.files, &mut undo) {
-        return Err(error.with_leftovers(undo.apply(store)));
+    if let Err(error) = write_snapshot_files(store, restored, &current.files, &mut undo) {
+        return Err(error.with_leftovers(undo.apply(store)).into());
     }
     replace_profiles_list(store, current.list_bytes.as_deref(), &restored.profiles_list)
-        .map_err(|failure| failure.undo_with(|| undo.apply(store)))?;
+        .map_err(|failure| failure.settle(|| undo.apply(store), || undo.created.clone()))?;
     let mut warnings = Vec::new();
     if let Some(active) = restored.active {
         let index = if (active as usize) < restored_roots.len() { active } else { 0 };
@@ -544,6 +584,14 @@ mod tests {
         );
     }
 
+    fn backed_up(error: OnboardError) -> (OnboardError, PathBuf, bool) {
+        let OnboardError::AfterBackup { error, backup, slot_list_damaged } = error else {
+            panic!("expected the backup path in the error, got {error:?}")
+        };
+        assert!(backup.join("000f.bin").exists(), "{}", backup.display());
+        (*error, backup, slot_list_damaged)
+    }
+
     fn with_extra_byte(store: &crate::MemoryStore, id: u16) {
         let mut bytes = store.files()[&id].clone();
         bytes.push(0xFF);
@@ -626,6 +674,7 @@ mod tests {
         store.fail_create(0x6D72, Failure::Timeout);
         let error = save(&mut store, &backups, &red_tree(), None, now()).unwrap_err();
         assert!(error.lost_device(), "{error}");
+        assert!(matches!(backed_up(error), (OnboardError::Device(_), _, false)));
         assert_eq!(store.files(), before);
         let creates: Vec<Operation> =
             store.operations().into_iter().filter(|op| matches!(op, Operation::Create(_))).collect();
@@ -639,7 +688,8 @@ mod tests {
         for id in 0x6D72..=*FREE_USE_IDS.end() {
             store.refuse_create(id);
         }
-        assert!(matches!(save(&mut store, &backups, &red_tree(), None, now()), Err(OnboardError::NoFreeIds)));
+        let error = save(&mut store, &backups, &red_tree(), None, now()).unwrap_err();
+        assert!(matches!(backed_up(error), (OnboardError::NoFreeIds, _, false)));
         assert_eq!(store.files(), before);
     }
 
@@ -695,7 +745,11 @@ mod tests {
         let (mut store, backups, _temp) = rig();
         let before = store.files();
         store.fail_writes_from(3, Failure::Status(Status::HardwareError));
-        assert!(save(&mut store, &backups, &red_tree(), None, now()).is_err());
+        let error = save(&mut store, &backups, &red_tree(), None, now()).unwrap_err();
+        let message = error.to_string();
+        let (_, backup, slot_list_damaged) = backed_up(error);
+        assert!(!slot_list_damaged);
+        assert!(message.contains(&format!("k100 onboard restore \"{}\"", backup.display())), "{message}");
         assert_eq!(store.files(), before);
     }
 
@@ -704,7 +758,8 @@ mod tests {
         let (mut store, backups, _temp) = rig();
         let before = store.files();
         store.mangle_writes();
-        assert!(matches!(save(&mut store, &backups, &red_tree(), None, now()), Err(OnboardError::Verify(_))));
+        let error = save(&mut store, &backups, &red_tree(), None, now()).unwrap_err();
+        assert!(matches!(backed_up(error), (OnboardError::Verify(_), _, false)));
         assert_eq!(store.files(), before);
     }
 
@@ -713,8 +768,8 @@ mod tests {
         let (mut store, backups, _temp) = rig();
         let before = store.files();
         store.mangle_write(RED_FILE_WRITES + 1);
-        let result = save(&mut store, &backups, &red_tree(), Some(0), now());
-        assert!(matches!(result, Err(OnboardError::Verify(0x0F))), "{result:?}");
+        let error = save(&mut store, &backups, &red_tree(), Some(0), now()).unwrap_err();
+        assert!(matches!(backed_up(error), (OnboardError::Verify(0x0F), _, false)));
         assert_eq!(store.files(), before);
     }
 
@@ -733,7 +788,13 @@ mod tests {
         let (mut store, backups, _temp) = rig();
         store.mangle_write(RED_FILE_WRITES + 1);
         store.fail_writes_from(RED_FILE_WRITES + 2, Failure::Timeout);
-        assert!(save(&mut store, &backups, &red_tree(), None, now()).is_err());
+        let error = save(&mut store, &backups, &red_tree(), None, now()).unwrap_err();
+        let message = error.to_string();
+        assert_eq!(error.leftovers(), RED_IDS);
+        let (_, backup, slot_list_damaged) = backed_up(error);
+        assert!(slot_list_damaged);
+        assert!(message.contains("slot list may be damaged"), "{message}");
+        assert!(message.contains(&format!("k100 onboard restore \"{}\"", backup.display())), "{message}");
         let files = store.files();
         assert!(ICUE_TREE.iter().chain(&RED_IDS).all(|id| files.contains_key(id)));
         assert!(!store.operations().iter().any(|op| matches!(op, Operation::Remove(_))));
@@ -810,8 +871,20 @@ mod tests {
         save(&mut store, &backups, &red_tree(), None, now()).unwrap();
         let before = store.files();
         store.mangle_write(RED_FILE_WRITES + 2);
-        assert!(matches!(delete(&mut store, &backups, 0, now()), Err(OnboardError::Verify(0x0F))));
+        let error = delete(&mut store, &backups, 0, now()).unwrap_err();
+        assert!(matches!(backed_up(error), (OnboardError::Verify(0x0F), _, false)));
         assert_eq!(store.files(), before);
+    }
+
+    #[test]
+    fn a_delete_whose_old_list_cannot_be_put_back_says_the_slot_list_may_be_damaged() {
+        let (mut store, backups, _temp) = rig();
+        save(&mut store, &backups, &red_tree(), None, now()).unwrap();
+        store.mangle_write(RED_FILE_WRITES + 2);
+        store.fail_writes_from(RED_FILE_WRITES + 3, Failure::Timeout);
+        let error = delete(&mut store, &backups, 0, now()).unwrap_err();
+        assert!(error.to_string().contains("slot list may be damaged"), "{error}");
+        assert!(matches!(backed_up(error), (OnboardError::Verify(0x0F), _, true)));
     }
 
     #[test]
@@ -908,7 +981,8 @@ mod tests {
         let dir = temp.path().join("changed");
         changed.write_to(&dir).unwrap();
         store.fail_write(2, Failure::Status(Status::HardwareError));
-        assert!(matches!(restore(&mut store, &backups, &dir, now()), Err(OnboardError::Device(_))));
+        let error = restore(&mut store, &backups, &dir, now()).unwrap_err();
+        assert!(matches!(backed_up(error), (OnboardError::Device(_), _, false)));
         assert_eq!(store.files(), before);
     }
 
@@ -925,6 +999,20 @@ mod tests {
         let error = restore(&mut store, &backups, &dir, now()).unwrap_err();
         assert_eq!(error.device().and_then(DeviceError::status), Some(Status::HardwareError), "{error}");
         assert_eq!(store.files(), before);
+    }
+
+    #[test]
+    fn a_restore_whose_old_list_cannot_be_put_back_says_the_slot_list_may_be_damaged() {
+        let (mut store, backups, _temp) = rig();
+        let saved = save(&mut store, &backups, &red_tree(), Some(0), now()).unwrap();
+        let writes_so_far = store.operations().iter().filter(|op| matches!(op, Operation::Write(_))).count();
+        let restored_files = ICUE_TREE.len();
+        store.mangle_write(writes_so_far + restored_files + 1);
+        store.fail_writes_from(writes_so_far + restored_files + 2, Failure::Timeout);
+        let error = restore(&mut store, &backups, &saved.backup, now()).unwrap_err();
+        assert!(error.to_string().contains("slot list may be damaged"), "{error}");
+        assert_eq!(error.leftovers(), ICUE_TREE);
+        assert!(backed_up(error).2);
     }
 
     #[test]
@@ -1005,10 +1093,11 @@ mod tests {
         store.fail_remove(0x6D6F, Failure::Timeout);
         let error = save(&mut store, &backups, &red_tree(), None, now()).unwrap_err();
         assert_eq!(error.leftovers(), [0x6D6F]);
-        assert!(
-            matches!(&error, OnboardError::PartlyUndone { error, .. } if matches!(**error, OnboardError::Device(_)))
-        );
         assert!(!error.lost_device());
+        let (cause, _, _) = backed_up(error);
+        assert!(
+            matches!(&cause, OnboardError::PartlyUndone { error, .. } if matches!(**error, OnboardError::Device(_)))
+        );
         assert_eq!(ProfilesList::decode(&store.files()[&0x0F]).unwrap().roots, [0x6D70]);
     }
 
