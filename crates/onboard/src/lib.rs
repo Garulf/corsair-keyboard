@@ -1,5 +1,6 @@
 use std::ops::RangeInclusive;
 
+mod lighting;
 mod mappings;
 mod root;
 mod wire;
@@ -7,6 +8,10 @@ mod wire;
 #[cfg(test)]
 mod fixtures;
 
+pub use lighting::{
+    CommonLighting, Direction, EffectDuration, EffectKind, HwColor, LightingEntry, LightingsList, SPECIFIED_COLORS,
+    START_WITH_PROFILE, Speed,
+};
 pub use mappings::{AssignmentEntry, AssignmentMap, DialAction, DialModeEntry, DialModes, StoredKeyMappings};
 pub use root::{ProfileRoot, ProfilesList, Section};
 
