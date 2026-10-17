@@ -49,13 +49,13 @@ pub fn execute<S: FileStore + ?Sized>(
                 }
                 None => backups.save(&snapshot, now)?,
             };
-            let message = format!("backed up {} slots", slot_count(&snapshot)?);
+            let message = format!("backed up {}", slots(slot_count(&snapshot)?));
             Ok(done(message, Some(&folder), Vec::new()))
         }
         OnboardRequest::Restore { from } => {
-            let slots = slot_count(&Snapshot::read_from(Path::new(from))?)?;
+            let restored = slots(slot_count(&Snapshot::read_from(Path::new(from))?)?);
             let changed = restore(store, backups, Path::new(from), now)?;
-            Ok(changed_reply(format!("restored {slots} slots from {from}"), &changed))
+            Ok(changed_reply(format!("restored {restored} from {from}"), &changed))
         }
     }
 }
@@ -88,6 +88,10 @@ fn slot_name<S: FileStore + ?Sized>(store: &mut S, slot: usize) -> Result<String
     let root = *list.roots.get(slot).ok_or(OnboardError::NoSlot(slot))?;
     let root_bytes = store.read(FileId(root))?;
     Ok(ProfileRoot::decode(&root_bytes).map_err(|error| OnboardError::Decode(root, error))?.name)
+}
+
+fn slots(count: usize) -> String {
+    if count == 1 { "1 slot".to_owned() } else { format!("{count} slots") }
 }
 
 fn slot_count(snapshot: &Snapshot) -> Result<usize, OnboardError> {
@@ -228,12 +232,16 @@ mod tests {
         let to = temp.path().join("chosen");
         let request = OnboardRequest::Backup { to: Some(to.display().to_string()) };
         let (message, backup, _) = done(execute(&mut store, &request, &|_| None, &backups, now()).unwrap());
-        assert_eq!(message, "backed up 1 slots");
+        assert_eq!(message, "backed up 1 slot");
         assert_eq!(backup, Some(to.display().to_string()));
         assert!(to.join("6d70.bin").exists());
         let (_, backup, _) =
             done(execute(&mut store, &OnboardRequest::Backup { to: None }, &|_| None, &backups, now()).unwrap());
         assert!(std::path::Path::new(&backup.unwrap()).starts_with(backups.root()));
+        save_red(&mut store, &backups);
+        let (message, _, _) =
+            done(execute(&mut store, &OnboardRequest::Backup { to: None }, &|_| None, &backups, now()).unwrap());
+        assert_eq!(message, "backed up 2 slots");
     }
 
     #[test]
@@ -245,7 +253,7 @@ mod tests {
         save_red(&mut store, &backups);
         let request = OnboardRequest::Restore { from: folder.clone() };
         let (message, backup, notes) = done(execute(&mut store, &request, &|_| None, &backups, now()).unwrap());
-        assert_eq!(message, format!("restored 1 slots from {folder}"));
+        assert_eq!(message, format!("restored 1 slot from {folder}"));
         assert!(std::path::Path::new(&backup.unwrap()).starts_with(backups.root()));
         assert_eq!(notes, Vec::<String>::new());
         assert_eq!(store.files(), original);

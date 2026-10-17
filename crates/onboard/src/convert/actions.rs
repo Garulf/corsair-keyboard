@@ -253,6 +253,7 @@ fn convert_text(text: &str, notes: &mut Notes) -> Result<Outcome, String> {
 }
 
 pub fn convert_dial(dial: &DialConfig, report: &mut Report) -> Vec<DialModeEntry> {
+    let configured_by_the_user = !dial.is_default();
     let mut entries = Vec::new();
     for mode in &dial.modes {
         let described = describe(mode);
@@ -263,7 +264,8 @@ pub fn convert_dial(dial: &DialConfig, report: &mut Report) -> Vec<DialModeEntry
                 }
                 entries.push(DialModeEntry::new(kind, mode.color()));
             }
-            Err(reason) => report.skipped.push(format!("dial mode {described}: {reason}")),
+            Err(reason) if configured_by_the_user => report.skipped.push(format!("dial mode {described}: {reason}")),
+            Err(_) => {}
         }
     }
     entries
@@ -461,7 +463,22 @@ mod tests {
         let modes = convert_dial(&DialConfig::default(), &mut report);
         assert_eq!(modes.iter().map(|mode| mode.kind).collect::<Vec<_>>(), [0x01, 0x03, 0x08]);
         assert_eq!(modes[0], DialModeEntry::new(0x01, Rgb::new(0x00, 0xBF, 0xFF)));
-        assert!(report.skipped[0].contains("macro_recording"), "{report:?}");
+    }
+
+    #[test]
+    fn a_profile_that_never_configured_the_dial_reports_nothing_about_it() {
+        let mut report = Report::default();
+        convert_dial(&DialConfig::default(), &mut report);
+        assert!(report.is_empty(), "{report:?}");
+    }
+
+    #[test]
+    fn a_configured_macro_recording_mode_is_reported_as_skipped() {
+        let modes = vec![DialMode::builtin(DialModeKind::Brightness), DialMode::builtin(DialModeKind::MacroRecording)];
+        let mut report = Report::default();
+        let written = convert_dial(&DialConfig { modes }, &mut report);
+        assert_eq!(written.len(), 1);
+        assert_eq!(report.skipped, ["dial mode macro_recording: recording macros needs the PC"]);
     }
 
     #[test]
