@@ -57,6 +57,22 @@ fn decode_blob(bytes: &[u8]) -> Result<StoredFile, DecodeError> {
 }
 
 impl StoredFile {
+    pub fn encode(&self) -> Option<Vec<u8>> {
+        Some(match self {
+            Self::ProfilesList(list) => list.encode(),
+            Self::Root(root) => root.encode(),
+            Self::AssignmentMap(map) => map.encode(),
+            Self::KeyMappings(mappings) => mappings.encode(),
+            Self::DialModes(dials) => dials.encode(),
+            Self::LightingsList(list) => list.encode(),
+            Self::Lighting(lighting) => lighting.encode(),
+            Self::Remap(remap) => remap.encode(),
+            Self::Macro(action) => action.encode(),
+            Self::Text(text) => text.encode(),
+            Self::BlobDescriptor { .. } | Self::Other { .. } => return None,
+        })
+    }
+
     pub fn children(&self) -> Vec<u16> {
         let ids: Vec<u16> = match self {
             Self::Root(root) => root.file_ids(),
@@ -120,6 +136,15 @@ mod tests {
         mode.actions.push(crate::DialAction { event: 1, unknown: 0, options: 0, action: 0 });
         let bytes = crate::DialModes { modes: vec![mode] }.encode();
         assert_eq!(decode(&bytes).unwrap().children(), [0x6D80]);
+    }
+
+    #[test]
+    fn decoded_files_encode_back_except_the_opaque_ones() {
+        for id in [0x0F, 0x6D70, 0x6D69, 0x6D6A, 0x6D6E, 0x6D6C, 0x6D6B, 0x6D62] {
+            assert_eq!(decode(file(id)).unwrap().encode().unwrap(), file(id), "{id:#x}");
+        }
+        assert_eq!(decode(file(0x6D61)).unwrap().encode(), None);
+        assert_eq!(decode(file(0x6D6D)).unwrap().encode(), None);
     }
 
     #[test]

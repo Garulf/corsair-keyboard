@@ -86,7 +86,7 @@ impl RemapAction {
 
 const WORD_LEN: usize = 8;
 const MACRO_RESERVED_LEN: usize = 12;
-const DELAY24_MAX: u32 = 0xFF_FFFF;
+pub(crate) const DELAY24_MAX: u32 = 0xFF_FFFF;
 const TWELVE_BIT_MIN: i16 = -2048;
 const TWELVE_BIT_MAX: i16 = 2047;
 const TWELVE_BIT_UNSIGNED_MAX: u16 = 0xFFF;
