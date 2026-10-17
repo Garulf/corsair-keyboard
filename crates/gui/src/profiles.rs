@@ -157,6 +157,9 @@ impl Model {
     }
 
     pub fn edit_profile(&mut self, name: &str) -> Result<(), String> {
+        if self.recording() {
+            return Err(RECORDING_HOLD.into());
+        }
         if self.draft.as_ref().is_some_and(Draft::dirty) {
             return Err("Apply or revert your edits first.".into());
         }
@@ -191,26 +194,35 @@ fn pressed_enter(response: &egui::Response) -> bool {
 
 fn profile_list(ui: &mut egui::Ui, model: &mut Model, names: &[String], active: &str, default: &str) {
     ui.strong("Profiles");
-    let edited = model.draft.as_ref().map(|draft| draft.profile.name.clone());
-    let pick = edited.filter(|name| names.contains(name)).unwrap_or_else(|| active.to_owned());
+    let pick = match model.draft.as_ref() {
+        Some(draft) => names.iter().find(|name| **name == draft.profile.name).cloned(),
+        None => Some(active.to_owned()),
+    };
     for name in names {
-        if ui.selectable_label(*name == pick, profile_title(name, active, default)).clicked() && *name != pick {
+        let picked = pick.as_ref() == Some(name);
+        if ui.selectable_label(picked, profile_title(name, active, default)).clicked() && !picked {
             match model.edit_profile(name) {
                 Ok(()) => model.profiles_form.confirm_delete = None,
                 Err(problem) => model.toast(problem),
             }
         }
     }
+    let pick = pick.unwrap_or_default();
+    let listed = !pick.is_empty();
     ui.horizontal(|ui| {
-        if ui.add_enabled(pick != active, egui::Button::new("Switch to")).clicked() {
+        if ui.add_enabled(listed && pick != active, egui::Button::new("Switch to")).clicked() {
             model.send(Request::SetActiveProfile { name: pick.clone() });
         }
-        if ui.add_enabled(pick != default, egui::Button::new("Make default")).clicked() {
+        if ui.add_enabled(listed && pick != default, egui::Button::new("Make default")).clicked() {
             let patch = SettingsPatch { default_profile: Some(pick.clone()), ..SettingsPatch::default() };
             model.send(Request::SetSettings { patch });
         }
     });
-    delete_controls(ui, model, &pick, active);
+    if listed {
+        delete_controls(ui, model, &pick, active);
+    } else {
+        ui.add_enabled(false, egui::Button::new("Delete"));
+    }
     ui.separator();
     new_profile_controls(ui, model, names);
 }
@@ -582,6 +594,28 @@ mod tests {
         let draft = harness.state().draft.as_ref().unwrap();
         assert_eq!(draft.profile, loaded);
         assert!(!draft.dirty());
+    }
+
+    #[test]
+    fn a_draft_missing_from_the_list_highlights_no_profile() {
+        let mut model = model();
+        model.draft = Some(Draft::new(profile("gone")));
+        let mut harness = harness(model, profiles);
+        harness.run();
+        harness.get_by_label("Editing gone");
+        assert!(!highlighted(&harness, "p (active, default)"));
+        assert!(!highlighted(&harness, "games"));
+        for button in ["Switch to", "Make default", "Delete"] {
+            assert!(harness.get_by_label(button).accesskit_node().is_disabled(), "{button}");
+        }
+    }
+
+    #[test]
+    fn another_profile_is_not_loaded_while_a_macro_is_recorded() {
+        let mut model = model();
+        start_recording(&mut model);
+        assert!(model.edit_profile("games").unwrap_err().contains("recording"));
+        assert!(sent(&mut model).is_empty());
     }
 
     #[test]

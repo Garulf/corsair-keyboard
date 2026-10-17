@@ -108,15 +108,16 @@ pub fn recording_blocker(model: &Model) -> Option<String> {
     None
 }
 
-pub fn record_target(model: &Model) -> Result<Key, String> {
+pub fn record_target(model: &Model) -> Result<(u8, Key), String> {
     if let Some(reason) = recording_blocker(model) {
         return Err(reason);
     }
     selected_key(model).ok_or_else(|| "Select one key on the keyboard that can hold a macro.".into())
 }
 
-fn selected_key(model: &Model) -> Option<Key> {
-    single(&model.selection).and_then(|led| assignability(led).ok())
+fn selected_key(model: &Model) -> Option<(u8, Key)> {
+    let led = single(&model.selection)?;
+    assignability(led).ok().map(|key| (led, key))
 }
 
 fn single(selection: &BTreeSet<u8>) -> Option<u8> {
@@ -242,11 +243,11 @@ fn recorder(ui: &mut egui::Ui, model: &mut Model) {
 fn record_button(ui: &mut egui::Ui, model: &mut Model) {
     let target = record_target(model);
     let label =
-        selected_key(model).map_or_else(|| "Record a macro".to_owned(), |key| format!("Record macro for {key}"));
+        selected_key(model).map_or_else(|| "Record a macro".to_owned(), |(_, key)| format!("Record macro for {key}"));
     if ui.add_enabled(target.is_ok(), egui::Button::new(label)).clicked()
-        && let Ok(key) = target.as_ref()
+        && let Ok((led, _)) = target
     {
-        model.send(Request::StartRecording { key: key.index() });
+        model.send(Request::StartRecording { key: Some(led) });
     }
     match target {
         Err(reason) => ui.weak(reason),
@@ -356,7 +357,7 @@ mod tests {
         model.selection = BTreeSet::from([137]);
         assert!(record_target(&model).unwrap_err().contains("Select one key"));
         model.selection = BTreeSet::from([132]);
-        assert_eq!(record_target(&model), Ok(key("g2")));
+        assert_eq!(record_target(&model), Ok((132, key("g2"))));
         model.draft.as_mut().unwrap().profile.apps.push("x.exe".into());
         assert!(record_target(&model).unwrap_err().contains("Apply or revert"));
     }
