@@ -123,6 +123,22 @@ impl<T: Transport> Device<T> {
         Ok(contents)
     }
 
+    pub fn create_file(&mut self, file: FileId) -> Result<(), DeviceError> {
+        self.exchange(&Request::create_file(file)).map(drop)
+    }
+
+    pub fn remove_file(&mut self, file: FileId) -> Result<(), DeviceError> {
+        self.exchange(&Request::remove_file(file)).map(drop)
+    }
+
+    pub fn replace_file(&mut self, handle: u8, file: FileId, data: &[u8]) -> Result<(), DeviceError> {
+        self.open_file(handle, file)?;
+        let written = self.describe_buffer(handle).and_then(|_| self.write_file(handle, data));
+        let unbound = self.unbind(handle);
+        written?;
+        unbound
+    }
+
     pub fn ping(&mut self) -> Result<(), DeviceError> {
         self.exchange(&Request::ping()).map(drop)
     }
@@ -274,6 +290,41 @@ mod tests {
         });
         let mut device = Device::new(fake);
         assert!(device.read_file(3, FileId(0x25)).unwrap().is_empty());
+    }
+
+    #[test]
+    fn replace_file_opens_describes_writes_and_unbinds() {
+        let fake = FakeTransport::new();
+        let log = fake.log();
+        let mut device = Device::new(fake);
+        device.replace_file(3, FileId(0x0F), &[0x13, 0x00, 0x00, 0x00]).unwrap();
+        let log = log.lock().unwrap();
+        let commands: Vec<u8> = log.iter().map(|report| report[1]).collect();
+        assert_eq!(commands, [0x0D, 0x09, 0x06, 0x05]);
+        assert_eq!(&log[2][2..11], [3, 4, 0, 0, 0, 0x13, 0x00, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn replace_file_unbinds_when_the_write_fails() {
+        let fake = FakeTransport::with_responder(|request| match request[1] {
+            0x06 => vec![status_reply(request, 3)],
+            _ => vec![ok_reply(request)],
+        });
+        let log = fake.log();
+        let mut device = Device::new(fake);
+        assert!(device.replace_file(3, FileId(0x6D71), &[1, 2]).is_err());
+        assert_eq!(log.lock().unwrap().last().unwrap()[1], 0x05);
+    }
+
+    #[test]
+    fn create_and_remove_file_send_one_command_each() {
+        let fake = FakeTransport::new();
+        let log = fake.log();
+        let mut device = Device::new(fake);
+        device.create_file(FileId(0x6D71)).unwrap();
+        device.remove_file(FileId(0x6D71)).unwrap();
+        let commands: Vec<u8> = log.lock().unwrap().iter().map(|report| report[1]).collect();
+        assert_eq!(commands, [0x0B, 0x0C]);
     }
 
     struct Chatty;

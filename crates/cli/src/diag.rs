@@ -67,6 +67,27 @@ pub enum KeyboardDiag {
         #[arg(long)]
         out: Option<std::path::PathBuf>,
     },
+    /// Replace an onboard file with the bytes of a local file (writes onboard memory)
+    FileWrite {
+        #[arg(value_parser = parse_file_id)]
+        id: u16,
+        path: std::path::PathBuf,
+        /// Create the file first (free-use ids 0x6D60..0x7FFF only)
+        #[arg(long)]
+        create: bool,
+    },
+    /// Read one device property by id, optionally writing a value first
+    Prop {
+        #[arg(value_parser = parse_file_id)]
+        id: u16,
+        #[arg(long)]
+        set: Option<u32>,
+    },
+    /// Remove an onboard file (free-use ids 0x6D60..0x7FFF only)
+    FileRemove {
+        #[arg(value_parser = parse_file_id)]
+        id: u16,
+    },
     /// Play a layer file on the keyboard (effects react to key presses)
     Preview {
         file: std::path::PathBuf,
@@ -102,6 +123,9 @@ fn keyboard(command: KeyboardDiag, stop: &AtomicBool) -> Result<()> {
         KeyboardDiag::Watch { seconds } => watch(Session::start(commands, model)?, input, seconds, stop),
         KeyboardDiag::Kill => kill(Session::start(commands, model)?),
         KeyboardDiag::File { id, out } => read_file(commands, id, out.as_deref()),
+        KeyboardDiag::FileWrite { id, path, create } => write_file(commands, id, &path, create),
+        KeyboardDiag::FileRemove { id } => remove_file(commands, id),
+        KeyboardDiag::Prop { id, set } => property(commands, PropertyId(id), set),
         KeyboardDiag::Preview { file, seconds, fps } => {
             preview(Session::start(commands, model)?, input, &file, seconds, fps, stop)
         }
@@ -246,6 +270,50 @@ fn read_file(commands: HidTransport, id: u16, out: Option<&std::path::Path>) -> 
         std::fs::write(path, &data)?;
         println!("wrote {} bytes to {}", data.len(), path.display());
     }
+    Ok(())
+}
+
+const FREE_USE_FILES: std::ops::RangeInclusive<u16> = 0x6D60..=0x7FFF;
+
+fn check_free_use(id: u16) -> Result<()> {
+    match FREE_USE_FILES.contains(&id) {
+        true => Ok(()),
+        false => Err(format!("file {id:#06x} is not a free-use file (0x6D60..0x7FFF)").into()),
+    }
+}
+
+fn write_file(commands: HidTransport, id: u16, path: &std::path::Path, create: bool) -> Result<()> {
+    let data = std::fs::read(path)?;
+    let mut device = Device::new(commands);
+    if create {
+        check_free_use(id)?;
+        device.create_file(bragi::FileId(id))?;
+    }
+    device.replace_file(READ_HANDLE, bragi::FileId(id), &data)?;
+    let written = device.read_file(READ_HANDLE, bragi::FileId(id))?;
+    match written == data {
+        true => println!("wrote {} bytes to {id:#06x}, read back identical", data.len()),
+        false => {
+            return Err(format!("read back {} bytes that differ from the {} written", written.len(), data.len()).into());
+        }
+    }
+    Ok(())
+}
+
+fn property(commands: HidTransport, property: PropertyId, set: Option<u32>) -> Result<()> {
+    let mut device = Device::new(commands);
+    if let Some(value) = set {
+        device.set_property(property, value)?;
+    }
+    let value = device.get_property(property)?;
+    println!("{:#06x} = {value} ({value:#x})", property.0);
+    Ok(())
+}
+
+fn remove_file(commands: HidTransport, id: u16) -> Result<()> {
+    check_free_use(id)?;
+    Device::new(commands).remove_file(bragi::FileId(id))?;
+    println!("removed {id:#06x}");
     Ok(())
 }
 
@@ -525,6 +593,20 @@ mod tests {
         assert!(matches!(file, Diag::Keyboard(KeyboardDiag::File { id: 0x0F, out: None })));
         let decimal = Cli::try_parse_from(["diag", "file", "17", "--out", "x.bin"]).unwrap().diag;
         assert!(matches!(decimal, Diag::Keyboard(KeyboardDiag::File { id: 17, out: Some(_) })));
+        let write = Cli::try_parse_from(["diag", "file-write", "0x6d71", "a.bin", "--create"]).unwrap().diag;
+        assert!(matches!(write, Diag::Keyboard(KeyboardDiag::FileWrite { id: 0x6D71, create: true, .. })));
+        let prop = Cli::try_parse_from(["diag", "prop", "0x6e", "--set", "1"]).unwrap().diag;
+        assert!(matches!(prop, Diag::Keyboard(KeyboardDiag::Prop { id: 0x6E, set: Some(1) })));
+        let remove = Cli::try_parse_from(["diag", "file-remove", "0x6d71"]).unwrap().diag;
+        assert!(matches!(remove, Diag::Keyboard(KeyboardDiag::FileRemove { id: 0x6D71 })));
+    }
+
+    #[test]
+    fn only_free_use_files_may_be_created_or_removed() {
+        assert!(check_free_use(0x6D60).is_ok());
+        assert!(check_free_use(0x7FFF).is_ok());
+        assert!(check_free_use(0x0F).is_err());
+        assert!(check_free_use(0x6D5F).is_err());
     }
 
     #[test]
