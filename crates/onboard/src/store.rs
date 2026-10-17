@@ -400,7 +400,7 @@ struct LiveState {
 
 impl LiveState {
     fn read<S: FileStore + ?Sized>(store: &mut S) -> Result<Self, OnboardError> {
-        let list_bytes = read_if_present(store, PROFILES_LIST.0)?;
+        let list_bytes = read_if_readable(store, PROFILES_LIST.0)?;
         let roots = list_bytes.as_deref().and_then(|bytes| ProfilesList::decode(bytes).ok()).map(|list| list.roots);
         let mut state = Self {
             list_bytes,
@@ -440,7 +440,7 @@ fn walk_tree<S: FileStore + ?Sized>(store: &mut S, root: u16) -> Result<Walk, On
         if walk.files.contains_key(&id) {
             continue;
         }
-        let Some(bytes) = read_if_present(store, id)? else {
+        let Some(bytes) = read_if_readable(store, id)? else {
             walk.complete = false;
             continue;
         };
@@ -452,6 +452,14 @@ fn walk_tree<S: FileStore + ?Sized>(store: &mut S, root: u16) -> Result<Walk, On
         walk.files.insert(id, bytes);
     }
     Ok(walk)
+}
+
+fn read_if_readable<S: FileStore + ?Sized>(store: &mut S, id: u16) -> Result<Option<Vec<u8>>, OnboardError> {
+    match store.read(FileId(id)) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(answered) if answered.status().is_some() => Ok(None),
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn read_if_present<S: FileStore + ?Sized>(store: &mut S, id: u16) -> Result<Option<Vec<u8>>, OnboardError> {
@@ -1013,6 +1021,58 @@ mod tests {
         assert!(error.to_string().contains("slot list may be damaged"), "{error}");
         assert_eq!(error.leftovers(), ICUE_TREE);
         assert!(backed_up(error).2);
+    }
+
+    fn removed(store: &crate::MemoryStore) -> Vec<u16> {
+        let removes = store.operations().into_iter().filter_map(|op| match op {
+            Operation::Remove(id) => Some(id),
+            _ => None,
+        });
+        removes.collect()
+    }
+
+    #[test]
+    fn restore_runs_when_a_live_tree_file_answers_with_an_error_status_and_keeps_that_slot() {
+        let (mut store, backups, _temp) = rig();
+        let original = store.files();
+        let saved = save(&mut store, &backups, &red_tree(), None, now()).unwrap();
+        store.fail_read(0x6D71, Failure::Status(Status::InvalidState));
+        let changed = restore(&mut store, &backups, &saved.backup, now()).unwrap();
+        let readable: Vec<u16> = RED_IDS.into_iter().filter(|id| *id != 0x6D71).collect();
+        assert_eq!(changed.leftovers, readable);
+        assert!(removed(&store).iter().all(|id| !RED_IDS.contains(id)), "{:?}", store.operations());
+        let files = store.files();
+        assert!(RED_IDS.iter().all(|id| files.contains_key(id)));
+        assert!(ICUE_TREE.iter().all(|id| files[id] == original[id]));
+        assert_eq!(files[&0x0F], original[&0x0F]);
+    }
+
+    #[test]
+    fn restore_runs_when_the_live_slot_list_answers_with_an_error_status() {
+        let (mut store, backups, _temp) = rig();
+        let original = store.files();
+        let saved = save(&mut store, &backups, &red_tree(), None, now()).unwrap();
+        store.fail_first_read(0x0F, Failure::Status(Status::InvalidState));
+        let changed = restore(&mut store, &backups, &saved.backup, now()).unwrap();
+        assert!(changed.backup.join("000f.bin").exists());
+        assert!(removed(&store).iter().all(|id| !RED_IDS.contains(id)), "{:?}", store.operations());
+        let files = store.files();
+        assert!(RED_IDS.iter().all(|id| files.contains_key(id)));
+        assert!(ICUE_TREE.iter().all(|id| files[id] == original[id]));
+        assert_eq!(files[&0x0F], original[&0x0F]);
+    }
+
+    #[test]
+    fn restore_stops_before_its_backup_when_the_live_slot_list_read_gets_no_answer() {
+        let (mut store, backups, temp) = rig();
+        let before = store.files();
+        let folder = temp.path().join("original");
+        snapshot(&mut store).unwrap().write_to(&folder).unwrap();
+        store.fail_first_read(0x0F, Failure::Timeout);
+        let error = restore(&mut store, &backups, &folder, now()).unwrap_err();
+        assert!(error.lost_device() && error.backup().is_none(), "{error}");
+        assert_eq!(store.files(), before);
+        assert!(!backups.root().exists());
     }
 
     #[test]

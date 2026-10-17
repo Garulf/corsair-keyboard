@@ -34,6 +34,7 @@ struct State {
     files: BTreeMap<u16, Vec<u8>>,
     properties: BTreeMap<u16, u32>,
     read_failures: BTreeMap<u16, Failure>,
+    first_read_failures: BTreeMap<u16, Failure>,
     create_failures: BTreeMap<u16, Failure>,
     remove_failures: BTreeMap<u16, Failure>,
     set_property_failures: BTreeMap<u16, Failure>,
@@ -96,6 +97,10 @@ impl MemoryStore {
         self.state().read_failures.insert(id, failure);
     }
 
+    pub fn fail_first_read(&self, id: u16, failure: Failure) {
+        self.state().first_read_failures.insert(id, failure);
+    }
+
     pub fn fail_create(&self, id: u16, failure: Failure) {
         self.state().create_failures.insert(id, failure);
     }
@@ -111,6 +116,7 @@ impl MemoryStore {
     pub fn stop_failing(&self) {
         let mut state = self.state();
         state.read_failures.clear();
+        state.first_read_failures.clear();
         state.create_failures.clear();
         state.remove_failures.clear();
         state.set_property_failures.clear();
@@ -147,7 +153,10 @@ fn missing(command: Command) -> DeviceError {
 
 impl FileStore for MemoryStore {
     fn read(&mut self, file: FileId) -> Result<Vec<u8>, DeviceError> {
-        let state = self.state();
+        let mut state = self.state();
+        if let Some(failure) = state.first_read_failures.remove(&file.0) {
+            return Err(failure.error(Command::OpenFile));
+        }
         if let Some(failure) = state.read_failures.get(&file.0) {
             return Err(failure.error(Command::OpenFile));
         }
@@ -249,6 +258,14 @@ mod tests {
         assert_eq!(status(store.read(FileId(0x6D60))), Some(Status::HardwareError));
         assert!(matches!(store.read(FileId(0x6D61)), Err(DeviceError::Timeout(Command::OpenFile))));
         store.stop_failing();
+        assert_eq!(store.read(FileId(0x6D60)).unwrap(), [1]);
+    }
+
+    #[test]
+    fn a_first_read_failure_fails_only_the_next_read() {
+        let mut store = MemoryStore::with_files([(0x6D60, vec![1])]);
+        store.fail_first_read(0x6D60, Failure::Status(Status::InvalidState));
+        assert_eq!(status(store.read(FileId(0x6D60))), Some(Status::InvalidState));
         assert_eq!(store.read(FileId(0x6D60)).unwrap(), [1]);
     }
 
