@@ -499,7 +499,12 @@ impl Model {
             (Request::GetSettings, Reply::Settings { settings }) => self.settings = Some(settings),
             (Request::GetProfile { .. }, Reply::Profile { profile }) => self.accept_profile(profile),
             (Request::SaveProfile { profile }, Reply::Done) => self.accept_saved(profile),
-            (Request::DeleteProfile { .. }, Reply::Done) => self.send(Request::GetState),
+            (Request::DeleteProfile { name }, Reply::Done) => {
+                if self.draft.as_ref().is_some_and(|draft| draft.profile.name == name) {
+                    self.replace_draft(None);
+                }
+                self.send(Request::GetState);
+            }
             (
                 Request::SetPollingRate { .. }
                 | Request::SetDebounce { .. }

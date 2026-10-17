@@ -8,7 +8,6 @@ const RECORDING_HOLD: &str = "Finish the macro recording first: profile changes 
 
 #[derive(Debug, Default)]
 pub struct ProfilesForm {
-    pub pick: Option<String>,
     pub new_name: String,
     pub rename_to: String,
     pub app_text: String,
@@ -155,9 +154,6 @@ impl Model {
             draft.saving = false;
             draft.rejected = None;
         }
-        if self.profiles_form.pick.as_deref() == Some(pending.old.as_str()) {
-            self.profiles_form.pick = Some(pending.new.clone());
-        }
     }
 
     pub fn edit_profile(&mut self, name: &str) -> Result<(), String> {
@@ -195,23 +191,19 @@ fn pressed_enter(response: &egui::Response) -> bool {
 
 fn profile_list(ui: &mut egui::Ui, model: &mut Model, names: &[String], active: &str, default: &str) {
     ui.strong("Profiles");
-    let mut pick =
-        model.profiles_form.pick.clone().filter(|name| names.contains(name)).unwrap_or_else(|| active.to_owned());
+    let edited = model.draft.as_ref().map(|draft| draft.profile.name.clone());
+    let pick = edited.filter(|name| names.contains(name)).unwrap_or_else(|| active.to_owned());
     for name in names {
         if ui.selectable_label(*name == pick, profile_title(name, active, default)).clicked() && *name != pick {
-            pick = name.clone();
-            model.profiles_form.confirm_delete = None;
+            match model.edit_profile(name) {
+                Ok(()) => model.profiles_form.confirm_delete = None,
+                Err(problem) => model.toast(problem),
+            }
         }
     }
-    model.profiles_form.pick = Some(pick.clone());
     ui.horizontal(|ui| {
         if ui.add_enabled(pick != active, egui::Button::new("Switch to")).clicked() {
             model.send(Request::SetActiveProfile { name: pick.clone() });
-        }
-        if ui.button("Edit").clicked()
-            && let Err(problem) = model.edit_profile(&pick)
-        {
-            model.toast(problem);
         }
         if ui.add_enabled(pick != default, egui::Button::new("Make default")).clicked() {
             let patch = SettingsPatch { default_profile: Some(pick.clone()), ..SettingsPatch::default() };
@@ -228,9 +220,8 @@ fn delete_controls(ui: &mut egui::Ui, model: &mut Model, pick: &str, active: &st
         ui.horizontal(|ui| {
             if ui.button("Confirm delete").clicked() {
                 model.profiles_form.confirm_delete = None;
-                match model.delete_profile(pick) {
-                    Ok(()) => model.profiles_form.pick = None,
-                    Err(problem) => model.toast(problem),
+                if let Err(problem) = model.delete_profile(pick) {
+                    model.toast(problem);
                 }
             }
             if ui.button("Keep it").clicked() {
@@ -559,14 +550,24 @@ mod tests {
         assert!(sent(&mut model).is_empty());
     }
 
+    fn highlighted(harness: &egui_kittest::Harness<'_, Model>, label: &str) -> bool {
+        harness.get_by_label(label).accesskit_node().toggled() == Some(egui::accesskit::Toggled::True)
+    }
+
+    fn load(harness: &mut egui_kittest::Harness<'_, Model>, name: &str) {
+        let request = Request::GetProfile { name: name.into() };
+        assert_eq!(sent(harness.state_mut()), std::slice::from_ref(&request));
+        harness.state_mut().apply(Inbox::reply(request, Reply::Profile { profile: profile(name) }));
+        harness.run();
+    }
+
     #[test]
-    fn editing_loads_the_other_profile_into_the_draft() {
+    fn clicking_a_profile_in_the_list_loads_it_into_the_editor() {
         let mut harness = harness(model(), profiles);
         harness.run();
         harness.get_by_label("Editing p");
+        assert!(harness.query_by_label("Edit").is_none(), "the list click replaces the Edit button");
         harness.get_by_label("games").click();
-        harness.run();
-        harness.get_by_label("Edit").click();
         harness.run();
         let request = Request::GetProfile { name: "games".into() };
         assert_eq!(sent(harness.state_mut()), std::slice::from_ref(&request));
@@ -575,10 +576,27 @@ mod tests {
         harness.state_mut().apply(Inbox::reply(request, Reply::Profile { profile: loaded.clone() }));
         harness.run();
         harness.get_by_label("Editing games");
+        assert!(highlighted(&harness, "games"));
+        assert!(!highlighted(&harness, "p (active, default)"));
         harness.get_by_label("game.exe");
         let draft = harness.state().draft.as_ref().unwrap();
         assert_eq!(draft.profile, loaded);
         assert!(!draft.dirty());
+    }
+
+    #[test]
+    fn unsaved_edits_keep_the_list_on_the_edited_profile() {
+        let mut model = model();
+        model.draft.as_mut().unwrap().profile.apps.push("x.exe".into());
+        let mut harness = harness(model, profiles);
+        harness.run();
+        harness.get_by_label("games").click();
+        harness.run();
+        assert!(sent(harness.state_mut()).is_empty());
+        assert_eq!(harness.state().toasts, ["Apply or revert your edits first."]);
+        assert!(highlighted(&harness, "p (active, default)"));
+        assert!(!highlighted(&harness, "games"));
+        harness.get_by_label("Editing p");
     }
 
     #[test]
@@ -590,6 +608,7 @@ mod tests {
         assert!(harness.get_by_label("Make default").accesskit_node().is_disabled());
         harness.get_by_label("games").click();
         harness.run();
+        load(&mut harness, "games");
         harness.get_by_label("Switch to").click();
         harness.run();
         harness.get_by_label("Make default").click();
@@ -604,6 +623,7 @@ mod tests {
         assert!(harness.get_by_label("Delete").accesskit_node().is_disabled());
         harness.get_by_label("games").click();
         harness.run();
+        load(&mut harness, "games");
         harness.get_by_label("Delete").click();
         harness.run();
         assert!(sent(harness.state_mut()).is_empty(), "the first click only asks");
@@ -619,6 +639,19 @@ mod tests {
     }
 
     #[test]
+    fn deleting_the_edited_profile_reloads_the_active_one() {
+        let mut model = model();
+        model.draft = Some(Draft::new(profile("games")));
+        model.delete_profile("games").unwrap();
+        sent(&mut model);
+        model.apply(Inbox::reply(delete("games"), Reply::Done));
+        assert!(model.draft.is_none());
+        assert_eq!(sent(&mut model), [Request::GetState]);
+        model.apply(Inbox::reply(Request::GetState, Reply::State { state: crate::testing::state("p", &["p"]) }));
+        assert_eq!(sent(&mut model), [Request::GetProfile { name: "p".into() }]);
+    }
+
+    #[test]
     fn picking_another_row_drops_a_pending_delete_confirmation() {
         let mut model = model();
         model.state.as_mut().unwrap().profiles.push("work".into());
@@ -626,10 +659,12 @@ mod tests {
         harness.run();
         harness.get_by_label("games").click();
         harness.run();
+        load(&mut harness, "games");
         harness.get_by_label("Delete").click();
         harness.run();
         harness.get_by_label("work").click();
         harness.run();
+        load(&mut harness, "work");
         assert!(harness.query_by_label("Confirm delete").is_none());
         assert!(sent(harness.state_mut()).is_empty());
     }
