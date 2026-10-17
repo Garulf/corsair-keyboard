@@ -7,22 +7,49 @@ pub const PROTOCOL_VERSION: u32 = 3;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Request {
-    Hello { version: u32 },
+    Hello {
+        version: u32,
+    },
     GetState,
     ListProfiles,
-    GetProfile { name: String },
-    SaveProfile { profile: Profile },
-    DeleteProfile { name: String },
-    SetActiveProfile { name: String },
-    SetBrightness { percent: u8 },
-    SetPollingRate { hz: u32 },
-    SetWinLock { enabled: bool },
-    SetDebounce { enabled: bool, timeout: u32 },
+    GetProfile {
+        name: String,
+    },
+    SaveProfile {
+        profile: Profile,
+    },
+    DeleteProfile {
+        name: String,
+    },
+    SetActiveProfile {
+        name: String,
+    },
+    SetBrightness {
+        percent: u8,
+    },
+    SetPollingRate {
+        hz: u32,
+    },
+    SetWinLock {
+        enabled: bool,
+    },
+    SetDebounce {
+        enabled: bool,
+        timeout: u32,
+    },
     GetSettings,
-    SetSettings { patch: SettingsPatch },
-    StartRecording,
+    SetSettings {
+        patch: SettingsPatch,
+    },
+    StartRecording {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        key: Option<u8>,
+    },
+    StopRecording,
     CancelRecording,
-    SetAutostart { enabled: bool },
+    SetAutostart {
+        enabled: bool,
+    },
     Release,
     Reacquire,
     Subscribe,
@@ -168,8 +195,22 @@ mod tests {
         let patch = SettingsPatch { auto_switch: Some(false), ..SettingsPatch::default() };
         let set = serde_json::to_string(&Request::SetSettings { patch }).unwrap();
         assert_eq!(set, r#"{"type":"set_settings","patch":{"auto_switch":false}}"#);
-        assert_eq!(serde_json::to_string(&Request::StartRecording).unwrap(), r#"{"type":"start_recording"}"#);
+        let start = Request::StartRecording { key: None };
+        assert_eq!(serde_json::to_string(&start).unwrap(), r#"{"type":"start_recording"}"#);
         assert_eq!(serde_json::to_string(&Request::GetSettings).unwrap(), r#"{"type":"get_settings"}"#);
+    }
+
+    #[test]
+    fn recording_can_target_a_key_and_be_stopped_from_a_client() {
+        let bare: Request = serde_json::from_str(r#"{"type":"start_recording"}"#).unwrap();
+        assert_eq!(bare, Request::StartRecording { key: None });
+        let keyed = Request::StartRecording { key: Some(132) };
+        let json = serde_json::to_string(&keyed).unwrap();
+        assert_eq!(json, r#"{"type":"start_recording","key":132}"#);
+        assert_eq!(serde_json::from_str::<Request>(&json).unwrap(), keyed);
+        let stop = serde_json::to_string(&Request::StopRecording).unwrap();
+        assert_eq!(stop, r#"{"type":"stop_recording"}"#);
+        assert_eq!(serde_json::from_str::<Request>(&stop).unwrap(), Request::StopRecording);
     }
 
     #[test]

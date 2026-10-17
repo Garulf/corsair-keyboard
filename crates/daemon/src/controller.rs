@@ -332,7 +332,12 @@ impl Controller {
             Request::SetDebounce { enabled, timeout } => self.set_debounce(Debounce { enabled, timeout }, config),
             Request::GetSettings => Reply::Settings { settings: self.settings.clone() },
             Request::SetSettings { patch } => self.set_settings(patch, config),
-            Request::StartRecording => self.start_recording(),
+            Request::StartRecording { key } => self.start_recording(key),
+            Request::StopRecording => {
+                let intents = self.dispatcher.stop_recording();
+                self.apply_all(intents, config);
+                Reply::Done
+            }
             Request::CancelRecording => {
                 self.cancel_recording();
                 Reply::Done
@@ -772,11 +777,17 @@ impl Controller {
         Ok(())
     }
 
-    fn start_recording(&mut self) -> Reply {
+    fn start_recording(&mut self, key: Option<u8>) -> Reply {
         if self.link.is_none() {
             return error("no keyboard connected".into());
         }
-        let state = self.dispatcher.arm_recording();
+        let state = match key {
+            None => self.dispatcher.arm_recording(),
+            Some(index) => match self.dispatcher.record_into(index) {
+                Ok(state) => state,
+                Err(message) => return error(message),
+            },
+        };
         self.indicators.recording(state);
         self.events.push(Event::Recording { state });
         Reply::Done
@@ -1722,12 +1733,55 @@ mod tests {
     #[test]
     fn the_gui_can_start_and_cancel_a_recording() {
         let mut rig = rig(vec![profile("default")]);
-        assert_eq!(rig.controller.handle(Request::StartRecording, &rig.config), Reply::Done);
+        assert_eq!(rig.controller.handle(Request::StartRecording { key: None }, &rig.config), Reply::Done);
         assert_eq!(rig.controller.state().recording, RecorderState::AwaitingKey);
         assert!(rig.controller.take_events().contains(&Event::Recording { state: RecorderState::AwaitingKey }));
         assert_eq!(rig.controller.handle(Request::CancelRecording, &rig.config), Reply::Done);
         assert_eq!(rig.controller.state().recording, RecorderState::Idle);
         tap_key(&mut rig, led::G1, 0, 10);
+        assert_eq!(rig.controller.state().recording, RecorderState::Idle);
+    }
+
+    const G2: u8 = led::G1 + 1;
+
+    #[test]
+    fn a_keyed_recording_starts_at_once_and_stop_saves_it_like_the_target_key() {
+        let mut rig = rig(vec![profile("default")]);
+        let start = Request::StartRecording { key: Some(G2) };
+        assert_eq!(rig.controller.handle(start, &rig.config), Reply::Done);
+        let recording = RecorderState::Recording { key: G2 };
+        assert_eq!(rig.controller.state().recording, recording);
+        assert!(rig.controller.take_events().contains(&Event::Recording { state: recording }));
+        tap_key(&mut rig, 4, 100, 160);
+        assert_eq!(rig.controller.handle(Request::StopRecording, &rig.config), Reply::Done);
+        let steps = vec![MacroStep::Down(key("a")), MacroStep::Delay(60), MacroStep::Up(key("a"))];
+        let expected = Assignment {
+            key: key("g2"),
+            action: Action::Macro { steps, mode: RepeatMode::Once },
+            pass_through: vec![],
+        };
+        assert_eq!(rig.config.load_profiles().0[0].assignments, [expected]);
+        let events = rig.controller.take_events();
+        let macro_at = events.iter().position(|event| *event == Event::MacroRecorded { key: "g2".into() });
+        let idle_at = events.iter().position(|event| *event == Event::Recording { state: RecorderState::Idle });
+        assert!(macro_at.unwrap() < idle_at.unwrap(), "{events:?}");
+        assert_eq!(rig.controller.state().recording, RecorderState::Idle);
+    }
+
+    #[test]
+    fn stopping_when_nothing_is_recorded_is_a_quiet_no_op() {
+        let mut rig = rig(vec![profile("default")]);
+        rig.controller.take_events();
+        assert_eq!(rig.controller.handle(Request::StopRecording, &rig.config), Reply::Done);
+        assert!(rig.controller.take_events().is_empty());
+        assert!(rig.config.load_profiles().0.is_empty(), "nothing was written");
+    }
+
+    #[test]
+    fn a_keyed_recording_refuses_keys_that_cannot_hold_a_macro() {
+        let mut rig = rig(vec![profile("default")]);
+        let reply = rig.controller.handle(Request::StartRecording { key: Some(led::DIAL_KEY) }, &rig.config);
+        assert!(matches!(reply, Reply::Error { message } if message.contains("cannot be reassigned")));
         assert_eq!(rig.controller.state().recording, RecorderState::Idle);
     }
 
@@ -1774,7 +1828,7 @@ mod tests {
             Controller::new(Settings::default(), vec![profile("default")], vec![], Box::new(DiscardOutput));
         let dir = tempfile::tempdir().unwrap();
         let config = ConfigDir::new(dir.path().to_path_buf());
-        let reply = controller.handle(Request::StartRecording, &config);
+        let reply = controller.handle(Request::StartRecording { key: None }, &config);
         assert!(matches!(reply, Reply::Error { message } if message.contains("no keyboard")));
     }
 

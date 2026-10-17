@@ -214,7 +214,7 @@ fn recorder(ui: &mut egui::Ui, model: &mut Model) {
         RecorderState::Idle => {
             let blocker = recording_blocker(model);
             if ui.add_enabled(blocker.is_none(), egui::Button::new("Record a macro")).clicked() {
-                model.send(Request::StartRecording);
+                model.send(Request::StartRecording { key: None });
             }
             match blocker {
                 Some(reason) => ui.weak(reason),
@@ -373,7 +373,7 @@ mod tests {
         harness.run();
         harness.get_by_label("Record a macro").click();
         harness.run();
-        assert_eq!(sent(harness.state_mut()), [ipc::Request::StartRecording]);
+        assert_eq!(sent(harness.state_mut()), [ipc::Request::StartRecording { key: None }]);
         harness.state_mut().state.as_mut().unwrap().recording = RecorderState::AwaitingKey;
         harness.run();
         harness.get_by_label("Press the G key to record into");
