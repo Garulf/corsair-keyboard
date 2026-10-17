@@ -73,6 +73,10 @@ Audio capture for the audio visualizer needs a PulseAudio server or PipeWire wit
 | `k100 autostart <on\|off\|status>` | Start the daemon at login |
 | `k100 keys` | List the key names you can use in profiles |
 | `k100 events` | Print key, dial and state events |
+| `k100 onboard list` | List the profiles stored on the keyboard |
+| `k100 onboard save <profile> [--slot N] [--dry-run]` | Save a profile to the keyboard, as a new slot or over slot N. `--dry-run` shows what would be written without touching the keyboard |
+| `k100 onboard delete <slot>`, `k100 onboard activate <slot>` | Remove a stored profile, or choose the one the keyboard plays |
+| `k100 onboard backup [--to DIR]`, `k100 onboard restore <folder>` | Copy every stored profile to a folder, or put them back from one |
 | `k100 diag <subcommand>` | Low-level hardware checks (stop the daemon first, except for `diag audio`) |
 | `k100 diag audio [--seconds N]` | Print the captured audio spectrum as text, with no keyboard or daemon needed |
 | `k100 diag file <id> [--out PATH]` | Read one file from the keyboard's onboard memory (for example `0x0f`, the stored profile list) and print it as hex |
@@ -89,10 +93,19 @@ Settings and profiles are plain TOML. They live in `%APPDATA%\k100\config\` on W
 
 {{ code_block("examples/profiles/actions.toml") }}
 
+### Onboard profiles
+
+Lighting layers, key actions and macros live in the profile files on your computer, and k100d plays them while it controls the keyboard. `k100 onboard save <profile>` also copies a profile into the keyboard's own memory as a new slot, or over an existing one with `--slot N`. A saved slot plays when the keyboard is in hardware mode, which is when k100d is not running or has released the keyboard (`k100 release`). `k100 onboard activate <slot>` chooses which stored slot plays, and `k100 onboard list` shows the slots, the active one and the free space.
+
+The keyboard stores less than a profile file can describe. Layers become hardware effects, key actions and macros become stored assignments, and the dial modes that have a hardware equivalent are kept. Whatever the keyboard cannot hold is left out or approximated, and `save` prints one line for each. `k100 onboard save <profile> --dry-run` prints the same report, plus the files it would write, without touching the keyboard. A slot holds at most 20 lighting effects, so lower layers are dropped past that. Deleting the only slot is refused.
+
+While k100d runs, the onboard commands go through it, and the keyboard shows a change once k100d releases the keyboard or quits. Without k100d, `k100` opens the keyboard itself, and it refuses to if k100d is running but does not answer. After a change made that way the keyboard is switched back to hardware mode, so it shows the result at once. `--config-dir` picks the config folder for that direct access and for dry runs.
+
+Before every save, delete and restore, the keyboard's slots are copied to a new folder under `onboard-backup/` in the config folder, and the command prints its path. `k100 onboard restore <folder>` puts all slots in that folder back, and `k100 onboard backup [--to DIR]` makes a copy on demand.
+
 ### Things to know
 
 - The keyboard stays in software mode while the daemon runs and goes back to its own lighting when the daemon stops cleanly. After a hard kill run `k100 diag release`.
-- Lighting layers, key actions and macros live in the profile files on your computer. They are not written to the keyboard's onboard memory.
 - Per-program profile switching follows the foreground window and works on Windows only.
 - Key actions are sent with `SendInput` on Windows and through a `uinput` device on Linux. On Windows, programs that ignore injected input (some games) and windows running as administrator do not see them.
 - The key debounce value in the Device pane is in firmware units, from 0 to 300. The keyboard's own default is 30, and the unit is not known to be milliseconds.

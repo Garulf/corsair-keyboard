@@ -261,10 +261,8 @@ fn kill(mut session: Session<HidTransport>) -> Result<()> {
     std::process::exit(0);
 }
 
-const READ_HANDLE: u8 = 3;
-
 fn read_file(commands: HidTransport, id: u16, out: Option<&std::path::Path>) -> Result<()> {
-    let data = Device::new(commands).read_file(READ_HANDLE, bragi::FileId(id))?;
+    let data = Device::new(commands).read_file(onboard::STORE_HANDLE, bragi::FileId(id))?;
     println!("{}", hex_dump(&data));
     if let Some(path) = out {
         std::fs::write(path, &data)?;
@@ -273,12 +271,10 @@ fn read_file(commands: HidTransport, id: u16, out: Option<&std::path::Path>) -> 
     Ok(())
 }
 
-const FREE_USE_FILES: std::ops::RangeInclusive<u16> = 0x6D60..=0x7FFF;
-
 fn check_free_use(id: u16) -> Result<()> {
-    match FREE_USE_FILES.contains(&id) {
+    match onboard::FREE_USE_IDS.contains(&id) {
         true => Ok(()),
-        false => Err(format!("file {id:#06x} is not a free-use file (0x6D60..0x7FFF)").into()),
+        false => Err(onboard::OnboardError::NotFreeUse(id).into()),
     }
 }
 
@@ -289,8 +285,8 @@ fn write_file(commands: HidTransport, id: u16, path: &std::path::Path, create: b
         check_free_use(id)?;
         device.create_file(bragi::FileId(id))?;
     }
-    device.replace_file(READ_HANDLE, bragi::FileId(id), &data)?;
-    let written = device.read_file(READ_HANDLE, bragi::FileId(id))?;
+    device.replace_file(onboard::STORE_HANDLE, bragi::FileId(id), &data)?;
+    let written = device.read_file(onboard::STORE_HANDLE, bragi::FileId(id))?;
     match written == data {
         true => println!("wrote {} bytes to {id:#06x}, read back identical", data.len()),
         false => {

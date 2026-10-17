@@ -62,7 +62,7 @@ pub fn events() -> Result<()> {
     Ok(())
 }
 
-fn fetch(client: &mut Client, name: String) -> Result<Profile> {
+pub fn fetch(client: &mut Client, name: String) -> Result<Profile> {
     match client.request(&Request::GetProfile { name })? {
         Reply::Profile { profile } => Ok(profile),
         Reply::Error { message } => Err(message.into()),
