@@ -6,13 +6,14 @@ use actions::{
     RecorderState, RepeatMode,
 };
 use bragi::{PollingRate, PropertyId};
-use engine::{Compositor, KeyPress, Layout, Spectrum};
+use engine::{Compositor, KeyPress, Layout};
 use ipc::{
-    DaemonState, Debounce, DeviceState, Event, MAX_DEBOUNCE_TIMEOUT, PROTOCOL_VERSION, Profile, Reply, Request,
-    SettingsPatch,
+    AudioState, DaemonState, Debounce, DeviceState, Event, MAX_DEBOUNCE_TIMEOUT, PROTOCOL_VERSION, Profile, Reply,
+    Request, SettingsPatch,
 };
 use k100::{DeviceError, Frame, IndicatorRecord, InputEvent, KeyMappings, Session, Transport, led};
 
+use crate::audio::{AudioPort, NoAudio, uses_audio};
 use crate::config::{ConfigDir, Settings, default_profile, profile_file_name};
 use crate::indicators::{DialRing, Indicators};
 
@@ -134,6 +135,8 @@ pub struct Controller {
     events: Vec<Event>,
     last_frame: Option<Frame>,
     autostart: Box<dyn install::Autostart>,
+    audio: Box<dyn AudioPort>,
+    announced_audio: AudioState,
 }
 
 impl Controller {
@@ -185,7 +188,14 @@ impl Controller {
             events: Vec::new(),
             last_frame: None,
             autostart: Box::new(install::Unavailable("autostart is not configured".into())),
+            audio: Box::new(NoAudio),
+            announced_audio: AudioState::Off,
         }
+    }
+
+    pub fn with_audio(mut self, audio: Box<dyn AudioPort>) -> Self {
+        self.audio = audio;
+        self
     }
 
     pub fn set_autostart(&mut self, autostart: Box<dyn install::Autostart>) {
@@ -219,6 +229,7 @@ impl Controller {
             dial_mode: self.dispatcher.dial_mode().label(),
             recording: self.dispatcher.recorder_state(),
             autostart: self.autostart.is_enabled().unwrap_or(false),
+            audio: self.audio.state(),
         }
     }
 
@@ -260,6 +271,7 @@ impl Controller {
         if self.link.is_some() {
             self.set_state(DeviceState::Connected { model: info.model, firmware: info.firmware });
         }
+        self.sync_audio();
     }
 
     pub fn set_device_state(&mut self, state: DeviceState) {
@@ -293,10 +305,11 @@ impl Controller {
             self.resolve_winlock();
         }
         self.save_brightness_when_settled(config);
+        self.announce_audio();
         if self.link.is_none() {
             return;
         }
-        let frame = self.compositor.render(now, presses, &Spectrum::SILENT);
+        let frame = self.compositor.render(now, presses, &self.audio.spectrum());
         self.last_frame = Some(frame);
         let _ = self.with_link(|link| link.write_frame(&frame));
         let records = self.indicators.records(now);
@@ -475,6 +488,7 @@ impl Controller {
         if let Some(mut link) = self.link.take() {
             let _ = link.release();
         }
+        self.sync_audio();
     }
 
     fn active_profile(&self) -> &Profile {
@@ -490,6 +504,7 @@ impl Controller {
         }
         self.output.send(OutputCommand::CancelAll);
         self.compositor = Compositor::new(Layout::ansi(), &profile.layers);
+        self.sync_audio();
         self.dispatcher.reconfigure(&profile.assignments, &profile.dial);
         self.applied = profile;
         if changed {
@@ -533,6 +548,21 @@ impl Controller {
             self.cancel_recording();
             self.winlock = None;
             self.winlock_check = None;
+            self.sync_audio();
+        }
+    }
+
+    fn sync_audio(&mut self) {
+        let wanted = self.link.is_some() && uses_audio(&self.active_profile().layers);
+        self.audio.set_wanted(wanted);
+        self.announce_audio();
+    }
+
+    fn announce_audio(&mut self) {
+        let state = self.audio.state();
+        if state != self.announced_audio {
+            self.announced_audio = state.clone();
+            self.events.push(Event::Audio { state });
         }
     }
 
@@ -810,6 +840,7 @@ impl Controller {
         self.winlock_check = None;
         self.last_frame = None;
         let result = self.link.take().map_or(Ok(()), |mut link| link.release());
+        self.sync_audio();
         self.set_state(DeviceState::Released);
         match result {
             Ok(()) => Reply::Done,
@@ -895,6 +926,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use actions::{Action, Assignment, Key, MacroStep, OutputCommand, RecorderState, RepeatMode};
+    use engine::Spectrum;
     use k100::{IndicatorRecord, Rgb, led};
 
     use super::*;
@@ -2012,5 +2044,210 @@ mod tests {
         rig.log.lock().unwrap().properties.clear();
         rig.controller.reload_settings(rig.config.load_settings());
         assert!(rig.log.lock().unwrap().properties.contains(&(0x01, 3)));
+    }
+
+    #[derive(Default)]
+    struct AudioLog {
+        wanted: Vec<bool>,
+        spectrum: Spectrum,
+        state: AudioState,
+    }
+
+    #[derive(Clone, Default)]
+    struct FakeAudio(Arc<Mutex<AudioLog>>);
+
+    impl FakeAudio {
+        fn wanted(&self) -> Vec<bool> {
+            self.0.lock().unwrap().wanted.clone()
+        }
+
+        fn set_state(&self, state: AudioState) {
+            self.0.lock().unwrap().state = state;
+        }
+
+        fn set_spectrum(&self, spectrum: Spectrum) {
+            self.0.lock().unwrap().spectrum = spectrum;
+        }
+    }
+
+    impl AudioPort for FakeAudio {
+        fn set_wanted(&mut self, wanted: bool) {
+            self.0.lock().unwrap().wanted.push(wanted);
+        }
+
+        fn spectrum(&self) -> Spectrum {
+            self.0.lock().unwrap().spectrum
+        }
+
+        fn state(&self) -> AudioState {
+            self.0.lock().unwrap().state.clone()
+        }
+    }
+
+    struct AudioRig {
+        controller: Controller,
+        audio: FakeAudio,
+        log: Arc<Mutex<Log>>,
+        _temp: tempfile::TempDir,
+        config: ConfigDir,
+    }
+
+    impl AudioRig {
+        fn attach(&mut self) {
+            let link = FakeLink(self.log.clone());
+            self.controller.attach(Box::new(link), info(None), Duration::ZERO);
+        }
+    }
+
+    fn audio_rig(profiles: Vec<Profile>) -> AudioRig {
+        let temp = tempfile::tempdir().unwrap();
+        let config = ConfigDir::new(temp.path().to_path_buf());
+        let audio = FakeAudio::default();
+        let controller = Controller::new(Settings::default(), profiles, vec![], Box::new(DiscardOutput))
+            .with_audio(Box::new(audio.clone()));
+        AudioRig { controller, audio, log: Arc::new(Mutex::new(Log::default())), _temp: temp, config }
+    }
+
+    fn visualizer_layer(enabled: bool) -> engine::LayerConfig {
+        let effect = engine::EffectConfig::AudioVisualizer {
+            low: Rgb::new(0, 255, 0),
+            high: Rgb::new(255, 0, 0),
+            background: Rgb::BLACK,
+            gain: 1.0,
+            decay_ms: 0,
+        };
+        engine::LayerConfig {
+            enabled,
+            ..engine::LayerConfig::new("bars", engine::Zone::Named(engine::NamedZone::All), effect)
+        }
+    }
+
+    fn visualizer_profile(name: &str, enabled: bool) -> Profile {
+        Profile { layers: vec![visualizer_layer(enabled)], ..profile(name) }
+    }
+
+    fn plain_profile(name: &str) -> Profile {
+        Profile { layers: vec![], ..profile(name) }
+    }
+
+    #[test]
+    fn audio_is_not_wanted_for_a_profile_without_a_visualizer() {
+        let mut rig = audio_rig(vec![plain_profile("default")]);
+        rig.attach();
+        assert_eq!(rig.audio.wanted(), [false]);
+    }
+
+    #[test]
+    fn audio_is_wanted_only_while_the_keyboard_is_attached() {
+        let mut rig = audio_rig(vec![visualizer_profile("default", true)]);
+        assert_eq!(rig.audio.wanted(), [] as [bool; 0]);
+        rig.attach();
+        assert_eq!(rig.audio.wanted(), [true]);
+
+        rig.controller.set_device_state(DeviceState::Disconnected);
+        assert_eq!(rig.audio.wanted(), [true, false]);
+
+        rig.attach();
+        assert_eq!(rig.controller.handle(Request::Release, &rig.config), Reply::Done);
+        assert_eq!(rig.audio.wanted(), [true, false, true, false]);
+    }
+
+    #[test]
+    fn a_write_failure_that_drops_the_link_stops_audio() {
+        let mut rig = audio_rig(vec![visualizer_profile("default", true)]);
+        rig.attach();
+        rig.log.lock().unwrap().fail_writes = true;
+        rig.controller.tick(ms(16), &[], &rig.config);
+        assert_eq!(rig.audio.wanted(), [true, false]);
+    }
+
+    #[test]
+    fn switching_profiles_starts_and_stops_audio() {
+        let mut rig = audio_rig(vec![plain_profile("default"), visualizer_profile("lights", true)]);
+        rig.attach();
+        assert_eq!(rig.audio.wanted(), [false]);
+
+        let switch = |name: &str| Request::SetActiveProfile { name: name.into() };
+        assert_eq!(rig.controller.handle(switch("lights"), &rig.config), Reply::Done);
+        assert_eq!(rig.audio.wanted(), [false, true]);
+
+        assert_eq!(rig.controller.handle(switch("default"), &rig.config), Reply::Done);
+        assert_eq!(rig.audio.wanted(), [false, true, false]);
+    }
+
+    #[test]
+    fn saving_the_active_profile_with_a_visualizer_starts_audio() {
+        let mut rig = audio_rig(vec![plain_profile("default")]);
+        rig.attach();
+        let reply =
+            rig.controller.handle(Request::SaveProfile { profile: visualizer_profile("default", true) }, &rig.config);
+        assert_eq!(reply, Reply::Done);
+        assert_eq!(rig.audio.wanted(), [false, true]);
+    }
+
+    #[test]
+    fn a_disabled_visualizer_layer_still_wants_audio() {
+        let mut rig = audio_rig(vec![visualizer_profile("default", false)]);
+        rig.attach();
+        assert_eq!(rig.audio.wanted(), [true]);
+    }
+
+    #[test]
+    fn the_tick_renders_the_latest_spectrum() {
+        let mut rig = audio_rig(vec![visualizer_profile("default", true)]);
+        rig.attach();
+        let light_bar = usize::from(led::LIGHT_BAR_FIRST);
+
+        rig.controller.tick(ms(16), &[], &rig.config);
+        assert_eq!(rig.log.lock().unwrap().last_frame.unwrap()[light_bar], Rgb::BLACK);
+
+        rig.audio.set_spectrum(Spectrum::from_levels([1.0; engine::SPECTRUM_BANDS]));
+        rig.controller.tick(ms(32), &[], &rig.config);
+        assert_ne!(rig.log.lock().unwrap().last_frame.unwrap()[light_bar], Rgb::BLACK);
+    }
+
+    #[test]
+    fn the_daemon_state_reports_the_audio_state() {
+        let rig = audio_rig(vec![visualizer_profile("default", true)]);
+        assert_eq!(rig.controller.state().audio, AudioState::Off);
+        rig.audio.set_state(AudioState::Failed { reason: "no sink".into() });
+        assert_eq!(rig.controller.state().audio, AudioState::Failed { reason: "no sink".into() });
+    }
+
+    #[test]
+    fn an_audio_state_change_is_announced_once() {
+        let mut rig = audio_rig(vec![visualizer_profile("default", true)]);
+        rig.attach();
+        rig.controller.take_events();
+        let audio_events = |rig: &mut AudioRig| -> Vec<Event> {
+            rig.controller.take_events().into_iter().filter(|event| matches!(event, Event::Audio { .. })).collect()
+        };
+
+        rig.controller.tick(ms(16), &[], &rig.config);
+        assert_eq!(audio_events(&mut rig), []);
+
+        rig.audio.set_state(AudioState::Starting);
+        rig.controller.tick(ms(32), &[], &rig.config);
+        rig.controller.tick(ms(48), &[], &rig.config);
+        assert_eq!(audio_events(&mut rig), [Event::Audio { state: AudioState::Starting }]);
+
+        let capturing = AudioState::Capturing { device: "Speakers".into() };
+        rig.audio.set_state(capturing.clone());
+        rig.controller.tick(ms(64), &[], &rig.config);
+        rig.controller.tick(ms(80), &[], &rig.config);
+        assert_eq!(audio_events(&mut rig), [Event::Audio { state: capturing }]);
+    }
+
+    #[test]
+    fn releasing_the_keyboard_announces_the_audio_going_off() {
+        let mut rig = audio_rig(vec![visualizer_profile("default", true)]);
+        rig.attach();
+        rig.audio.set_state(AudioState::Capturing { device: "Speakers".into() });
+        rig.controller.tick(ms(16), &[], &rig.config);
+        rig.controller.take_events();
+
+        rig.audio.set_state(AudioState::Off);
+        assert_eq!(rig.controller.handle(Request::Release, &rig.config), Reply::Done);
+        assert!(rig.controller.take_events().contains(&Event::Audio { state: AudioState::Off }));
     }
 }

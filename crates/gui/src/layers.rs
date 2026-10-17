@@ -4,7 +4,7 @@ use actions::Action;
 use eframe::egui;
 use engine::effects::KeyColor;
 use engine::{BlendMode, EffectConfig, LayerConfig, NamedZone, Zone};
-use ipc::Profile;
+use ipc::{AudioState, Profile};
 use k100::Rgb;
 
 use crate::colors::color_button;
@@ -299,6 +299,7 @@ fn layer_list(ui: &mut egui::Ui, model: &mut Model) {
 
 fn layer_editor(ui: &mut egui::Ui, model: &mut Model) {
     let selection = model.selection.clone();
+    let audio = model.state.as_ref().map(|state| state.audio.clone()).unwrap_or_default();
     let Some(draft) = model.draft.as_mut() else { return };
     if draft.profile.layers.is_empty() {
         return;
@@ -345,6 +346,18 @@ fn layer_editor(ui: &mut egui::Ui, model: &mut Model) {
     }
     ui.separator();
     effect_params(ui, &mut layer.effect, &selection, &mut model.paint);
+    if matches!(layer.effect, EffectConfig::AudioVisualizer { .. }) {
+        ui.label(audio_status_label(&audio));
+    }
+}
+
+fn audio_status_label(audio: &AudioState) -> String {
+    match audio {
+        AudioState::Off => "Audio off".to_owned(),
+        AudioState::Starting => "Audio starting".to_owned(),
+        AudioState::Capturing { device } => format!("Audio capturing: {device}"),
+        AudioState::Failed { reason } => format!("Audio failed: {reason}"),
+    }
 }
 
 fn colour_row(ui: &mut egui::Ui, label: &str, color: &mut Rgb) {
@@ -590,6 +603,34 @@ mod tests {
                 decay_ms: 400,
             }
         );
+    }
+
+    fn visualizer_model(audio: AudioState) -> Model {
+        let mut model =
+            with_layers(vec![LayerConfig { effect: EffectKind::AudioVisualizer.default_config(), ..solid("bars") }]);
+        model.state.as_mut().unwrap().audio = audio;
+        model
+    }
+
+    #[test]
+    fn the_visualizer_editor_shows_the_audio_status() {
+        let mut harness = harness(visualizer_model(AudioState::Failed { reason: "boom".into() }), lighting);
+        harness.run();
+        harness.get_by_label("Audio failed: boom");
+
+        let mut harness =
+            self::harness(visualizer_model(AudioState::Capturing { device: "Speakers".into() }), lighting);
+        harness.run();
+        harness.get_by_label("Audio capturing: Speakers");
+    }
+
+    #[test]
+    fn other_editors_do_not_show_the_audio_status() {
+        let mut model = with_layers(vec![solid("base")]);
+        model.state.as_mut().unwrap().audio = AudioState::Failed { reason: "boom".into() };
+        let mut harness = harness(model, lighting);
+        harness.run();
+        assert!(harness.query_by_label("Audio failed: boom").is_none());
     }
 
     #[test]

@@ -15,6 +15,7 @@ tray = ["dep:tray-icon", "dep:gtk"]
 
 [dependencies]
 actions.workspace = true
+audio.workspace = true
 bragi.workspace = true
 k100.workspace = true
 engine.workspace = true

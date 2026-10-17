@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use clap::Subcommand;
-use ipc::{Client, DaemonState, DeviceState, Profile, Reply, Request};
+use ipc::{AudioState, Client, DaemonState, DeviceState, Profile, Reply, Request};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -112,6 +112,12 @@ pub fn format_state(state: &DaemonState) -> String {
             lines.push(format!("recording:  into {name}"));
         }
     }
+    match &state.audio {
+        AudioState::Off => {}
+        AudioState::Starting => lines.push("audio: starting".into()),
+        AudioState::Capturing { device } => lines.push(format!("audio: capturing ({device})")),
+        AudioState::Failed { reason } => lines.push(format!("audio: failed: {reason}")),
+    }
     lines.extend(state.config_errors.iter().map(|error| format!("config error: {error}")));
     lines.join("\n")
 }
@@ -131,7 +137,7 @@ pub fn key_list() -> String {
 
 #[cfg(test)]
 mod tests {
-    use ipc::{DaemonState, DeviceState, Reply};
+    use ipc::{AudioState, DaemonState, DeviceState, Reply};
 
     use super::*;
 
@@ -149,6 +155,7 @@ mod tests {
             dial_mode: "brightness".into(),
             recording: actions::RecorderState::Idle,
             autostart: true,
+            audio: AudioState::Off,
         };
         let text = format_state(&state);
         assert!(text.contains("connected: K100 RGB (firmware 1.15.61)"), "{text}");
@@ -160,6 +167,11 @@ mod tests {
         assert!(text.contains("dial:       brightness"), "{text}");
         assert!(text.contains("autostart:  on"), "{text}");
         assert!(!text.contains("recording"), "{text}");
+        assert!(!text.contains("audio"), "{text}");
+        let capturing = DaemonState { audio: AudioState::Capturing { device: "Speakers".into() }, ..state.clone() };
+        assert!(format_state(&capturing).contains("audio: capturing (Speakers)"));
+        let failed = DaemonState { audio: AudioState::Failed { reason: "no sink".into() }, ..state.clone() };
+        assert!(format_state(&failed).contains("audio: failed: no sink"));
         let recording = DaemonState { recording: actions::RecorderState::Recording { key: 131 }, ..state.clone() };
         assert!(format_state(&recording).contains("recording:  into g1"));
         let blocked = DaemonState { device: DeviceState::Blocked { processes: vec!["iCUE.exe".into()] }, ..state };

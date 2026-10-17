@@ -4,6 +4,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
+use daemon::audio::SystemAudio;
 use daemon::config::ConfigDir;
 use daemon::controller::Controller;
 use daemon::runtime::{self, Command, HidConnector};
@@ -86,7 +87,8 @@ fn run(instance: ipc::InstanceLock) -> Result<(), Box<dyn std::error::Error>> {
         Err(failure) => (Box::new(actions::NullSink), Some(format!("key actions unavailable: {failure}"))),
     };
     let (output, output_thread) = actions::spawn(sink);
-    let mut controller = Controller::new(settings, profiles, errors, Box::new(output));
+    let mut controller =
+        Controller::new(settings, profiles, errors, Box::new(output)).with_audio(Box::new(SystemAudio::default()));
     controller.set_autostart(autostart_port());
     if let Some(warning) = sink_warning {
         eprintln!("k100d: {warning}");
