@@ -1,9 +1,15 @@
 use std::sync::Arc;
 
 mod analyzer;
+mod capture;
 mod cell;
+#[cfg(target_os = "linux")]
+mod pulse;
+#[cfg(windows)]
+mod wasapi;
 
 pub use analyzer::Analyzer;
+pub use capture::{AudioHandle, Capture, DEVICE_CHECK_EVERY, Exit, RETRY_AFTER, SampleSink, Status, system_capture};
 pub use cell::{STALE_AFTER, SpectrumCell};
 
 pub struct Samples<'a> {

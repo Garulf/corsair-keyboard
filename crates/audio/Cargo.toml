@@ -9,3 +9,9 @@ rust-version.workspace = true
 [dependencies]
 engine.workspace = true
 realfft.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+cpal.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+pulseaudio.workspace = true
