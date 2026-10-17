@@ -87,18 +87,22 @@ struct Worker {
 
 impl Worker {
     fn run(mut self) {
+        let mut announce_start = true;
         loop {
-            set_status(&self.status, Status::Starting);
+            if announce_start {
+                set_status(&self.status, Status::Starting);
+            }
             let mut pipeline = Pipeline::new(Arc::clone(&self.cell));
             let sink: SampleSink = Box::new(move |samples| pipeline.feed(samples));
             let status = Arc::clone(&self.status);
             let mut report_device = |device| set_status(&status, Status::Capturing { device });
             match self.capture.run(&self.stop, &mut report_device, sink) {
                 Ok(Exit::Stopped) => return,
-                Ok(Exit::DeviceChanged) => {}
+                Ok(Exit::DeviceChanged) => announce_start = true,
                 Err(reason) => {
                     self.cell.publish(Spectrum::SILENT);
                     set_status(&self.status, Status::Failed { reason });
+                    announce_start = false;
                     if !self.wait_to_retry() {
                         return;
                     }
@@ -158,6 +162,7 @@ mod tests {
     const SLOW_RETRY: Duration = Duration::from_millis(200);
     const NEVER_RETRY: Duration = Duration::from_secs(60);
     const DEADLINE: Duration = Duration::from_secs(1);
+    const OPENING: Duration = Duration::from_millis(30);
 
     enum Step {
         Fail(&'static str),
@@ -177,6 +182,11 @@ mod tests {
             (Box::new(scripted), runs)
         }
 
+        fn capture_briefly(&self, device: &mut dyn FnMut(String), sink: &mut SampleSink) {
+            device("fake".to_string());
+            self.feed(sink);
+        }
+
         fn feed(&self, sink: &mut SampleSink) {
             if self.feeds {
                 let data = sine(RATE, 1000.0, 1.0, 2, 8192);
@@ -193,12 +203,19 @@ mod tests {
             mut sink: SampleSink,
         ) -> Result<Exit, String> {
             self.runs.fetch_add(1, Ordering::SeqCst);
-            device("fake".to_string());
-            self.feed(&mut sink);
+            thread::sleep(OPENING);
             match self.steps.pop_front() {
-                Some(Step::Fail(reason)) => Err(reason.to_string()),
-                Some(Step::ChangeDevice) => Ok(Exit::DeviceChanged),
+                Some(Step::Fail(reason)) => {
+                    self.feed(&mut sink);
+                    Err(reason.to_string())
+                }
+                Some(Step::ChangeDevice) => {
+                    self.capture_briefly(device, &mut sink);
+                    thread::sleep(OPENING);
+                    Ok(Exit::DeviceChanged)
+                }
                 None => {
+                    self.capture_briefly(device, &mut sink);
                     while !stop.load(Ordering::SeqCst) {
                         thread::sleep(Duration::from_millis(5));
                         self.feed(&mut sink);
@@ -247,6 +264,44 @@ mod tests {
         let seen = wait_until(&handle, |status, _| *status == capturing_fake() && runs.load(Ordering::SeqCst) == 2);
 
         assert!(seen.contains(&Status::Failed { reason: "boom".to_string() }), "{seen:?}");
+    }
+
+    #[test]
+    fn the_first_attempt_reports_starting() {
+        let (capture, _) = Scripted::new([Step::Fail("boom")], false);
+        let handle = AudioHandle::spawn_with(capture, NEVER_RETRY);
+
+        let seen = wait_until(&handle, |status, _| matches!(status, Status::Failed { .. }));
+
+        assert_eq!(seen, [Status::Starting, Status::Failed { reason: "boom".to_string() }]);
+    }
+
+    #[test]
+    fn a_persistent_failure_stays_failed_between_retries() {
+        let (capture, runs) = Scripted::new([Step::Fail("first"), Step::Fail("second")], false);
+        let handle = AudioHandle::spawn_with(capture, QUICK_RETRY);
+
+        let seen = wait_until(&handle, |status, _| *status == capturing_fake() && runs.load(Ordering::SeqCst) == 3);
+
+        assert_eq!(
+            seen,
+            [
+                Status::Starting,
+                Status::Failed { reason: "first".to_string() },
+                Status::Failed { reason: "second".to_string() },
+                capturing_fake(),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_device_change_reports_starting_again() {
+        let (capture, runs) = Scripted::new([Step::ChangeDevice], false);
+        let handle = AudioHandle::spawn_with(capture, QUICK_RETRY);
+
+        let seen = wait_until(&handle, |status, _| *status == capturing_fake() && runs.load(Ordering::SeqCst) == 2);
+
+        assert_eq!(seen, [Status::Starting, capturing_fake(), Status::Starting, capturing_fake()]);
     }
 
     #[test]
