@@ -1,5 +1,7 @@
 use std::ops::RangeInclusive;
 
+mod action;
+mod file;
 mod lighting;
 mod mappings;
 mod root;
@@ -8,6 +10,8 @@ mod wire;
 #[cfg(test)]
 mod fixtures;
 
+pub use action::{MacroAction, MacroEvent, RemapAction, RemapTarget, TextAction, execution};
+pub use file::{StoredFile, decode as decode_file};
 pub use lighting::{
     CommonLighting, Direction, EffectDuration, EffectKind, HwColor, LightingEntry, LightingsList, SPECIFIED_COLORS,
     START_WITH_PROFILE, Speed,
