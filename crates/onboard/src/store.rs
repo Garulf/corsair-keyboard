@@ -95,6 +95,7 @@ pub struct Saved {
 pub struct Changed {
     pub backup: PathBuf,
     pub leftovers: Vec<u16>,
+    pub warnings: Vec<String>,
 }
 
 struct Slots {
@@ -195,10 +196,7 @@ pub fn save<S: FileStore + ?Sized>(
     let mut created = Vec::new();
     let files = match write_new_tree(store, tree, &slots.used(), &mut created) {
         Ok(files) => files,
-        Err(error) => {
-            remove_free_use(store, created);
-            return Err(error);
-        }
+        Err(error) => return Err(error.with_leftovers(remove_free_use(store, created))),
     };
     let root = files.last().expect("a tree always has a root").0;
 
@@ -208,11 +206,8 @@ pub fn save<S: FileStore + ?Sized>(
         None => roots.push(root),
     }
     let slot_count = roots.len();
-    replace_profiles_list(store, &slots.list_bytes, &ProfilesList { roots }.encode()).map_err(|failure| {
-        failure.undo_with(|| {
-            remove_free_use(store, created);
-        })
-    })?;
+    replace_profiles_list(store, Some(&slots.list_bytes), &ProfilesList { roots }.encode())
+        .map_err(|failure| failure.undo_with(|| remove_free_use(store, created)))?;
 
     let leftovers = slot.map(|replaced| remove_free_use(store, slots.files_only_in(replaced))).unwrap_or_default();
     Ok(Saved {
@@ -258,24 +253,21 @@ struct ListNotWritten {
 }
 
 impl ListNotWritten {
-    fn undo_with(self, undo: impl FnOnce()) -> OnboardError {
-        if self.previous_list_back {
-            undo();
-        }
-        self.error
+    fn undo_with(self, undo: impl FnOnce() -> Vec<u16>) -> OnboardError {
+        if self.previous_list_back { self.error.with_leftovers(undo()) } else { self.error }
     }
 }
 
 fn replace_profiles_list<S: FileStore + ?Sized>(
     store: &mut S,
-    previous: &[u8],
+    previous: Option<&[u8]>,
     replacement: &[u8],
 ) -> Result<(), ListNotWritten> {
     let error = match write_verified(store, PROFILES_LIST.0, replacement) {
         Ok(()) => return Ok(()),
         Err(error) => error,
     };
-    let previous_list_back = write_verified(store, PROFILES_LIST.0, previous).is_ok();
+    let previous_list_back = previous.is_some_and(|previous| write_verified(store, PROFILES_LIST.0, previous).is_ok());
     Err(ListNotWritten { error, previous_list_back })
 }
 
@@ -297,8 +289,9 @@ pub fn delete<S: FileStore + ?Sized>(
     let backup = backups.save(&slots.snapshot(), now)?;
     let mut roots = slots.roots();
     roots.remove(slot);
-    replace_profiles_list(store, &slots.list_bytes, &ProfilesList { roots }.encode())
+    replace_profiles_list(store, Some(&slots.list_bytes), &ProfilesList { roots }.encode())
         .map_err(|failure| failure.error)?;
+    let mut warnings = Vec::new();
     if let Some(active) = slots.active {
         let shifted = match (active as usize).cmp(&slot) {
             std::cmp::Ordering::Less => active,
@@ -306,11 +299,16 @@ pub fn delete<S: FileStore + ?Sized>(
             std::cmp::Ordering::Greater => active - 1,
         };
         if shifted != active {
-            store.set_property(PropertyId::ACTIVE_HARDWARE_PROFILE_INDEX, shifted)?;
+            warnings.extend(set_active(store, shifted));
         }
     }
     let leftovers = remove_free_use(store, slots.files_only_in(slot));
-    Ok(Changed { backup, leftovers })
+    Ok(Changed { backup, leftovers, warnings })
+}
+
+fn set_active<S: FileStore + ?Sized>(store: &mut S, index: u32) -> Option<String> {
+    let result = store.set_property(PropertyId::ACTIVE_HARDWARE_PROFILE_INDEX, index);
+    result.err().map(|error| format!("the active slot could not be set to {index}: {error}"))
 }
 
 pub fn activate<S: FileStore + ?Sized>(store: &mut S, slot: usize) -> Result<(), OnboardError> {
@@ -332,24 +330,97 @@ pub fn restore<S: FileStore + ?Sized>(
 ) -> Result<Changed, OnboardError> {
     let restored = Snapshot::read_from(from)?;
     let restored_roots = validated_roots(&restored, from)?;
-    let current = Slots::read(store)?;
-    let previous = current.snapshot();
-    let backup = backups.save(&previous, now)?;
+    let current = LiveState::read(store)?;
+    let backup = backups.save(&current.snapshot(), now)?;
 
     let mut undo = Undo::default();
-    if let Err(error) = write_snapshot_files(store, &restored, &current.used(), &mut undo) {
-        undo.apply(store, &previous);
-        return Err(error);
+    if let Err(error) = write_snapshot_files(store, &restored, &current.files, &mut undo) {
+        return Err(error.with_leftovers(undo.apply(store)));
     }
-    replace_profiles_list(store, &current.list_bytes, &restored.profiles_list)
-        .map_err(|failure| failure.undo_with(|| undo.apply(store, &previous)))?;
+    replace_profiles_list(store, current.list_bytes.as_deref(), &restored.profiles_list)
+        .map_err(|failure| failure.undo_with(|| undo.apply(store)))?;
+    let mut warnings = Vec::new();
     if let Some(active) = restored.active {
         let index = if (active as usize) < restored_roots.len() { active } else { 0 };
-        store.set_property(PropertyId::ACTIVE_HARDWARE_PROFILE_INDEX, index)?;
+        warnings.extend(set_active(store, index));
     }
-    let newer = current.used().into_iter().filter(|id| !restored.files.contains_key(id));
-    let leftovers = remove_free_use(store, newer);
-    Ok(Changed { backup, leftovers })
+    let not_restored = |id: &u16| !restored.files.contains_key(id);
+    let newer: Vec<u16> = current.attributed.iter().copied().filter(not_restored).collect();
+    let mut leftovers = remove_free_use(store, newer);
+    leftovers.extend(current.files.keys().copied().filter(|id| !current.attributed.contains(id) && not_restored(id)));
+    leftovers.sort_unstable();
+    Ok(Changed { backup, leftovers, warnings })
+}
+
+struct LiveState {
+    list_bytes: Option<Vec<u8>>,
+    files: BTreeMap<u16, Vec<u8>>,
+    attributed: BTreeSet<u16>,
+    active: Option<u32>,
+}
+
+impl LiveState {
+    fn read<S: FileStore + ?Sized>(store: &mut S) -> Result<Self, OnboardError> {
+        let list_bytes = read_if_present(store, PROFILES_LIST.0)?;
+        let roots = list_bytes.as_deref().and_then(|bytes| ProfilesList::decode(bytes).ok()).map(|list| list.roots);
+        let mut state = Self {
+            list_bytes,
+            files: BTreeMap::new(),
+            attributed: BTreeSet::new(),
+            active: optional(store.get_property(PropertyId::ACTIVE_HARDWARE_PROFILE_INDEX))?,
+        };
+        for root in roots.unwrap_or_default() {
+            let walk = walk_tree(store, root)?;
+            if walk.complete {
+                state.attributed.extend(walk.files.keys().copied());
+            }
+            state.files.extend(walk.files);
+        }
+        Ok(state)
+    }
+
+    fn snapshot(&self) -> Snapshot {
+        let files = self.files.iter().filter(|(id, _)| FREE_USE_IDS.contains(id));
+        Snapshot {
+            profiles_list: self.list_bytes.clone().unwrap_or_default(),
+            files: files.map(|(id, bytes)| (*id, bytes.clone())).collect(),
+            active: self.active,
+        }
+    }
+}
+
+struct Walk {
+    files: BTreeMap<u16, Vec<u8>>,
+    complete: bool,
+}
+
+fn walk_tree<S: FileStore + ?Sized>(store: &mut S, root: u16) -> Result<Walk, OnboardError> {
+    let mut walk = Walk { files: BTreeMap::new(), complete: true };
+    let mut pending = VecDeque::from([root]);
+    while let Some(id) = pending.pop_front() {
+        if walk.files.contains_key(&id) {
+            continue;
+        }
+        let Some(bytes) = read_if_present(store, id)? else {
+            walk.complete = false;
+            continue;
+        };
+        if id == root && ProfileRoot::decode(&bytes).is_err() {
+            walk.complete = false;
+        } else {
+            pending.extend(children(&bytes));
+        }
+        walk.files.insert(id, bytes);
+    }
+    Ok(walk)
+}
+
+fn read_if_present<S: FileStore + ?Sized>(store: &mut S, id: u16) -> Result<Option<Vec<u8>>, OnboardError> {
+    match store.read(FileId(id)) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(unreadable) if unreadable.status().is_some() => Ok(None),
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn validated_roots(snapshot: &Snapshot, dir: &Path) -> Result<Vec<u16>, OnboardError> {
@@ -371,35 +442,39 @@ fn validated_roots(snapshot: &Snapshot, dir: &Path) -> Result<Vec<u16>, OnboardE
 #[derive(Default)]
 struct Undo {
     created: Vec<u16>,
-    overwritten: Vec<u16>,
+    overwritten: Vec<(u16, Vec<u8>)>,
 }
 
 impl Undo {
-    fn apply<S: FileStore + ?Sized>(&self, store: &mut S, previous: &Snapshot) {
-        for id in &self.overwritten {
-            if let Some(bytes) = previous.files.get(id) {
-                write_verified(store, *id, bytes).ok();
-            }
-        }
-        remove_free_use(store, self.created.iter().copied());
+    fn apply<S: FileStore + ?Sized>(&self, store: &mut S) -> Vec<u16> {
+        let not_put_back =
+            self.overwritten.iter().filter(|(id, previous)| write_verified(store, *id, previous).is_err());
+        let mut leftovers: Vec<u16> = not_put_back.map(|(id, _)| *id).collect();
+        leftovers.extend(remove_free_use(store, self.created.iter().copied()));
+        leftovers.sort_unstable();
+        leftovers
     }
 }
 
 fn write_snapshot_files<S: FileStore + ?Sized>(
     store: &mut S,
     snapshot: &Snapshot,
-    used: &BTreeSet<u16>,
+    known: &BTreeMap<u16, Vec<u8>>,
     undo: &mut Undo,
 ) -> Result<(), OnboardError> {
     for (id, bytes) in &snapshot.files {
-        if used.contains(id) {
-            undo.overwritten.push(*id);
-        } else {
-            match store.create(FileId(*id)) {
+        let current = match known.get(id) {
+            Some(current) => Some(current.clone()),
+            None => read_if_present(store, *id)?,
+        };
+        match current {
+            Some(current) if current == *bytes => continue,
+            Some(current) => undo.overwritten.push((*id, current)),
+            None => match store.create(FileId(*id)) {
                 Ok(()) => undo.created.push(*id),
-                Err(exists) if exists.status().is_some() => {}
+                Err(refused) if refused.status().is_some() => {}
                 Err(error) => return Err(error.into()),
-            }
+            },
         }
         write_verified(store, *id, bytes)?;
     }
@@ -784,13 +859,104 @@ mod tests {
         let (mut store, backups, temp) = rig();
         let before = store.files();
         let mut changed = snapshot(&mut store).unwrap();
-        changed.files.insert(0x6D6B, red_tree().encode(&RED_IDS)[1].1.clone());
+        let red_files = red_tree().encode(&RED_IDS);
+        changed.files.insert(0x6D6B, red_files[1].1.clone());
+        changed.files.insert(0x6D6C, red_files[2].1.clone());
         let dir = temp.path().join("changed");
         changed.write_to(&dir).unwrap();
-        let position_of_lighting = changed.files.keys().position(|id| *id == 0x6D6B).unwrap() + 1;
-        store.fail_write(position_of_lighting + 1, Failure::Status(Status::HardwareError));
-        assert!(restore(&mut store, &backups, &dir, now()).is_err());
+        store.fail_write(2, Failure::Status(Status::HardwareError));
+        assert!(matches!(restore(&mut store, &backups, &dir, now()), Err(OnboardError::Device(_))));
         assert_eq!(store.files(), before);
+    }
+
+    #[test]
+    fn restore_skips_files_that_already_hold_the_backed_up_bytes() {
+        let (mut store, backups, _temp) = rig();
+        let saved = save(&mut store, &backups, &red_tree(), None, now()).unwrap();
+        let operations_before = store.operations().len();
+        restore(&mut store, &backups, &saved.backup, now()).unwrap();
+        let restore_operations: Vec<Operation> = store.operations()[operations_before..]
+            .iter()
+            .copied()
+            .filter(|op| matches!(op, Operation::Create(_) | Operation::Write(_)))
+            .collect();
+        assert_eq!(restore_operations, [Operation::Write(0x0F)]);
+        assert!(!RED_IDS.iter().any(|id| store.files().contains_key(id)));
+    }
+
+    #[test]
+    fn restore_runs_when_a_live_root_is_unreadable_and_keeps_what_it_cannot_attribute() {
+        let (mut store, backups, _temp) = rig();
+        let original = store.files();
+        let saved = save(&mut store, &backups, &red_tree(), None, now()).unwrap();
+        let mut corrupt_root = store.files()[&0x6D75].clone();
+        corrupt_root.truncate(10);
+        store.insert(0x6D75, corrupt_root);
+        let changed = restore(&mut store, &backups, &saved.backup, now()).unwrap();
+        assert_eq!(changed.leftovers, [0x6D75]);
+        let files = store.files();
+        assert_eq!(files[&0x0F], original[&0x0F]);
+        assert!(ICUE_TREE.iter().all(|id| files[id] == original[id]));
+        assert!(RED_IDS.iter().all(|id| files.contains_key(id)));
+        assert!(changed.backup.join("6d75.bin").exists());
+    }
+
+    #[test]
+    fn restore_recovers_after_an_interrupted_restore_left_a_slot_root_holding_backup_bytes() {
+        let (mut store, backups, _temp) = rig();
+        let original = store.files();
+        let first = save(&mut store, &backups, &red_tree(), Some(0), now()).unwrap();
+        let second = save(&mut store, &backups, &red_tree(), None, now()).unwrap();
+        assert_eq!(second.root, 0x6D65);
+        let writes_so_far = store.operations().iter().filter(|op| matches!(op, Operation::Write(_))).count();
+        store.fail_writes_from(writes_so_far + 7, Failure::Timeout);
+        let interrupted = restore(&mut store, &backups, &first.backup, now()).unwrap_err();
+        assert!(interrupted.lost_device());
+        assert_eq!(interrupted.leftovers(), (0x6D60..=0x6D65).collect::<Vec<u16>>());
+        assert!(read_tree(&mut store, 0x6D65).is_err());
+        store.stop_failing();
+        restore(&mut store, &backups, &first.backup, now()).unwrap();
+        assert_eq!(store.files(), original);
+    }
+
+    #[test]
+    fn a_rollback_that_cannot_remove_a_created_file_reports_it() {
+        let (mut store, backups, _temp) = rig();
+        store.fail_writes_from(3, Failure::Status(Status::HardwareError));
+        store.fail_remove(0x6D6F, Failure::Timeout);
+        let error = save(&mut store, &backups, &red_tree(), None, now()).unwrap_err();
+        assert_eq!(error.leftovers(), [0x6D6F]);
+        assert!(
+            matches!(&error, OnboardError::PartlyUndone { error, .. } if matches!(**error, OnboardError::Device(_)))
+        );
+        assert!(!error.lost_device());
+        assert_eq!(ProfilesList::decode(&store.files()[&0x0F]).unwrap().roots, [0x6D70]);
+    }
+
+    #[test]
+    fn a_delete_whose_active_index_write_fails_still_reports_the_backup() {
+        let (mut store, backups, _temp) = rig();
+        save(&mut store, &backups, &red_tree(), None, now()).unwrap();
+        store.put_property(PropertyId::ACTIVE_HARDWARE_PROFILE_INDEX, 1);
+        store.fail_set_property(PropertyId::ACTIVE_HARDWARE_PROFILE_INDEX, Failure::Status(Status::HardwareError));
+        let changed = delete(&mut store, &backups, 0, now()).unwrap();
+        assert!(changed.backup.join("000f.bin").exists());
+        assert_eq!(changed.warnings.len(), 1, "{:?}", changed.warnings);
+        let files = store.files();
+        assert_eq!(ProfilesList::decode(&files[&0x0F]).unwrap().roots, [0x6D75]);
+        assert!(!files.contains_key(&0x6D70));
+    }
+
+    #[test]
+    fn a_restore_whose_active_index_write_fails_still_reports_the_backup() {
+        let (mut store, backups, _temp) = rig();
+        let original = store.files();
+        let saved = save(&mut store, &backups, &red_tree(), None, now()).unwrap();
+        store.fail_set_property(PropertyId::ACTIVE_HARDWARE_PROFILE_INDEX, Failure::Timeout);
+        let changed = restore(&mut store, &backups, &saved.backup, now()).unwrap();
+        assert!(changed.backup.join("000f.bin").exists());
+        assert_eq!(changed.warnings.len(), 1, "{:?}", changed.warnings);
+        assert_eq!(store.files(), original);
     }
 
     #[test]

@@ -35,6 +35,7 @@ struct State {
     properties: BTreeMap<u16, u32>,
     create_failures: BTreeMap<u16, Failure>,
     remove_failures: BTreeMap<u16, Failure>,
+    set_property_failures: BTreeMap<u16, Failure>,
     writes_failing_from: Option<(usize, Failure)>,
     single_write_failures: BTreeMap<usize, Failure>,
     mangle_every_write: bool,
@@ -96,6 +97,21 @@ impl MemoryStore {
 
     pub fn fail_remove(&self, id: u16, failure: Failure) {
         self.state().remove_failures.insert(id, failure);
+    }
+
+    pub fn fail_set_property(&self, property: PropertyId, failure: Failure) {
+        self.state().set_property_failures.insert(property.0, failure);
+    }
+
+    pub fn stop_failing(&self) {
+        let mut state = self.state();
+        state.create_failures.clear();
+        state.remove_failures.clear();
+        state.set_property_failures.clear();
+        state.writes_failing_from = None;
+        state.single_write_failures.clear();
+        state.mangle_every_write = false;
+        state.single_mangled_writes.clear();
     }
 
     pub fn fail_writes_from(&self, nth: usize, failure: Failure) {
@@ -176,6 +192,9 @@ impl FileStore for MemoryStore {
     fn set_property(&mut self, property: PropertyId, value: u32) -> Result<(), DeviceError> {
         let mut state = self.state();
         state.operations.push(Operation::SetProperty(property.0, value));
+        if let Some(failure) = state.set_property_failures.get(&property.0) {
+            return Err(failure.error(Command::SetProperty));
+        }
         state.properties.insert(property.0, value);
         Ok(())
     }
@@ -251,5 +270,20 @@ mod tests {
         store.set_property(PropertyId::ACTIVE_HARDWARE_PROFILE_INDEX, 0).unwrap();
         assert_eq!(store.property(PropertyId::ACTIVE_HARDWARE_PROFILE_INDEX), Some(0));
         assert_eq!(store.operations(), [Operation::SetProperty(0x6E, 0)]);
+    }
+
+    #[test]
+    fn a_failing_property_write_keeps_the_old_value_until_failures_stop() {
+        let mut store = MemoryStore::with_files([(0x6D60, vec![])]);
+        store.put_property(PropertyId::ACTIVE_HARDWARE_PROFILE_INDEX, 2);
+        store.fail_set_property(PropertyId::ACTIVE_HARDWARE_PROFILE_INDEX, Failure::Timeout);
+        store.fail_writes_from(1, Failure::Timeout);
+        assert!(store.set_property(PropertyId::ACTIVE_HARDWARE_PROFILE_INDEX, 0).is_err());
+        assert!(store.write(FileId(0x6D60), &[1]).is_err());
+        assert_eq!(store.property(PropertyId::ACTIVE_HARDWARE_PROFILE_INDEX), Some(2));
+        store.stop_failing();
+        store.set_property(PropertyId::ACTIVE_HARDWARE_PROFILE_INDEX, 0).unwrap();
+        store.write(FileId(0x6D60), &[1]).unwrap();
+        assert_eq!(store.property(PropertyId::ACTIVE_HARDWARE_PROFILE_INDEX), Some(0));
     }
 }

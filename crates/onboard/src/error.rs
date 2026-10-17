@@ -26,11 +26,32 @@ pub enum OnboardError {
     NoProfile(String),
     #[error(transparent)]
     Io(#[from] std::io::Error),
+    #[error("{error}; left on the keyboard: {}", hex_ids(.leftovers))]
+    PartlyUndone { error: Box<OnboardError>, leftovers: Vec<u16> },
+}
+
+fn hex_ids(ids: &[u16]) -> String {
+    ids.iter().map(|id| format!("{id:#06x}")).collect::<Vec<_>>().join(", ")
 }
 
 impl OnboardError {
     pub fn lost_device(&self) -> bool {
-        matches!(self, Self::Device(error) if error.status().is_none())
+        match self {
+            Self::Device(error) => error.status().is_none(),
+            Self::PartlyUndone { error, .. } => error.lost_device(),
+            _ => false,
+        }
+    }
+
+    pub fn leftovers(&self) -> &[u16] {
+        match self {
+            Self::PartlyUndone { leftovers, .. } => leftovers,
+            _ => &[],
+        }
+    }
+
+    pub(crate) fn with_leftovers(self, leftovers: Vec<u16>) -> Self {
+        if leftovers.is_empty() { self } else { Self::PartlyUndone { error: Box::new(self), leftovers } }
     }
 }
 
@@ -46,6 +67,16 @@ mod tests {
         let refused = DeviceError::Status { command: Command::CreateFile, status: Status::InvalidArgument };
         assert!(!OnboardError::Device(refused).lost_device());
         assert!(!OnboardError::Verify(0x6D71).lost_device());
+    }
+
+    #[test]
+    fn a_partly_undone_change_keeps_the_cause_and_names_what_it_left() {
+        let cause = OnboardError::Device(DeviceError::Timeout(Command::WriteBufferBegin));
+        let error = OnboardError::PartlyUndone { error: Box::new(cause), leftovers: vec![0x6D6F, 0x6D71] };
+        assert!(error.lost_device());
+        assert_eq!(error.leftovers(), [0x6D6F, 0x6D71]);
+        assert!(error.to_string().ends_with("; left on the keyboard: 0x6d6f, 0x6d71"), "{error}");
+        assert!(OnboardError::LastSlot.leftovers().is_empty());
     }
 
     #[test]
