@@ -115,7 +115,7 @@ With iCUE closed, apps that use version 4 of the iCUE SDK talk to k100d instead.
 - An app that asks for exclusive G-key control takes the G-keys it intercepts, and their k100d actions pause until it lets go or disconnects.
 - Each app's lighting sits above your profile, unless the app asks for a priority of 127 or lower, which puts it underneath. An app that asks for exclusive lighting replaces the profile's lighting while it holds it.
 - `k100 status` and the GUI's Overview list the connected apps and what each one holds. The Overview has Block and Unblock buttons, and `k100 sdk block <exe>` does the same from the command line. Blocking an app that is connected disconnects it.
-- If iCUE is running, it owns the SDK pipe. k100d waits, tries again every 10 s, and shows "in use by another program".
+- If iCUE was running when k100d started, it owns the SDK pipe. k100d waits, tries again every 10 s, and shows "in use by another program". Start iCUE only while k100d is stopped, since both would also fight over the keyboard.
 - Older games on the v3 SDK or Corsair's Game SDK are not supported yet.
 
 The `[sdk]` table in `settings.toml` has these keys:
