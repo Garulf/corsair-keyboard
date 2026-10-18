@@ -111,6 +111,14 @@ impl Model {
         self.onboard_blocker().is_none() && self.onboard.slots.is_none() && !self.onboard.list_failed
     }
 
+    pub fn list_onboard_if_needed(&mut self) -> bool {
+        let needed = self.onboard_needs_listing();
+        if needed {
+            self.send_onboard(OnboardRequest::List);
+        }
+        needed
+    }
+
     pub fn refresh_onboard(&mut self) -> Result<(), String> {
         self.start_onboard(OnboardRequest::List)
     }
@@ -368,6 +376,54 @@ mod tests {
         }));
         assert_eq!(model.onboard.error.as_deref(), Some("no keyboard connected"), "the error is not cleared");
         assert!(model.onboard_needs_listing());
+    }
+
+    #[test]
+    fn the_automatic_listing_after_a_keyboard_change_keeps_the_error_with_the_backup_path() {
+        let mut model = with_slots(&["a", "b"], Some(0));
+        model.delete_slot(1).unwrap();
+        let message = "no reply to WriteBufferBegin; put it back with: k100 onboard restore \"/b/1\"";
+        model
+            .apply(Inbox::reply(onboard(OnboardRequest::Delete { slot: 1 }), Reply::Error { message: message.into() }));
+        sent(&mut model);
+        onboard_slots(&mut model, &["a", "b"], Some(0));
+        model.apply(Inbox::Event(Event::DeviceState { state: DeviceState::Released }));
+        model.apply(Inbox::Event(Event::DeviceState {
+            state: DeviceState::Connected { model: "K100 RGB".into(), firmware: "1.15.61".into() },
+        }));
+        assert!(model.onboard_needs_listing());
+        assert!(model.list_onboard_if_needed());
+        assert_eq!(sent(&mut model), [list()]);
+        assert_eq!(model.onboard.error.as_deref(), Some(message));
+        onboard_slots(&mut model, &["a"], Some(0));
+        assert_eq!(model.onboard.error.as_deref(), Some(message));
+        assert!(!model.list_onboard_if_needed());
+        assert!(sent(&mut model).is_empty());
+    }
+
+    #[test]
+    fn the_automatic_listing_after_a_reconnect_keeps_the_report() {
+        let mut model = with_slots(&["a", "b"], Some(0));
+        model.delete_slot(1).unwrap();
+        let done =
+            Reply::OnboardDone { message: "deleted".into(), backup: Some("/b/1".into()), notes: vec!["note".into()] };
+        model.apply(Inbox::reply(onboard(OnboardRequest::Delete { slot: 1 }), done));
+        sent(&mut model);
+        onboard_slots(&mut model, &["a"], Some(0));
+        model.apply(Inbox::Disconnected("gone".into()));
+        model.apply(Inbox::Connected);
+        model.apply(Inbox::reply(Request::GetState, Reply::State { state: crate::testing::state("p", &["p"]) }));
+        assert!(model.list_onboard_if_needed());
+        onboard_slots(&mut model, &["a"], Some(0));
+        assert_eq!(model.onboard.outcome.as_ref().map(|outcome| outcome.message.as_str()), Some("deleted"));
+    }
+
+    #[test]
+    fn an_explicit_refresh_still_clears_the_last_error() {
+        let mut model = with_slots(&["a", "b"], Some(0));
+        model.onboard.error = Some("old".into());
+        model.refresh_onboard().unwrap();
+        assert_eq!(model.onboard.error, None);
     }
 
     #[test]
