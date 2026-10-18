@@ -871,11 +871,15 @@ impl Controller {
             Ok(settings) => settings,
             Err(message) => return error(message),
         };
+        let exe = sdk::exe_file_name(&exe);
+        if exe.is_empty() {
+            return error("an SDK block needs an exe file name".into());
+        }
         let list = &mut on_disk.sdk.blocked;
         if !blocked {
-            list.retain(|listed| !listed.eq_ignore_ascii_case(&exe));
-        } else if !list.iter().any(|listed| listed.eq_ignore_ascii_case(&exe)) {
-            list.push(exe);
+            list.retain(|listed| !listed.eq_ignore_ascii_case(exe));
+        } else if !list.iter().any(|listed| listed.eq_ignore_ascii_case(exe)) {
+            list.push(exe.into());
         }
         if let Err(failure) = config.save_settings(&on_disk) {
             return error(format!("saving settings: {failure}"));
@@ -2640,5 +2644,19 @@ mod tests {
         assert_eq!(rig.controller.handle(block("streamdeck.exe", false), &rig.config), Reply::Done);
         assert_eq!(rig.config.load_settings().unwrap().sdk.blocked, ["other.exe"]);
         assert_eq!(rig.controller.sdk_settings().blocked, ["other.exe"]);
+    }
+
+    #[test]
+    fn sdk_block_keeps_only_the_file_name_and_rejects_an_empty_one() {
+        let mut rig = rig(vec![profile("default")]);
+        let block = |exe: &str, blocked: bool| Request::SdkBlock { exe: exe.into(), blocked };
+        let path = r"C:\Program Files\Elgato\StreamDeck\StreamDeck.exe";
+        assert_eq!(rig.controller.handle(block(path, true), &rig.config), Reply::Done);
+        assert_eq!(rig.config.load_settings().unwrap().sdk.blocked, ["StreamDeck.exe"]);
+        for empty in ["", r"C:\Program Files\", "/"] {
+            assert!(matches!(rig.controller.handle(block(empty, true), &rig.config), Reply::Error { .. }), "{empty:?}");
+        }
+        assert_eq!(rig.controller.handle(block("/opt/elgato/streamdeck.exe", false), &rig.config), Reply::Done);
+        assert!(rig.config.load_settings().unwrap().sdk.blocked.is_empty());
     }
 }

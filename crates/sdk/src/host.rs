@@ -18,12 +18,12 @@ impl Default for Policy {
 
 impl Policy {
     pub fn allows(&self, exe: &str) -> bool {
-        let name = file_name(exe);
+        let name = exe_file_name(exe);
         self.enabled && !self.blocked.iter().any(|blocked| blocked.eq_ignore_ascii_case(name))
     }
 }
 
-fn file_name(path: &str) -> &str {
+pub fn exe_file_name(path: &str) -> &str {
     path.rsplit(['\\', '/']).next().unwrap_or(path)
 }
 
