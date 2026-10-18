@@ -93,6 +93,15 @@ impl AccessLevel {
         })
     }
 
+    pub fn from_bits(bits: u8) -> Self {
+        match bits & (LIGHTING_BIT | KEYS_BIT) {
+            LIGHTING_BIT => AccessLevel::ExclusiveLighting,
+            KEYS_BIT => AccessLevel::ExclusiveKeys,
+            0 => AccessLevel::Shared,
+            _ => AccessLevel::Exclusive,
+        }
+    }
+
     pub fn bits(self) -> u8 {
         self as u8
     }
@@ -260,6 +269,8 @@ mod tests {
         assert_eq!([bits(0), bits(1), bits(2), bits(3), bits(4)], [Some(0), Some(1), Some(2), Some(3), None]);
         assert_eq!(AccessLevel::from_id(1).map(|l| (l.lighting(), l.keys())), Some((true, false)));
         assert_eq!(AccessLevel::from_id(2).map(|l| (l.lighting(), l.keys())), Some((false, true)));
+        assert_eq!((0..=3).map(AccessLevel::from_bits).map(AccessLevel::bits).collect::<Vec<_>>(), [0, 1, 2, 3]);
+        assert_eq!(AccessLevel::from_bits(0xFE), AccessLevel::ExclusiveKeys);
     }
 
     #[test]
