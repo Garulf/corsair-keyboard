@@ -876,9 +876,10 @@ impl Controller {
             return error("an SDK block needs an exe file name".into());
         }
         let list = &mut on_disk.sdk.blocked;
+        let names_it = |listed: &String| sdk::exe_file_name(listed).eq_ignore_ascii_case(exe);
         if !blocked {
-            list.retain(|listed| !listed.eq_ignore_ascii_case(exe));
-        } else if !list.iter().any(|listed| listed.eq_ignore_ascii_case(exe)) {
+            list.retain(|listed| !names_it(listed));
+        } else if !list.iter().any(names_it) {
             list.push(exe.into());
         }
         if let Err(failure) = config.save_settings(&on_disk) {
@@ -2657,6 +2658,22 @@ mod tests {
         assert_eq!(rig.controller.handle(block("streamdeck.exe", false), &rig.config), Reply::Done);
         assert_eq!(rig.config.load_settings().unwrap().sdk.blocked, ["other.exe"]);
         assert_eq!(rig.controller.sdk_settings().blocked, ["other.exe"]);
+    }
+
+    #[test]
+    fn sdk_block_matches_an_entry_already_stored_as_a_path_by_its_file_name() {
+        let path = r"C:\Program Files\Elgato\StreamDeck\StreamDeck.exe";
+        let settings = with_sdk(ipc::SdkSettings {
+            blocked: vec![path.into(), "other.exe".into()],
+            ..ipc::SdkSettings::default()
+        });
+        let mut rig = rig_with(settings.clone(), vec![profile("default")]);
+        rig.config.save_settings(&settings).unwrap();
+        let block = |exe: &str, blocked: bool| Request::SdkBlock { exe: exe.into(), blocked };
+        assert_eq!(rig.controller.handle(block("streamdeck.exe", true), &rig.config), Reply::Done);
+        assert_eq!(rig.config.load_settings().unwrap().sdk.blocked, [path, "other.exe"]);
+        assert_eq!(rig.controller.handle(block(path, false), &rig.config), Reply::Done);
+        assert_eq!(rig.config.load_settings().unwrap().sdk.blocked, ["other.exe"]);
     }
 
     #[test]
