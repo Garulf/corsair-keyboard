@@ -8,6 +8,7 @@ use k100::{Frame, Rgb};
 
 use crate::canvas::CanvasState;
 use crate::device::DeviceForm;
+use crate::onboard_state::OnboardForm;
 use crate::profiles::{PendingRename, ProfilesForm};
 
 pub const AUTO_APPLY_QUIET: Duration = Duration::from_millis(400);
@@ -219,6 +220,7 @@ pub struct Model {
     pub device_form: DeviceForm,
     pub profiles_form: ProfilesForm,
     pub pending_rename: Option<PendingRename>,
+    pub onboard: OnboardForm,
     pending_macro: Option<String>,
     pub closing: Closing,
     effects: Vec<Effect>,
@@ -253,6 +255,7 @@ impl Model {
             device_form: DeviceForm::default(),
             profiles_form: ProfilesForm::default(),
             pending_rename: None,
+            onboard: OnboardForm::default(),
             pending_macro: None,
             closing: Closing::Open,
             effects: Vec::new(),
@@ -414,6 +417,7 @@ impl Model {
             Inbox::Connected => {
                 self.connection = Connection::Online;
                 self.state = None;
+                self.onboard.keyboard_changed();
                 self.starting_daemon = false;
                 match self.draft.as_mut().filter(|draft| draft.dirty()) {
                     Some(draft) => {
@@ -429,6 +433,7 @@ impl Model {
             Inbox::Disconnected(reason) => {
                 self.connection = Connection::Offline(reason);
                 self.state = None;
+                self.onboard.keyboard_changed();
                 self.frame = None;
                 self.pending_rename = None;
                 if let Some(draft) = self.draft.as_mut() {
@@ -455,6 +460,9 @@ impl Model {
     }
 
     fn request_failed(&mut self, request: Request, message: String) {
+        if self.onboard_request_failed(&request, &message) {
+            return;
+        }
         self.toast(message);
         match request {
             Request::SaveProfile { profile } => {
@@ -471,7 +479,7 @@ impl Model {
     }
 
     fn reply(&mut self, request: Request, reply: Reply) {
-        if self.settle_rename(&request, &reply) {
+        if self.settle_rename(&request, &reply) || self.settle_onboard(&request, &reply) {
             return;
         }
         match (request, reply) {
@@ -590,7 +598,12 @@ impl Model {
                     None => self.send(Request::GetProfile { name: active }),
                 }
             }
-            Event::DeviceState { state } => self.update_state(|current| current.device = state),
+            Event::DeviceState { state } => {
+                if self.state.as_ref().is_some_and(|current| current.device != state) {
+                    self.onboard.keyboard_changed();
+                }
+                self.update_state(|current| current.device = state);
+            }
             Event::WinLock { enabled } => self.update_state(|current| current.winlock = Some(enabled)),
             Event::DialMode { name } => self.update_state(|current| current.dial_mode = name),
             Event::Recording { state } => self.update_state(|current| current.recording = state),
