@@ -214,7 +214,11 @@ impl Server {
         let closing: Vec<ClientId> = self
             .sessions
             .iter()
-            .filter(|session| session.stage == Stage::Connected && !policy.allows(&session.exe))
+            .filter(|session| match session.stage {
+                Stage::Connected => !policy.allows(&session.exe),
+                Stage::Refused => policy.allows(&session.exe),
+                Stage::AwaitingHandshake => false,
+            })
             .map(|session| session.id)
             .collect();
         for &client in &closing {
@@ -1063,6 +1067,34 @@ mod tests {
         assert_eq!(server.sync(&mut host), [Output::Close { client: 2 }]);
         assert_eq!(host.clients.iter().map(|summary| summary.id).collect::<Vec<_>>(), [1, 3]);
         assert_eq!(exchange(&mut server, &mut host, 3, HANDSHAKE)[0]["result"]["state"], 4);
+    }
+
+    #[test]
+    fn a_refused_client_is_closed_once_its_exe_is_allowed_so_it_reconnects() {
+        let mut host = FakeHost {
+            policy: Policy { blocked: vec!["StreamDeck.exe".into(), "other.exe".into()], ..Policy::default() },
+            ..FakeHost::k100()
+        };
+        let mut server = Server::new(ServerConfig::default());
+        for (client, exe) in [(1, "StreamDeck.exe"), (2, "other.exe")] {
+            server.connect(client, exe.into(), &mut host);
+            assert_eq!(exchange(&mut server, &mut host, client, HANDSHAKE)[0]["result"]["state"], 4);
+        }
+        host.policy.blocked = vec!["other.exe".into()];
+        assert_eq!(server.sync(&mut host), [Output::Close { client: 1 }]);
+        assert_eq!(host.clients.iter().map(|summary| summary.id).collect::<Vec<_>>(), [2]);
+        assert!(server.sync(&mut host).is_empty(), "a still blocked refused client stays connected");
+    }
+
+    #[test]
+    fn re_enabling_the_sdk_closes_clients_refused_while_it_was_off() {
+        let mut host = FakeHost { policy: Policy { enabled: false, ..Policy::default() }, ..FakeHost::k100() };
+        let mut server = Server::new(ServerConfig::default());
+        server.connect(1, "game.exe".into(), &mut host);
+        assert_eq!(exchange(&mut server, &mut host, 1, HANDSHAKE)[0]["result"]["state"], 4);
+        assert!(server.sync(&mut host).is_empty());
+        host.policy.enabled = true;
+        assert_eq!(server.sync(&mut host), [Output::Close { client: 1 }]);
     }
 
     #[test]
