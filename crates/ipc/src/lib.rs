@@ -12,6 +12,6 @@ pub use framing::{MAX_LINE, read_message, write_message};
 pub use lock::{ALREADY_RUNNING, InstanceLock, startup_exit_code};
 pub use messages::{
     AudioState, DaemonState, DeviceState, Event, OnboardRequest, OnboardSlot, PROTOCOL_VERSION, Profile, Reply,
-    Request, SdkAccess, SdkClient, SdkState, SdkStatus,
+    Request, SdkAccess, SdkClient, SdkState, SdkStatus, sdk_client_text,
 };
 pub use settings::{Debounce, DialRing, MAX_DEBOUNCE_TIMEOUT, SdkSettings, Settings, SettingsPatch, WinLockShortcut};

@@ -191,6 +191,23 @@ pub struct SdkClient {
     pub refused: bool,
 }
 
+pub fn sdk_client_text(client: &SdkClient) -> String {
+    if client.refused {
+        return format!("{}: refused", client.exe);
+    }
+    let access = match client.access {
+        SdkAccess::Shared => "shared",
+        SdkAccess::ExclusiveLighting => "exclusive lighting",
+        SdkAccess::ExclusiveKeys => "exclusive G-keys",
+        SdkAccess::Exclusive => "exclusive lighting and G-keys",
+    };
+    if client.intercepted.is_empty() {
+        format!("{}: {access}", client.exe)
+    } else {
+        format!("{}: {access}, intercepts {}", client.exe, client.intercepted.join(" "))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct SdkState {
     pub status: SdkStatus,
@@ -322,6 +339,29 @@ mod tests {
         assert_eq!(serde_json::from_str::<Event>(&serde_json::to_string(&event).unwrap()).unwrap(), event);
         let block = Request::SdkBlock { exe: "x.exe".into(), blocked: true };
         assert_eq!(serde_json::to_string(&block).unwrap(), r#"{"type":"sdk_block","exe":"x.exe","blocked":true}"#);
+    }
+
+    #[test]
+    fn sdk_client_text_names_the_access_and_the_intercepted_keys() {
+        let client = |access, intercepted: &[&str], refused| SdkClient {
+            exe: "StreamDeck.exe".into(),
+            access,
+            priority: 128,
+            intercepted: intercepted.iter().map(|key| (*key).to_owned()).collect(),
+            refused,
+        };
+        let text = |access, intercepted: &[&str], refused| sdk_client_text(&client(access, intercepted, refused));
+        assert_eq!(text(SdkAccess::Shared, &[], false), "StreamDeck.exe: shared");
+        assert_eq!(text(SdkAccess::ExclusiveLighting, &[], false), "StreamDeck.exe: exclusive lighting");
+        assert_eq!(
+            text(SdkAccess::ExclusiveKeys, &["G1", "G2"], false),
+            "StreamDeck.exe: exclusive G-keys, intercepts G1 G2"
+        );
+        assert_eq!(
+            text(SdkAccess::Exclusive, &["G6"], false),
+            "StreamDeck.exe: exclusive lighting and G-keys, intercepts G6"
+        );
+        assert_eq!(text(SdkAccess::Shared, &[], true), "StreamDeck.exe: refused");
     }
 
     #[test]

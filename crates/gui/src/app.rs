@@ -4,8 +4,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Color32};
-use ipc::Client;
 use ipc::launcher::{LaunchError, Launched};
+use ipc::{Client, Request, SdkState, SdkStatus, sdk_client_text};
 
 use crate::io::{Backend, Connector, RETRY_INTERVAL};
 use crate::model::{Closing, Connection, Draft, Effect, Inbox, Model, Pane, device_text};
@@ -260,9 +260,9 @@ pub fn draft_bar(ui: &mut egui::Ui, model: &mut Model) {
     });
 }
 
-fn overview(ui: &mut egui::Ui, model: &Model) {
+fn overview(ui: &mut egui::Ui, model: &mut Model) {
     ui.heading("Overview");
-    let Some(state) = &model.state else { return };
+    let Some(state) = model.state.clone() else { return };
     egui::Grid::new("overview").num_columns(2).spacing([24.0, 6.0]).show(ui, |ui| {
         let mut row = |name: &str, value: String| {
             ui.label(name);
@@ -287,16 +287,46 @@ fn overview(ui: &mut egui::Ui, model: &Model) {
     for problem in &state.config_errors {
         ui.colored_label(Color32::LIGHT_RED, problem);
     }
+    sdk_section(ui, model, &state.sdk);
+}
+
+fn sdk_section(ui: &mut egui::Ui, model: &mut Model, sdk: &SdkState) {
+    let status = match &sdk.status {
+        SdkStatus::Unsupported => return,
+        SdkStatus::Off => "Off".to_owned(),
+        SdkStatus::Listening => "Listening for iCUE SDK apps".to_owned(),
+        SdkStatus::InUse => "In use by another program; k100d tries again every 10 s".to_owned(),
+        SdkStatus::Failed { reason } => format!("Failed: {reason}"),
+    };
+    ui.add_space(12.0);
+    ui.heading("iCUE SDK");
+    ui.label(status);
+    for client in &sdk.clients {
+        ui.horizontal(|ui| {
+            ui.label(sdk_client_text(client));
+            if ui.button(format!("Block {}", client.exe)).clicked() {
+                model.send(Request::SdkBlock { exe: client.exe.clone(), blocked: true });
+            }
+        });
+    }
+    for exe in &sdk.blocked {
+        ui.horizontal(|ui| {
+            ui.label(format!("{exe} is blocked"));
+            if ui.button(format!("Unblock {exe}")).clicked() {
+                model.send(Request::SdkBlock { exe: exe.clone(), blocked: false });
+            }
+        });
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use egui_kittest::kittest::{NodeT, Queryable};
-    use ipc::Request;
+    use ipc::SdkClient;
 
     use super::*;
     use crate::model::Effect;
-    use crate::testing::{harness, online};
+    use crate::testing::{harness, online, sent, streamdeck};
 
     #[test]
     fn the_offline_screen_offers_to_start_the_daemon_once() {
@@ -408,6 +438,62 @@ mod tests {
         harness.get_by_label("games");
         harness.get_by_label("80%");
         assert!(harness.get_all_by_label_contains("K100 RGB connected").count() >= 1);
+    }
+
+    fn with_sdk(status: SdkStatus, clients: Vec<SdkClient>, blocked: &[&str]) -> Model {
+        let mut model = online("default", &["default"]);
+        let blocked = blocked.iter().map(|exe| (*exe).to_owned()).collect();
+        model.state.as_mut().unwrap().sdk = SdkState { status, clients, blocked };
+        model
+    }
+
+    #[test]
+    fn the_overview_lists_sdk_clients_and_blocks_one() {
+        let model = with_sdk(SdkStatus::Listening, vec![streamdeck()], &[]);
+        let mut harness = harness(model, overview);
+        harness.run();
+        harness.get_by_label("iCUE SDK");
+        harness.get_by_label("Listening for iCUE SDK apps");
+        harness.get_by_label("StreamDeck.exe: exclusive G-keys, intercepts G1");
+        harness.get_by_label("Block StreamDeck.exe").click();
+        harness.run();
+        assert_eq!(sent(harness.state_mut()), [Request::SdkBlock { exe: "StreamDeck.exe".into(), blocked: true }]);
+    }
+
+    #[test]
+    fn blocked_exes_can_be_unblocked() {
+        let model = with_sdk(SdkStatus::Listening, vec![], &["bad.exe"]);
+        let mut harness = harness(model, overview);
+        harness.run();
+        harness.get_by_label("bad.exe is blocked");
+        harness.get_by_label("Unblock bad.exe").click();
+        harness.run();
+        assert_eq!(sent(harness.state_mut()), [Request::SdkBlock { exe: "bad.exe".into(), blocked: false }]);
+    }
+
+    #[test]
+    fn the_overview_says_when_another_program_owns_the_sdk_pipe() {
+        let mut harness = harness(with_sdk(SdkStatus::InUse, vec![], &[]), overview);
+        harness.run();
+        harness.get_by_label("In use by another program; k100d tries again every 10 s");
+    }
+
+    #[test]
+    fn the_overview_names_every_sdk_status() {
+        for (status, text) in
+            [(SdkStatus::Off, "Off"), (SdkStatus::Failed { reason: "denied".into() }, "Failed: denied")]
+        {
+            let mut harness = harness(with_sdk(status, vec![], &[]), overview);
+            harness.run();
+            harness.get_by_label(text);
+        }
+    }
+
+    #[test]
+    fn the_sdk_section_is_hidden_where_the_sdk_is_unsupported() {
+        let mut harness = harness(with_sdk(SdkStatus::Unsupported, vec![], &[]), overview);
+        harness.run();
+        assert!(harness.query_by_label("iCUE SDK").is_none());
     }
 
     #[test]

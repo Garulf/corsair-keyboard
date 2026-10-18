@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use clap::Subcommand;
-use ipc::{AudioState, Client, DaemonState, DeviceState, Profile, Reply, Request};
+use ipc::{AudioState, Client, DaemonState, DeviceState, Profile, Reply, Request, SdkState, SdkStatus};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -118,8 +118,25 @@ pub fn format_state(state: &DaemonState) -> String {
         AudioState::Capturing { device } => lines.push(format!("audio:      capturing ({device})")),
         AudioState::Failed { reason } => lines.push(format!("audio:      failed: {reason}")),
     }
+    lines.extend(sdk_lines(&state.sdk));
     lines.extend(state.config_errors.iter().map(|error| format!("config error: {error}")));
     lines.join("\n")
+}
+
+fn sdk_lines(sdk: &SdkState) -> Vec<String> {
+    let status = match &sdk.status {
+        SdkStatus::Unsupported => return Vec::new(),
+        SdkStatus::Off => "off".to_owned(),
+        SdkStatus::Listening => "listening".to_owned(),
+        SdkStatus::InUse => "in use by another program (k100d tries again every 10 s)".to_owned(),
+        SdkStatus::Failed { reason } => format!("failed: {reason}"),
+    };
+    let mut lines = vec![format!("icue sdk:   {status}")];
+    lines.extend(sdk.clients.iter().map(|client| format!("  {}", ipc::sdk_client_text(client))));
+    if !sdk.blocked.is_empty() {
+        lines.push(format!("  blocked: {}", sdk.blocked.join(", ")));
+    }
+    lines
 }
 
 pub fn key_list() -> String {
@@ -177,6 +194,36 @@ mod tests {
         assert!(format_state(&failed).contains("audio:      failed: no sink"));
         let recording = DaemonState { recording: actions::RecorderState::Recording { key: 131 }, ..state.clone() };
         assert!(format_state(&recording).contains("recording:  into g1"));
+        let streamdeck = ipc::SdkClient {
+            exe: "StreamDeck.exe".into(),
+            access: ipc::SdkAccess::ExclusiveKeys,
+            priority: 128,
+            intercepted: vec!["G1".into(), "G2".into()],
+            refused: false,
+        };
+        let sdk = ipc::SdkState {
+            status: ipc::SdkStatus::Listening,
+            clients: vec![streamdeck],
+            blocked: vec!["bad.exe".into()],
+        };
+        let listening = DaemonState { sdk, ..state.clone() };
+        let text = format_state(&listening);
+        assert!(
+            text.contains(
+                "icue sdk:   listening\n  StreamDeck.exe: exclusive G-keys, intercepts G1 G2\n  blocked: bad.exe"
+            ),
+            "{text}"
+        );
+        let sdk_status = |status| {
+            format_state(&DaemonState { sdk: ipc::SdkState { status, ..ipc::SdkState::default() }, ..state.clone() })
+        };
+        assert!(
+            sdk_status(ipc::SdkStatus::InUse)
+                .contains("icue sdk:   in use by another program (k100d tries again every 10 s)")
+        );
+        assert!(sdk_status(ipc::SdkStatus::Off).contains("icue sdk:   off"));
+        assert!(sdk_status(ipc::SdkStatus::Failed { reason: "denied".into() }).contains("icue sdk:   failed: denied"));
+        assert!(!format_state(&state).contains("icue sdk"), "Unsupported hides the line");
         let blocked = DaemonState { device: DeviceState::Blocked { processes: vec!["iCUE.exe".into()] }, ..state };
         let blocked_text = format_state(&blocked);
         assert!(blocked_text.contains("blocked by iCUE.exe"));
