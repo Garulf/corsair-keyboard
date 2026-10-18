@@ -126,22 +126,37 @@ mod polling {
     use std::io::{self, Read, Write};
     use std::time::{Duration, Instant};
 
-    use sdk::ProbePipe;
-
-    pub struct Peeked {
-        pub copied: usize,
-        pub total: usize,
-    }
+    use sdk::{FrameDecoder, ProbePipe};
 
     pub trait PeekStream: Read + Write {
-        fn peek(&mut self, buffer: &mut [u8]) -> io::Result<Peeked>;
+        fn available(&mut self) -> io::Result<usize>;
     }
-
-    const LENGTH_PREFIX: usize = 4;
 
     pub struct PollingPipe<S> {
         pub stream: S,
-        pub poll_interval: Duration,
+        decoder: FrameDecoder,
+        poll_interval: Duration,
+    }
+
+    impl<S: PeekStream> PollingPipe<S> {
+        pub fn new(stream: S, poll_interval: Duration) -> Self {
+            Self { stream, decoder: FrameDecoder::default(), poll_interval }
+        }
+
+        fn next_frame(&mut self) -> io::Result<Option<Vec<u8>>> {
+            self.decoder.next_frame().map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+        }
+
+        fn drain_available(&mut self) -> io::Result<bool> {
+            let available = self.stream.available()?;
+            if available == 0 {
+                return Ok(false);
+            }
+            let mut bytes = vec![0u8; available];
+            let count = self.stream.read(&mut bytes)?;
+            self.decoder.push(&bytes[..count]);
+            Ok(count > 0)
+        }
     }
 
     impl<S: PeekStream> ProbePipe for PollingPipe<S> {
@@ -153,8 +168,11 @@ mod polling {
         fn receive(&mut self, timeout: Duration) -> io::Result<Option<Vec<u8>>> {
             let deadline = Instant::now() + timeout;
             loop {
-                if let Some(payload) = self.take_frame()? {
+                if let Some(payload) = self.next_frame()? {
                     return Ok(Some(payload));
+                }
+                if self.drain_available()? {
+                    continue;
                 }
                 let remaining = deadline.saturating_duration_since(Instant::now());
                 if remaining.is_zero() {
@@ -162,29 +180,6 @@ mod polling {
                 }
                 std::thread::sleep(remaining.min(self.poll_interval));
             }
-        }
-    }
-
-    impl<S: PeekStream> PollingPipe<S> {
-        fn take_frame(&mut self) -> io::Result<Option<Vec<u8>>> {
-            let mut prefix = [0u8; LENGTH_PREFIX];
-            let peeked = self.stream.peek(&mut prefix)?;
-            if peeked.copied < LENGTH_PREFIX {
-                return Ok(None);
-            }
-            let length = u32::from_be_bytes(prefix) as usize;
-            if length > sdk::MAX_FRAME {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("frame of {length} bytes is over the limit"),
-                ));
-            }
-            if peeked.total < LENGTH_PREFIX + length {
-                return Ok(None);
-            }
-            let mut frame = vec![0u8; LENGTH_PREFIX + length];
-            self.stream.read_exact(&mut frame)?;
-            Ok(Some(frame.split_off(LENGTH_PREFIX)))
         }
     }
 }
@@ -198,7 +193,7 @@ mod named_pipe {
 
     use windows_sys::Win32::System::Pipes::PeekNamedPipe;
 
-    use super::polling::{PeekStream, Peeked, PollingPipe};
+    use super::polling::{PeekStream, PollingPipe};
     use super::{Result, pipe_path};
 
     const POLL_INTERVAL: Duration = Duration::from_millis(10);
@@ -222,15 +217,14 @@ mod named_pipe {
     }
 
     impl PeekStream for NamedPipe {
-        fn peek(&mut self, buffer: &mut [u8]) -> io::Result<Peeked> {
-            let (mut copied, mut total) = (0u32, 0u32);
-            let size = u32::try_from(buffer.len()).unwrap_or(u32::MAX);
+        fn available(&mut self) -> io::Result<usize> {
+            let mut total = 0u32;
             let peeked = unsafe {
                 PeekNamedPipe(
                     self.0.as_raw_handle(),
-                    buffer.as_mut_ptr().cast(),
-                    size,
-                    &mut copied,
+                    std::ptr::null_mut(),
+                    0,
+                    std::ptr::null_mut(),
                     &mut total,
                     std::ptr::null_mut(),
                 )
@@ -238,14 +232,14 @@ mod named_pipe {
             if peeked == 0 {
                 return Err(io::Error::last_os_error());
             }
-            Ok(Peeked { copied: copied as usize, total: total as usize })
+            Ok(total as usize)
         }
     }
 
     pub fn open(name: &str) -> Result<PollingPipe<NamedPipe>> {
         let path = pipe_path(name);
         match OpenOptions::new().read(true).write(true).open(&path) {
-            Ok(file) => Ok(PollingPipe { stream: NamedPipe(file), poll_interval: POLL_INTERVAL }),
+            Ok(file) => Ok(PollingPipe::new(NamedPipe(file), POLL_INTERVAL)),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 Err(format!("nothing serves {path}: start k100d or iCUE with its SDK turned on").into())
             }
@@ -256,35 +250,48 @@ mod named_pipe {
 
 #[cfg(test)]
 mod tests {
-    use super::polling::{PeekStream, Peeked, PollingPipe};
+    use super::polling::{PeekStream, PollingPipe};
     use super::*;
     use sdk::{Direction, Entry};
     use serde_json::json;
-    use std::cell::Cell;
+    use std::collections::VecDeque;
     use std::io::{self, Read, Write};
 
     struct Trickle {
-        incoming: Vec<u8>,
-        released: Cell<usize>,
-        read: usize,
+        waiting: VecDeque<Vec<u8>>,
+        current: Vec<u8>,
+        position: usize,
         written: Vec<u8>,
     }
 
     impl Trickle {
-        fn with(incoming: Vec<u8>) -> Self {
-            Self { incoming, released: Cell::new(0), read: 0, written: Vec::new() }
+        fn chunks(chunks: &[&[u8]]) -> Self {
+            let waiting = chunks.iter().map(|chunk| chunk.to_vec()).collect();
+            Self { waiting, current: Vec::new(), position: 0, written: Vec::new() }
         }
 
-        fn available(&self) -> &[u8] {
-            &self.incoming[self.read..self.released.get().min(self.incoming.len())]
+        fn frame_in_chunks(payload: &[u8]) -> Vec<Vec<u8>> {
+            let frame = sdk::encode_frame(payload);
+            vec![frame[..4].to_vec(), frame[4..].to_vec()]
+        }
+
+        fn unread(&mut self) -> &[u8] {
+            if self.position >= self.current.len()
+                && let Some(next) = self.waiting.pop_front()
+            {
+                self.current = next;
+                self.position = 0;
+            }
+            &self.current[self.position..]
         }
     }
 
     impl Read for Trickle {
         fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-            let count = self.available().len().min(buffer.len());
-            buffer[..count].copy_from_slice(&self.available()[..count]);
-            self.read += count;
+            let unread = self.unread();
+            let count = unread.len().min(buffer.len());
+            buffer[..count].copy_from_slice(&unread[..count]);
+            self.position += count;
             Ok(count)
         }
     }
@@ -301,58 +308,74 @@ mod tests {
     }
 
     impl PeekStream for Trickle {
-        fn peek(&mut self, buffer: &mut [u8]) -> io::Result<Peeked> {
-            self.released.set(self.released.get() + 1);
-            let available = self.available();
-            let copied = available.len().min(buffer.len());
-            buffer[..copied].copy_from_slice(&available[..copied]);
-            Ok(Peeked { copied, total: available.len() })
+        fn available(&mut self) -> io::Result<usize> {
+            Ok(self.unread().len())
         }
     }
 
     fn pipe_over(stream: Trickle) -> PollingPipe<Trickle> {
-        PollingPipe { stream, poll_interval: Duration::from_millis(1) }
+        PollingPipe::new(stream, Duration::from_millis(1))
+    }
+
+    fn separate_chunks(payloads: &[&[u8]]) -> Trickle {
+        let chunks: Vec<Vec<u8>> = payloads.iter().flat_map(|payload| Trickle::frame_in_chunks(payload)).collect();
+        Trickle::chunks(&chunks.iter().map(Vec::as_slice).collect::<Vec<_>>())
     }
 
     #[test]
-    fn a_frame_that_arrives_a_byte_at_a_time_is_read_whole() {
-        let mut pipe = pipe_over(Trickle::with(sdk::encode_frame(b"{\"method\":0}")));
+    fn a_frame_written_as_prefix_then_body_is_read_even_though_the_body_waits_for_the_prefix_to_be_read() {
+        let mut pipe = pipe_over(separate_chunks(&[b"{\"method\":0}"]));
         assert_eq!(pipe.receive(Duration::from_secs(5)).unwrap(), Some(b"{\"method\":0}".to_vec()));
     }
 
     #[test]
-    fn two_frames_in_the_pipe_come_out_one_at_a_time() {
+    fn two_frames_written_back_to_back_in_pieces_come_out_one_at_a_time() {
+        let mut pipe = pipe_over(separate_chunks(&[b"one", b"two"]));
+        assert_eq!(pipe.receive(Duration::from_secs(5)).unwrap(), Some(b"one".to_vec()));
+        assert_eq!(pipe.receive(Duration::from_secs(5)).unwrap(), Some(b"two".to_vec()));
+    }
+
+    #[test]
+    fn a_frame_that_arrives_a_byte_at_a_time_is_read_whole() {
+        let frame = sdk::encode_frame(b"{\"method\":0}");
+        let bytes: Vec<&[u8]> = frame.chunks(1).collect();
+        let mut pipe = pipe_over(Trickle::chunks(&bytes));
+        assert_eq!(pipe.receive(Duration::from_secs(5)).unwrap(), Some(b"{\"method\":0}".to_vec()));
+    }
+
+    #[test]
+    fn two_frames_in_one_chunk_come_out_one_at_a_time() {
         let both = [sdk::encode_frame(b"one"), sdk::encode_frame(b"two")].concat();
-        let mut pipe = pipe_over(Trickle::with(both));
+        let mut pipe = pipe_over(Trickle::chunks(&[&both]));
         assert_eq!(pipe.receive(Duration::from_secs(5)).unwrap(), Some(b"one".to_vec()));
         assert_eq!(pipe.receive(Duration::from_secs(5)).unwrap(), Some(b"two".to_vec()));
     }
 
     #[test]
     fn an_empty_pipe_times_out_with_none() {
-        let mut pipe = pipe_over(Trickle::with(Vec::new()));
+        let mut pipe = pipe_over(Trickle::chunks(&[]));
         assert_eq!(pipe.receive(Duration::from_millis(5)).unwrap(), None);
     }
 
     #[test]
-    fn a_half_frame_times_out_with_none_and_is_not_consumed() {
-        let mut frame = sdk::encode_frame(b"abcdef");
-        frame.truncate(6);
-        let mut pipe = pipe_over(Trickle::with(frame));
+    fn a_half_frame_times_out_with_none_and_the_rest_completes_it_later() {
+        let frame = sdk::encode_frame(b"abcdef");
+        let mut pipe = pipe_over(Trickle::chunks(&[&frame[..7]]));
         assert_eq!(pipe.receive(Duration::from_millis(5)).unwrap(), None);
-        assert_eq!(pipe.stream.read, 0);
+        pipe.stream.waiting.push_back(frame[7..].to_vec());
+        assert_eq!(pipe.receive(Duration::from_secs(5)).unwrap(), Some(b"abcdef".to_vec()));
     }
 
     #[test]
     fn a_length_over_the_limit_is_an_error() {
-        let mut pipe = pipe_over(Trickle::with(vec![0xFF; 4]));
+        let mut pipe = pipe_over(Trickle::chunks(&[&[0xFF; 4]]));
         let error = pipe.receive(Duration::from_secs(1)).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     }
 
     #[test]
     fn sending_writes_the_length_prefix_and_the_payload_in_one_write() {
-        let mut pipe = pipe_over(Trickle::with(Vec::new()));
+        let mut pipe = pipe_over(Trickle::chunks(&[]));
         pipe.send(b"{}").unwrap();
         assert_eq!(pipe.stream.written, [0, 0, 0, 2, b'{', b'}']);
     }

@@ -65,7 +65,7 @@ impl Default for ProbeOptions {
             write: false,
             listen: Duration::from_secs(15),
             pid: 0,
-            handshake_timeout: Duration::from_secs(60),
+            handshake_timeout: Duration::from_secs(120),
             reply_timeout: Duration::from_secs(5),
         }
     }
@@ -139,7 +139,9 @@ impl Probe<'_> {
     }
 
     fn handshake(&mut self) -> io::Result<bool> {
-        (self.on_progress)("waiting for the server to accept (iCUE may be asking you to allow access)");
+        (self.on_progress)(
+            "waiting for the server to accept (if iCUE shows an approval dialog for this program, click Allow)",
+        );
         let params = json!({"pid": self.options.pid, "clientVersion": CLIENT_VERSION});
         let timeout = self.options.handshake_timeout;
         let reply = self.exchange(Method::Handshake, HANDSHAKE_CODE, params, timeout)?;
@@ -730,11 +732,23 @@ mod tests {
         let mut pipe = ServerPipe::new(FakeHost::k100());
         let mut lines: Vec<String> = Vec::new();
         run_probe_until(&mut pipe, &quiet(), &|| false, &mut || {}, &mut |line| lines.push(line.into()));
-        assert_eq!(lines[0], "waiting for the server to accept (iCUE may be asking you to allow access)");
+        assert_eq!(
+            lines[0],
+            "waiting for the server to accept (if iCUE shows an approval dialog for this program, click Allow)"
+        );
         assert_eq!(lines.len(), 4, "{lines:?}");
         let mut write_lines: Vec<String> = Vec::new();
         let options = ProbeOptions { write: true, ..quiet() };
         run_probe_until(&mut pipe, &options, &|| false, &mut || {}, &mut |line| write_lines.push(line.into()));
         assert_eq!(write_lines.len(), 5, "{write_lines:?}");
+    }
+
+    #[test]
+    fn the_defaults_wait_two_minutes_for_the_handshake_and_five_seconds_for_replies() {
+        let options = ProbeOptions::default();
+        assert_eq!(
+            (options.handshake_timeout, options.reply_timeout),
+            (Duration::from_secs(120), Duration::from_secs(5))
+        );
     }
 }
