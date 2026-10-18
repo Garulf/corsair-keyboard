@@ -91,7 +91,17 @@ impl Trace {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
+        if std::fs::metadata(&self.path).is_ok_and(|metadata| metadata.len() >= self.limit) {
+            std::fs::rename(&self.path, self.old_path())?;
+        }
         OpenOptions::new().create(true).append(true).open(&self.path)
+    }
+
+    fn old_path(&self) -> PathBuf {
+        match self.path.extension() {
+            Some(extension) => self.path.with_extension(format!("old.{}", extension.display())),
+            None => self.path.with_extension("old"),
+        }
     }
 }
 
@@ -140,6 +150,33 @@ mod tests {
         assert!((1000..1300).contains(&size), "{size}");
         trace.record(1, "game.exe", Direction::Out, PAYLOAD);
         assert_eq!(std::fs::metadata(&path).unwrap().len(), size, "nothing is written after the notice");
+    }
+
+    #[test]
+    fn a_full_trace_is_moved_aside_when_tracing_starts_so_a_fresh_one_records() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("sdk-trace.jsonl");
+        let old = temp.path().join("sdk-trace.old.jsonl");
+        let full = "x".repeat(1000);
+        std::fs::write(&path, &full).unwrap();
+        std::fs::write(&old, "an older trace").unwrap();
+        let mut trace = Trace::with_limit(path.clone(), 1000);
+        trace.record(1, "game.exe", Direction::In, PAYLOAD);
+        assert_eq!(std::fs::read_to_string(&old).unwrap(), full);
+        let written = lines(&path);
+        assert_eq!(written.len(), 1);
+        assert_eq!(written[0]["message"]["method"], 0);
+    }
+
+    #[test]
+    fn a_trace_under_its_limit_is_appended_to_when_tracing_starts() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("sdk-trace.jsonl");
+        std::fs::write(&path, "{}\n").unwrap();
+        let mut trace = Trace::with_limit(path.clone(), 1000);
+        trace.record(1, "game.exe", Direction::In, PAYLOAD);
+        assert_eq!(lines(&path).len(), 2);
+        assert!(!temp.path().join("sdk-trace.old.jsonl").exists());
     }
 
     #[test]
