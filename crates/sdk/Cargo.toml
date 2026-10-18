@@ -7,6 +7,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+engine.workspace = true
 k100.workspace = true
 serde.workspace = true
 serde_json.workspace = true
