@@ -1,6 +1,6 @@
 use std::io;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -13,6 +13,7 @@ use crate::sdk_server::SdkCommand;
 use crate::sdk_server::client::{AcceptedClient, serve_client};
 
 pub const IN_USE_RETRY: Duration = Duration::from_secs(10);
+pub const MAX_CLIENTS: usize = 32;
 const CLIENT_POLL: Duration = Duration::from_millis(500);
 const STEP: Duration = Duration::from_millis(100);
 
@@ -43,7 +44,16 @@ pub fn listen_with<F: PipeFactory>(
     stop: Arc<AtomicBool>,
     retry: Duration,
 ) {
-    let mut listener = Listener { commands, enabled, stop, retry, next_client: 1, off_reported: false };
+    let mut listener = Listener {
+        commands,
+        enabled,
+        stop,
+        retry,
+        next_client: 1,
+        off_reported: false,
+        live: Arc::default(),
+        refusing: false,
+    };
     let mut pending: Option<F::Instance> = None;
     while !listener.stopped() {
         if !listener.enabled() {
@@ -55,7 +65,7 @@ pub fn listen_with<F: PipeFactory>(
         listener.off_reported = false;
         let mut instance = match pending.take() {
             Some(instance) => instance,
-            None => match factory.create(true) {
+            None => match factory.create(!listener.holds_instances()) {
                 Ok(instance) => {
                     listener.report(SdkStatus::Listening);
                     instance
@@ -68,6 +78,7 @@ pub fn listen_with<F: PipeFactory>(
             },
         };
         match instance.wait_for_client(CLIENT_POLL) {
+            Ok(true) if !listener.enabled() => continue,
             Ok(true) => {}
             Ok(false) => {
                 pending = Some(instance);
@@ -80,7 +91,11 @@ pub fn listen_with<F: PipeFactory>(
             }
         }
         pending = factory.create(false).map_err(|error| listener.report(status_of(error))).ok();
-        listener.serve(instance);
+        if listener.full() {
+            listener.refuse(instance);
+        } else {
+            listener.serve(instance);
+        }
         if pending.is_none() {
             listener.pause();
         }
@@ -101,6 +116,23 @@ struct Listener {
     retry: Duration,
     next_client: ClientId,
     off_reported: bool,
+    live: Arc<AtomicUsize>,
+    refusing: bool,
+}
+
+struct LiveInstance(Arc<AtomicUsize>);
+
+impl LiveInstance {
+    fn new(live: &Arc<AtomicUsize>) -> Self {
+        live.fetch_add(1, Ordering::SeqCst);
+        Self(live.clone())
+    }
+}
+
+impl Drop for LiveInstance {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 impl Listener {
@@ -134,12 +166,30 @@ impl Listener {
         }
     }
 
+    fn holds_instances(&self) -> bool {
+        self.live.load(Ordering::SeqCst) > 0
+    }
+
+    fn full(&self) -> bool {
+        self.live.load(Ordering::SeqCst) >= MAX_CLIENTS
+    }
+
+    fn refuse(&mut self, instance: impl PipeInstance) {
+        if !self.refusing {
+            self.refusing = true;
+            eprintln!("k100d: refusing iCUE SDK clients beyond {MAX_CLIENTS} connections");
+        }
+        drop(instance);
+    }
+
     fn serve(&mut self, instance: impl PipeInstance) {
+        self.refusing = false;
+        let live = LiveInstance::new(&self.live);
         match instance.accept() {
             Ok(accepted) => {
                 let client = self.next_client;
                 self.next_client += 1;
-                serve_client(client, accepted, self.commands.clone());
+                serve_client(client, accepted, self.commands.clone(), live);
             }
             Err(error) => eprintln!("k100d: could not accept an iCUE SDK client: {error}"),
         }
@@ -151,7 +201,7 @@ mod tests {
     use std::collections::VecDeque;
     use std::io;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::sync::mpsc::{self, Receiver};
+    use std::sync::mpsc::{self, Receiver, SyncSender};
     use std::sync::{Arc, Mutex};
     use std::thread::{self, JoinHandle};
     use std::time::{Duration, Instant};
@@ -163,12 +213,18 @@ mod tests {
     use crate::sdk_server::SdkCommand;
     use crate::sdk_server::client::AcceptedClient;
 
+    type Hook = Box<dyn FnOnce() + Send>;
+
     #[derive(Clone, Default)]
     struct Script {
         outcomes: Arc<Mutex<VecDeque<Result<(), CreateError>>>>,
         clients: Arc<Mutex<VecDeque<AcceptedClient>>>,
         creates: Arc<Mutex<Vec<bool>>>,
         dropped: Arc<AtomicUsize>,
+        refused: Arc<AtomicUsize>,
+        wait_failures: Arc<AtomicUsize>,
+        hang_ups: Arc<AtomicUsize>,
+        on_client: Arc<Mutex<Option<Hook>>>,
     }
 
     impl Script {
@@ -180,6 +236,23 @@ mod tests {
 
         fn creates(&self) -> Vec<bool> {
             self.creates.lock().unwrap().clone()
+        }
+
+        fn client(&self, exe: &str) -> AcceptedClient {
+            let hang_ups = self.hang_ups.clone();
+            AcceptedClient {
+                exe: exe.into(),
+                reader: Box::new(io::empty()),
+                writer: Box::new(io::sink()),
+                hang_up: Arc::new(move || {
+                    hang_ups.fetch_add(1, Ordering::SeqCst);
+                }),
+            }
+        }
+
+        fn queue(&self, exe: &str) {
+            let client = self.client(exe);
+            self.clients.lock().unwrap().push_back(client);
         }
     }
 
@@ -193,6 +266,9 @@ mod tests {
     impl Drop for FakeInstance {
         fn drop(&mut self) {
             self.script.dropped.fetch_add(1, Ordering::SeqCst);
+            if self.client.is_some() {
+                self.script.refused.fetch_add(1, Ordering::SeqCst);
+            }
         }
     }
 
@@ -209,23 +285,22 @@ mod tests {
     impl PipeInstance for FakeInstance {
         fn wait_for_client(&mut self, timeout: Duration) -> io::Result<bool> {
             self.client = self.script.clients.lock().unwrap().pop_front();
-            if self.client.is_none() {
-                thread::sleep(timeout.min(Duration::from_millis(5)));
+            if self.client.is_some() {
+                if let Some(hook) = self.script.on_client.lock().unwrap().take() {
+                    hook();
+                }
+                return Ok(true);
             }
-            Ok(self.client.is_some())
+            let failures = &self.script.wait_failures;
+            if failures.try_update(Ordering::SeqCst, Ordering::SeqCst, |left| left.checked_sub(1)).is_ok() {
+                return Err(io::Error::other("the client left before the connect"));
+            }
+            thread::sleep(timeout.min(Duration::from_millis(5)));
+            Ok(false)
         }
 
         fn accept(mut self) -> io::Result<AcceptedClient> {
             self.client.take().ok_or_else(|| io::Error::other("no client"))
-        }
-    }
-
-    fn client(exe: &str) -> AcceptedClient {
-        AcceptedClient {
-            exe: exe.into(),
-            reader: Box::new(io::empty()),
-            writer: Box::new(io::sink()),
-            hang_up: Box::new(|| {}),
         }
     }
 
@@ -247,14 +322,29 @@ mod tests {
             }
         }
 
-        fn next_connected(&self) -> (ClientId, String) {
+        fn next_connection(&self) -> (ClientId, String, SyncSender<Vec<u8>>) {
             loop {
-                if let Command::Sdk(SdkCommand::Connected { client, exe, .. }) =
+                if let Command::Sdk(SdkCommand::Connected { client, exe, outbox, .. }) =
                     self.commands.recv_timeout(Duration::from_secs(5)).unwrap()
                 {
-                    return (client, exe);
+                    return (client, exe, outbox);
                 }
             }
+        }
+
+        fn next_connected(&self) -> (ClientId, String) {
+            let (client, exe, _) = self.next_connection();
+            (client, exe)
+        }
+
+        fn connected_within(&self, window: Duration) -> bool {
+            let deadline = Instant::now() + window;
+            while let Ok(command) = self.commands.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                if matches!(command, Command::Sdk(SdkCommand::Connected { .. })) {
+                    return true;
+                }
+            }
+            false
         }
 
         fn finish(self) {
@@ -271,6 +361,14 @@ mod tests {
         let (gate, flag) = (enabled.clone(), stop.clone());
         let thread = thread::spawn(move || listen_with(factory, sender, gate, flag, Duration::from_millis(10)));
         Running { commands, enabled, stop, thread }
+    }
+
+    fn wait_until(what: &str, done: impl Fn() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !done() {
+            assert!(Instant::now() < deadline, "timed out waiting until {what}");
+            thread::sleep(Duration::from_millis(2));
+        }
     }
 
     #[test]
@@ -296,7 +394,8 @@ mod tests {
     #[test]
     fn each_client_gets_its_own_instance_and_id() {
         let script = Script::default();
-        script.clients.lock().unwrap().extend([client("a.exe"), client("b.exe")]);
+        script.queue("a.exe");
+        script.queue("b.exe");
         let running = start(&script, true);
         assert_eq!(running.next_connected(), (1, "a.exe".into()));
         assert_eq!(running.next_connected(), (2, "b.exe".into()));
@@ -327,6 +426,68 @@ mod tests {
         running.enabled.store(false, Ordering::SeqCst);
         assert_eq!(running.next_status(), SdkStatus::Off);
         assert_eq!(script.dropped.load(Ordering::SeqCst), 1, "the pending instance is let go");
+        running.finish();
+    }
+
+    #[test]
+    fn a_client_that_arrives_as_the_sdk_is_disabled_is_hung_up_unaccepted() {
+        let script = Script::default();
+        let running = start(&script, true);
+        assert_eq!(running.next_status(), SdkStatus::Listening);
+        let gate = running.enabled.clone();
+        *script.on_client.lock().unwrap() = Some(Box::new(move || gate.store(false, Ordering::SeqCst)));
+        script.queue("late.exe");
+        let mut seen = Vec::new();
+        loop {
+            match running.commands.recv_timeout(Duration::from_secs(5)).unwrap() {
+                Command::Sdk(SdkCommand::Status(SdkStatus::Off)) => break,
+                Command::Sdk(SdkCommand::Connected { exe, .. }) => seen.push(exe),
+                _ => {}
+            }
+        }
+        assert_eq!(seen, Vec::<String>::new());
+        assert_eq!(script.refused.load(Ordering::SeqCst), 1);
+        assert_eq!(script.creates(), [true], "no instance is made for the next client while off");
+        running.finish();
+    }
+
+    #[test]
+    fn an_instance_error_while_our_clients_hold_instances_does_not_ask_for_the_first_instance() {
+        let script = Script::default();
+        script.queue("a.exe");
+        script.wait_failures.store(1, Ordering::SeqCst);
+        let running = start(&script, true);
+        assert_eq!(running.next_status(), SdkStatus::Listening);
+        let (_, _, outbox) = running.next_connection();
+        assert!(matches!(running.next_status(), SdkStatus::Failed { .. }));
+        assert_eq!(running.next_status(), SdkStatus::Listening);
+        assert_eq!(script.creates(), [true, false, false]);
+
+        drop(outbox);
+        wait_until("the client's writer hangs up", || script.hang_ups.load(Ordering::SeqCst) == 1);
+        script.wait_failures.store(1, Ordering::SeqCst);
+        assert!(matches!(running.next_status(), SdkStatus::Failed { .. }));
+        assert_eq!(running.next_status(), SdkStatus::Listening);
+        assert_eq!(script.creates(), [true, false, false, true], "none of ours is left, so the next is the first");
+        running.finish();
+    }
+
+    #[test]
+    fn clients_beyond_the_limit_are_hung_up_at_accept() {
+        let script = Script::default();
+        for index in 0..=MAX_CLIENTS {
+            script.queue(&format!("{index}.exe"));
+        }
+        let running = start(&script, true);
+        let mut outboxes: Vec<_> = (0..MAX_CLIENTS).map(|_| running.next_connection().2).collect();
+        wait_until("the extra client is refused", || script.refused.load(Ordering::SeqCst) == 1);
+        assert!(!running.connected_within(Duration::from_millis(100)));
+
+        outboxes.pop();
+        wait_until("the client's writer hangs up", || script.hang_ups.load(Ordering::SeqCst) == 1);
+        script.queue("next.exe");
+        let (client, exe, _outbox) = running.next_connection();
+        assert_eq!((client, exe.as_str()), (MAX_CLIENTS as ClientId + 1, "next.exe"));
         running.finish();
     }
 }

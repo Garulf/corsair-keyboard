@@ -22,9 +22,11 @@ use crate::sdk_server::trace::{Direction, Trace};
 
 pub const OUTBOX_QUEUE: usize = 256;
 
+pub type HangUp = Arc<dyn Fn() + Send + Sync>;
+
 pub enum SdkCommand {
     Status(ipc::SdkStatus),
-    Connected { client: ClientId, exe: String, outbox: SyncSender<Vec<u8>> },
+    Connected { client: ClientId, exe: String, outbox: SyncSender<Vec<u8>>, hang_up: HangUp },
     Message { client: ClientId, payload: Vec<u8> },
     Disconnected { client: ClientId },
 }
@@ -32,6 +34,7 @@ pub enum SdkCommand {
 struct Outbox {
     exe: String,
     sender: SyncSender<Vec<u8>>,
+    hang_up: HangUp,
 }
 
 pub struct SdkBridge {
@@ -49,8 +52,13 @@ impl SdkBridge {
     pub fn handle(&mut self, command: SdkCommand, controller: &mut Controller) {
         match command {
             SdkCommand::Status(status) => controller.set_sdk_status(status),
-            SdkCommand::Connected { client, exe, outbox } => {
-                self.outboxes.insert(client, Outbox { exe: exe.clone(), sender: outbox });
+            SdkCommand::Connected { client, exe, outbox, hang_up } => {
+                if !controller.sdk_settings().enabled {
+                    drop(outbox);
+                    hang_up();
+                    return;
+                }
+                self.outboxes.insert(client, Outbox { exe: exe.clone(), sender: outbox, hang_up });
                 self.server.connect(client, exe, controller);
             }
             SdkCommand::Message { client, payload } => {
@@ -95,7 +103,10 @@ impl SdkBridge {
     }
 
     fn drop_client(&mut self, client: ClientId, controller: &mut Controller) {
-        self.outboxes.remove(&client);
+        if let Some(outbox) = self.outboxes.remove(&client) {
+            drop(outbox.sender);
+            (outbox.hang_up)();
+        }
         self.server.disconnect(client, controller);
     }
 
@@ -131,7 +142,7 @@ pub fn with_device_id(config: &ConfigDir, mut settings: Settings) -> Settings {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::mpsc::{Receiver, RecvTimeoutError, sync_channel};
     use std::time::Duration;
 
@@ -187,6 +198,7 @@ mod tests {
         replies: Receiver<Vec<u8>>,
         config: ConfigDir,
         enabled: Arc<AtomicBool>,
+        hang_ups: Arc<AtomicUsize>,
         _temp: tempfile::TempDir,
     }
 
@@ -227,8 +239,13 @@ mod tests {
         controller.attach(Box::new(NullLink), link_info(), Duration::ZERO);
         let mut bridge = SdkBridge::new(sdk::ServerConfig::default(), config.sdk_trace_path(), enabled.clone());
         let (outbox, replies) = sync_channel(queue);
-        bridge.handle(SdkCommand::Connected { client, exe: exe.into(), outbox }, &mut controller);
-        Rig { bridge, controller, replies, config, enabled, _temp: temp }
+        let hang_ups = Arc::new(AtomicUsize::new(0));
+        let counter = hang_ups.clone();
+        let hang_up: HangUp = Arc::new(move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+        });
+        bridge.handle(SdkCommand::Connected { client, exe: exe.into(), outbox, hang_up }, &mut controller);
+        Rig { bridge, controller, replies, config, enabled, hang_ups, _temp: temp }
     }
 
     fn bridge_with_client_queue(client: ClientId, queue: usize) -> Rig {
@@ -280,6 +297,26 @@ mod tests {
     }
 
     #[test]
+    fn a_dropped_client_is_hung_up_even_when_its_writer_is_stuck() {
+        let mut rig = bridge_with_client_queue(1, 1);
+        rig.send(1, HANDSHAKE);
+        assert_eq!(rig.hang_ups.load(Ordering::SeqCst), 0);
+        rig.send(1, HANDSHAKE);
+        assert_eq!(rig.hang_ups.load(Ordering::SeqCst), 1, "a client that stopped reading never sees its outbox close");
+        rig.bridge.handle(SdkCommand::Disconnected { client: 1 }, &mut rig.controller);
+        assert_eq!(rig.hang_ups.load(Ordering::SeqCst), 1, "a client already dropped is not hung up again");
+    }
+
+    #[test]
+    fn a_client_that_connects_while_the_sdk_is_off_is_hung_up_at_once() {
+        let off = sdk_settings(SdkSettings { enabled: false, ..SdkSettings::default() });
+        let rig = rig_with(off, 1, "game.exe", OUTBOX_QUEUE);
+        assert!(matches!(rig.replies.recv_timeout(Duration::from_millis(100)), Err(RecvTimeoutError::Disconnected)));
+        assert!(rig.controller.state().sdk.clients.is_empty());
+        assert_eq!(rig.hang_ups.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
     fn blocking_an_exe_closes_its_connection_and_is_saved() {
         let mut rig = bridge_with_config_and_client(1, "StreamDeck.exe");
         rig.send(1, HANDSHAKE);
@@ -290,6 +327,7 @@ mod tests {
         assert!(matches!(rig.replies.recv_timeout(Duration::from_secs(1)), Err(RecvTimeoutError::Disconnected)));
         assert_eq!(rig.config.load_settings().unwrap().sdk.blocked, ["streamdeck.exe"]);
         assert!(rig.controller.state().sdk.clients.is_empty());
+        assert_eq!(rig.hang_ups.load(Ordering::SeqCst), 1);
     }
 
     #[test]

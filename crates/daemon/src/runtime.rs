@@ -494,7 +494,10 @@ mod tests {
         ) {}
 
         let (outbox, replies) = mpsc::sync_channel(OUTBOX_QUEUE);
-        sender.send(Command::Sdk(SdkCommand::Connected { client: 1, exe: "StreamDeck.exe".into(), outbox })).unwrap();
+        let hang_up = Arc::new(|| {});
+        sender
+            .send(Command::Sdk(SdkCommand::Connected { client: 1, exe: "StreamDeck.exe".into(), outbox, hang_up }))
+            .unwrap();
         let messages = [
             r#"{"method":0,"code":-1,"params":{"pid":1,"clientVersion":"4.0.84"}}"#.to_owned(),
             format!(r#"{{"method":12,"code":1,"params":{{"deviceId":"{DEVICE}","accessLevel":3}}}}"#),

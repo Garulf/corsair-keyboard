@@ -1,11 +1,12 @@
 use std::io::{ErrorKind, Read, Write};
+use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, sync_channel};
 use std::thread;
 
 use sdk::{ClientId, FrameDecoder, encode_frame};
 
 use crate::runtime::Command;
-use crate::sdk_server::{OUTBOX_QUEUE, SdkCommand};
+use crate::sdk_server::{HangUp, OUTBOX_QUEUE, SdkCommand};
 
 const READ_CHUNK: usize = 64 * 1024;
 
@@ -13,23 +14,33 @@ pub struct AcceptedClient {
     pub exe: String,
     pub reader: Box<dyn Read + Send>,
     pub writer: Box<dyn Write + Send>,
-    pub hang_up: Box<dyn FnOnce() + Send>,
+    pub hang_up: HangUp,
 }
 
-pub fn serve_client(client: ClientId, accepted: AcceptedClient, commands: Sender<Command>) {
+pub fn serve_client<Live: Send + Sync + 'static>(
+    client: ClientId,
+    accepted: AcceptedClient,
+    commands: Sender<Command>,
+    live: Live,
+) {
     let AcceptedClient { exe, reader, writer, hang_up } = accepted;
     let (outbox, queue) = sync_channel(OUTBOX_QUEUE);
-    if commands.send(Command::Sdk(SdkCommand::Connected { client, exe, outbox })).is_err() {
+    let connected = SdkCommand::Connected { client, exe, outbox, hang_up: hang_up.clone() };
+    if commands.send(Command::Sdk(connected)).is_err() {
         hang_up();
         return;
     }
+    let live = Arc::new(live);
+    let reader_live = live.clone();
     thread::spawn(move || {
         read_frames(client, reader, &commands);
         let _ = commands.send(Command::Sdk(SdkCommand::Disconnected { client }));
+        drop(reader_live);
     });
     thread::spawn(move || {
         write_frames(writer, queue);
         hang_up();
+        drop(live);
     });
 }
 
@@ -90,7 +101,7 @@ mod tests {
             exe: "game.exe".into(),
             reader: Box::new(stream.try_clone().unwrap()),
             writer: Box::new(stream.try_clone().unwrap()),
-            hang_up: Box::new(move || {
+            hang_up: Arc::new(move || {
                 let _ = closer.shutdown(Shutdown::Both);
             }),
         }
@@ -108,13 +119,47 @@ mod tests {
         commands: &mpsc::Sender<Command>,
         receiver: &Receiver<Command>,
     ) -> (UnixStream, SyncSender<Vec<u8>>) {
+        let (peer, outbox, _) = connect_with_hang_up(client, commands, receiver, ());
+        (peer, outbox)
+    }
+
+    fn connect_with_hang_up<Live: Send + Sync + 'static>(
+        client: ClientId,
+        commands: &mpsc::Sender<Command>,
+        receiver: &Receiver<Command>,
+        live: Live,
+    ) -> (UnixStream, SyncSender<Vec<u8>>, HangUp) {
         let (ours, theirs) = UnixStream::pair().unwrap();
-        serve_client(client, accepted(&ours), commands.clone());
-        let SdkCommand::Connected { client: connected, exe, outbox } = next_sdk(receiver) else {
+        serve_client(client, accepted(&ours), commands.clone(), live);
+        let SdkCommand::Connected { client: connected, exe, outbox, hang_up } = next_sdk(receiver) else {
             panic!("expected a connection")
         };
         assert_eq!((connected, exe.as_str()), (client, "game.exe"));
-        (theirs, outbox)
+        (theirs, outbox, hang_up)
+    }
+
+    struct Live(mpsc::Sender<()>);
+
+    impl Drop for Live {
+        fn drop(&mut self) {
+            let _ = self.0.send(());
+        }
+    }
+
+    #[test]
+    fn the_hang_up_handle_frees_a_writer_stuck_on_a_client_that_never_reads() {
+        let (commands, receiver) = mpsc::channel();
+        let (ended, end) = mpsc::channel();
+        let (_peer, outbox, hang_up) = connect_with_hang_up(1, &commands, &receiver, Live(ended));
+        for _ in 0..16 {
+            outbox.send(vec![b'x'; 1024 * 1024]).unwrap();
+        }
+        std::thread::sleep(Duration::from_millis(200));
+        drop(outbox);
+        assert!(end.recv_timeout(Duration::from_millis(300)).is_err(), "the writer is stuck in write");
+        hang_up();
+        assert!(matches!(next_sdk(&receiver), SdkCommand::Disconnected { client: 1 }));
+        end.recv_timeout(Duration::from_secs(5)).expect("both client threads end");
     }
 
     #[test]

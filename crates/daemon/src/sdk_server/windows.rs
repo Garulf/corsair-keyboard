@@ -189,12 +189,16 @@ impl PipeInstance for NamedPipeInstance {
         let closed = Arc::new(AtomicBool::new(false));
         let reader = PipeReader(PipeHalf::new(&handle, &closed)?);
         let writer = PipeWriter(PipeHalf::new(&handle, &closed)?);
+        let handle = Arc::downgrade(&handle);
         let hang_up = move || {
             closed.store(true, Ordering::SeqCst);
-            // SAFETY: the Arc this closure holds keeps the handle open for the call.
-            unsafe { CancelIoEx(handle.as_raw_handle(), null()) };
+            if let Some(handle) = handle.upgrade() {
+                // SAFETY: the upgraded Arc keeps the handle open for the call; each cancelled operation is waited for
+                // by the half that started it before its OVERLAPPED is freed.
+                unsafe { CancelIoEx(handle.as_raw_handle(), null()) };
+            }
         };
-        Ok(AcceptedClient { exe, reader: Box::new(reader), writer: Box::new(writer), hang_up: Box::new(hang_up) })
+        Ok(AcceptedClient { exe, reader: Box::new(reader), writer: Box::new(writer), hang_up: Arc::new(hang_up) })
     }
 }
 
@@ -551,6 +555,30 @@ mod tests {
         let mut received = Vec::new();
         pipe.read_to_end(&mut received).unwrap();
         assert_eq!(received, sdk::encode_frame(b"bye"));
+        serving.finish();
+    }
+
+    #[test]
+    fn a_client_that_never_reads_is_hung_up_while_the_writer_is_blocked() {
+        let name = test_pipe("never-reads");
+        let serving = Serving::start(&name);
+        let mut pipe = open_when_listening(&name);
+        let Command::Sdk(SdkCommand::Connected { outbox, hang_up, .. }) = next_sdk(&serving.commands) else {
+            panic!("expected a connection")
+        };
+        for _ in 0..4 {
+            outbox.send(vec![b'x'; 256 * 1024]).unwrap();
+        }
+        thread::sleep(Duration::from_millis(300));
+        drop(outbox);
+        hang_up();
+        drop(hang_up);
+        assert!(matches!(next_sdk(&serving.commands), Command::Sdk(SdkCommand::Disconnected { .. })));
+        let deadline = Instant::now() + PATIENCE;
+        while pipe.write_all(&sdk::encode_frame(HANDSHAKE)).is_ok() {
+            assert!(Instant::now() < deadline, "the server end of the pipe stayed open");
+            thread::sleep(Duration::from_millis(20));
+        }
         serving.finish();
     }
 
