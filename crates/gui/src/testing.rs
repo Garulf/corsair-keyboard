@@ -15,6 +15,16 @@ pub fn profile(name: &str) -> Profile {
     }
 }
 
+pub fn mixed_profile(name: &str) -> Profile {
+    let mut mixed = profile(name);
+    mixed.layers.push(engine::LayerConfig::new(
+        "fade",
+        engine::Zone::Named(engine::NamedZone::Logo),
+        engine::EffectConfig::Gradient { from: k100::Rgb::BLACK, to: k100::Rgb::BLACK, angle: 0.0 },
+    ));
+    mixed
+}
+
 pub fn state(active: &str, profiles: &[&str]) -> DaemonState {
     DaemonState {
         device: DeviceState::Connected { model: "K100 RGB".into(), firmware: "1.15.61".into() },
@@ -69,4 +79,11 @@ pub fn onboard_slots(model: &mut Model, names: &[&str], active: Option<u32>) {
         .collect();
     let reply = Reply::OnboardSlots { slots, active, free_bytes: Some(8_000_000) };
     model.apply(Inbox::reply(onboard(OnboardRequest::List), reply));
+}
+
+pub fn editing(edited: Profile, names: &[&str]) -> Model {
+    let mut model = online("p", &["p", "games"]);
+    model.draft = Some(Draft::new(edited));
+    onboard_slots(&mut model, names, Some(0));
+    model
 }

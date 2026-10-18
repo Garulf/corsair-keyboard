@@ -2,9 +2,13 @@ use eframe::egui;
 use ipc::{DeviceState, OnboardRequest, OnboardSlot, Request};
 
 use crate::model::Model;
-use crate::onboard_state::{Confirm, restore_problem};
+use crate::onboard_state::{
+    APPLY_FIRST, Confirm, PREVIEW_OUTDATED, SaveTarget, preview_heading, preview_lines, restore_problem,
+};
 
 pub const HARDWARE_MODE_HINT: &str = "The keyboard plays its active stored slot whenever k100d is not controlling it: after Release to hardware mode, or when k100d quits.";
+const APPLY_IN_THE_PAGES_FIRST: &str =
+    "Apply your edits in the Lighting/Actions page first: k100d saves the profile as it was last applied.";
 pub const RELEASED_HINT: &str =
     "The keyboard is playing its active stored slot. Take it back to change the stored slots.";
 
@@ -154,7 +158,75 @@ fn delete_confirmation(ui: &mut egui::Ui, model: &mut Model, slot: u32, idle: bo
     }
 }
 
-fn save_area(_ui: &mut egui::Ui, _model: &mut Model) {}
+fn save_area(ui: &mut egui::Ui, model: &mut Model) {
+    ui.heading("Save a profile to the keyboard");
+    profile_to_save(ui, model);
+    let source = model.save_source();
+    if let Err(reason) = &source {
+        ui.weak(if reason == APPLY_FIRST { APPLY_IN_THE_PAGES_FIRST } else { reason });
+    }
+    let usable = model.onboard_blocker().is_none() && source.is_ok();
+    let selected = model.onboard.selected;
+    ui.horizontal(|ui| {
+        if ui.add_enabled(usable, egui::Button::new("Save as a new slot")).clicked() {
+            let result = model.preview_onboard_save(SaveTarget::NewSlot);
+            refuse(model, result);
+        }
+        if ui.add_enabled(usable && selected.is_some(), egui::Button::new("Overwrite the selected slot")).clicked()
+            && let Some(slot) = selected
+        {
+            let result = model.preview_onboard_save(SaveTarget::Over(slot));
+            refuse(model, result);
+        }
+    });
+    preview_panel(ui, model);
+}
+
+fn profile_to_save(ui: &mut egui::Ui, model: &mut Model) {
+    let names = model.state.as_ref().map(|state| state.profiles.clone()).unwrap_or_default();
+    let current = model.draft.as_ref().map(|draft| draft.profile.name.clone()).unwrap_or_default();
+    let mut picked = None;
+    egui::ComboBox::from_label("Profile to save").selected_text(current.as_str()).show_ui(ui, |ui| {
+        for name in &names {
+            if ui.selectable_label(*name == current, name).clicked() && *name != current {
+                picked = Some(name.clone());
+            }
+        }
+    });
+    if let Some(name) = picked {
+        let result = model.edit_profile(&name);
+        refuse(model, result);
+    }
+}
+
+fn preview_panel(ui: &mut egui::Ui, model: &mut Model) {
+    let Some(preview) = model.onboard.preview.clone() else { return };
+    let slots = model.onboard.slots.as_ref().map(|stored| stored.slots.clone()).unwrap_or_default();
+    ui.strong(preview_heading(&preview, &slots));
+    for line in preview_lines(&preview.conversion) {
+        ui.label(line);
+    }
+    egui::CollapsingHeader::new("Files to write").show(ui, |ui| {
+        for file in preview.conversion.tree.manifest() {
+            ui.label(format!("{}: {} bytes", file.label, file.bytes));
+        }
+    });
+    ui.label("A backup of every stored slot is taken first.");
+    let current = model.onboard_preview_is_current();
+    if !current {
+        ui.label(PREVIEW_OUTDATED);
+    }
+    let writable = current && model.onboard_blocker().is_none();
+    ui.horizontal(|ui| {
+        if ui.add_enabled(writable, egui::Button::new("Write to the keyboard")).clicked() {
+            let result = model.confirm_onboard_save();
+            refuse(model, result);
+        }
+        if ui.button("Cancel").clicked() {
+            model.cancel_onboard_preview();
+        }
+    });
+}
 
 fn backup_area(ui: &mut egui::Ui, model: &mut Model) {
     let idle = model.onboard_blocker().is_none();
@@ -204,9 +276,10 @@ mod tests {
     use ipc::{DeviceState, OnboardRequest, OnboardSlot, Request};
 
     use super::*;
+    use crate::model::Draft;
     use crate::model::Model;
-    use crate::onboard_state::{Confirm, Outcome};
-    use crate::testing::{harness, onboard, onboard_slots, online, sent};
+    use crate::onboard_state::{Confirm, Outcome, SaveTarget};
+    use crate::testing::{editing, harness, mixed_profile, onboard, onboard_slots, online, profile, sent};
 
     fn page(model: Model) -> Harness<'static, Model> {
         let mut harness = harness(model, onboard_page);
@@ -445,5 +518,87 @@ mod tests {
         model.state.as_mut().unwrap().device = DeviceState::Disconnected;
         let harness = page(model);
         harness.get_by_label_contains("need a connected keyboard");
+    }
+
+    #[test]
+    fn save_as_a_new_slot_previews_then_writes_after_confirmation() {
+        let mut harness = page(editing(mixed_profile("p"), &["a"]));
+        harness.get_by_label("Save as a new slot").click();
+        harness.run();
+        harness.get_by_label("Saves \"p\" as a new slot.");
+        harness.get_by_label_contains("skipped: layer \"fade\"");
+        harness.get_by_label("A backup of every stored slot is taken first.");
+        assert!(sent(harness.state_mut()).is_empty());
+        harness.get_by_label("Write to the keyboard").click();
+        harness.run();
+        assert_eq!(sent(harness.state_mut()), [onboard(OnboardRequest::Save { profile: "p".into(), slot: None })]);
+        harness.get_by_label("Saving \"p\" as a new slot...");
+    }
+
+    #[test]
+    fn overwrite_names_the_slot_it_replaces_and_cancel_writes_nothing() {
+        let mut harness = page(editing(profile("p"), &["a", "b"]));
+        assert!(harness.get_by_label("Overwrite the selected slot").accesskit_node().is_disabled());
+        harness.get_by_label("1: b").click();
+        harness.run();
+        harness.get_by_label("Overwrite the selected slot").click();
+        harness.run();
+        harness.get_by_label("Replaces slot 1 (\"b\") with \"p\".");
+        harness.get_by_label("Nothing is left out.");
+        harness.get_by_label("Cancel").click();
+        harness.run();
+        assert_eq!(harness.state().onboard.preview, None);
+        assert!(sent(harness.state_mut()).is_empty());
+    }
+
+    #[test]
+    fn a_stale_preview_cannot_be_written() {
+        let mut model = editing(profile("p"), &["a"]);
+        model.preview_onboard_save(SaveTarget::NewSlot).unwrap();
+        model.draft = Some(Draft::new(mixed_profile("p")));
+        let harness = page(model);
+        harness.get_by_label("The profile or the slot list changed since this preview. Preview again.");
+        assert!(harness.get_by_label("Write to the keyboard").accesskit_node().is_disabled());
+    }
+
+    #[test]
+    fn unsaved_edits_show_why_saving_waits() {
+        let mut model = editing(profile("p"), &["a"]);
+        model.draft.as_mut().unwrap().profile.apps.push("x.exe".into());
+        let harness = page(model);
+        harness.get_by_label_contains("Apply your edits in the Lighting/Actions page first");
+        assert!(harness.get_by_label("Save as a new slot").accesskit_node().is_disabled());
+    }
+
+    #[test]
+    fn the_profile_box_loads_another_profile_into_the_editor() {
+        let mut harness = page(editing(profile("p"), &["a"]));
+        harness.get_by_label("Profile to save").click();
+        harness.run();
+        harness.get_by_label("games").click();
+        harness.run();
+        assert_eq!(sent(harness.state_mut()), [Request::GetProfile { name: "games".into() }]);
+    }
+
+    #[test]
+    fn the_files_to_write_are_listed_under_a_header() {
+        let mut harness = page(editing(profile("p"), &["a"]));
+        harness.get_by_label("Save as a new slot").click();
+        harness.run();
+        harness.get_by_label("Files to write").click();
+        harness.run();
+        let first = &onboard::convert(&profile("p")).tree.manifest()[0];
+        harness.get_by_label(&format!("{}: {} bytes", first.label, first.bytes));
+    }
+
+    #[test]
+    fn a_running_save_disables_previewing() {
+        let mut model = editing(profile("p"), &["a"]);
+        model.preview_onboard_save(SaveTarget::NewSlot).unwrap();
+        model.confirm_onboard_save().unwrap();
+        sent(&mut model);
+        let harness = page(model);
+        harness.get_by_label("Saving \"p\" as a new slot...");
+        assert!(harness.get_by_label("Save as a new slot").accesskit_node().is_disabled());
     }
 }

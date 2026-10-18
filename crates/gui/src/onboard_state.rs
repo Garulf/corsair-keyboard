@@ -1,6 +1,7 @@
 use std::path::Path;
 
-use ipc::{DeviceState, OnboardRequest, OnboardSlot, Reply, Request};
+use ipc::{DeviceState, OnboardRequest, OnboardSlot, Profile, Reply, Request};
+use onboard::{Conversion, convert};
 
 use crate::model::{Connection, Model, device_text};
 
@@ -24,6 +25,22 @@ pub enum Confirm {
     Restore,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SaveTarget {
+    NewSlot,
+    Over(u32),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Preview {
+    pub profile: Profile,
+    pub target: SaveTarget,
+    pub conversion: Conversion,
+}
+
+pub const APPLY_FIRST: &str = "Apply your edits first: k100d saves the profile as it was last applied.";
+pub const PREVIEW_OUTDATED: &str = "The profile or the slot list changed since this preview. Preview again.";
+
 #[derive(Debug, Default)]
 pub struct OnboardForm {
     pub slots: Option<StoredSlots>,
@@ -34,6 +51,7 @@ pub struct OnboardForm {
     pub confirm: Option<Confirm>,
     pub restore_from: String,
     pub latest_backup: Option<String>,
+    pub preview: Option<Preview>,
     list_failed: bool,
 }
 
@@ -42,6 +60,7 @@ impl OnboardForm {
         self.slots = None;
         self.selected = None;
         self.confirm = None;
+        self.preview = None;
         self.list_failed = false;
     }
 
@@ -85,6 +104,29 @@ pub fn restore_problem(folder: &str) -> Option<&'static str> {
         Some("Type the full path of the backup folder: k100d may run in a different folder.")
     } else {
         None
+    }
+}
+
+pub fn preview_lines(conversion: &Conversion) -> Vec<String> {
+    let files = conversion.tree.manifest();
+    let bytes: usize = files.iter().map(|file| file.bytes).sum();
+    let mut lines = vec![format!("{} files, {bytes} bytes", files.len())];
+    if conversion.report.is_empty() {
+        lines.push("Nothing is left out.".into());
+    } else {
+        lines.extend(conversion.report.lines());
+    }
+    lines
+}
+
+pub fn preview_heading(preview: &Preview, slots: &[OnboardSlot]) -> String {
+    let name = &preview.profile.name;
+    match preview.target {
+        SaveTarget::NewSlot => format!("Saves \"{name}\" as a new slot."),
+        SaveTarget::Over(slot) => match slots.iter().find(|listed| listed.index == slot) {
+            Some(listed) => format!("Replaces slot {slot} (\"{}\") with \"{name}\".", listed.name),
+            None => format!("Replaces slot {slot} with \"{name}\"."),
+        },
     }
 }
 
@@ -149,6 +191,60 @@ impl Model {
         self.start_onboard(OnboardRequest::Restore { from: folder.trim().to_owned() })
     }
 
+    pub fn save_source(&self) -> Result<Profile, String> {
+        let draft = self.draft.as_ref().ok_or("No profile is loaded yet.")?;
+        if draft.saving || draft.dirty() {
+            return Err(APPLY_FIRST.into());
+        }
+        Ok(draft.saved.clone())
+    }
+
+    pub fn preview_onboard_save(&mut self, target: SaveTarget) -> Result<(), String> {
+        if let Some(blocker) = self.onboard_blocker() {
+            return Err(blocker);
+        }
+        let profile = self.save_source()?;
+        if let SaveTarget::Over(slot) = target {
+            self.listed_slot_count(slot)?;
+        }
+        self.onboard.error = None;
+        let conversion = convert(&profile);
+        self.onboard.preview = Some(Preview { profile, target, conversion });
+        Ok(())
+    }
+
+    pub fn onboard_preview_is_current(&self) -> bool {
+        let Some(preview) = &self.onboard.preview else { return false };
+        self.save_source().as_ref() == Ok(&preview.profile)
+            && match preview.target {
+                SaveTarget::NewSlot => true,
+                SaveTarget::Over(slot) => self.slot_is_listed(slot),
+            }
+    }
+
+    pub fn confirm_onboard_save(&mut self) -> Result<(), String> {
+        let Some(preview) = self.onboard.preview.clone() else {
+            return Err("Preview the profile before writing it.".into());
+        };
+        if self.save_source().as_ref() != Ok(&preview.profile) {
+            return Err(PREVIEW_OUTDATED.into());
+        }
+        let slot = match preview.target {
+            SaveTarget::NewSlot => None,
+            SaveTarget::Over(slot) => {
+                self.listed_slot_count(slot)?;
+                Some(slot)
+            }
+        };
+        self.start_onboard(OnboardRequest::Save { profile: preview.profile.name, slot })?;
+        self.onboard.preview = None;
+        Ok(())
+    }
+
+    pub fn cancel_onboard_preview(&mut self) {
+        self.onboard.preview = None;
+    }
+
     pub(crate) fn settle_onboard(&mut self, request: &Request, reply: &Reply) -> bool {
         let Request::Onboard { request } = request else { return false };
         self.finish_onboard(request);
@@ -198,12 +294,16 @@ impl Model {
         }
     }
 
+    fn slot_is_listed(&self, slot: u32) -> bool {
+        self.onboard.slots.as_ref().is_some_and(|stored| stored.slots.iter().any(|listed| listed.index == slot))
+    }
+
     fn listed_slot_count(&self, slot: u32) -> Result<usize, String> {
         if let Some(blocker) = self.onboard_blocker() {
             return Err(blocker);
         }
         let Some(stored) = self.onboard.slots.as_ref() else { return Err("Refresh the slot list first.".into()) };
-        if !stored.slots.iter().any(|listed| listed.index == slot) {
+        if !self.slot_is_listed(slot) {
             return Err(format!("There is no stored slot {slot}; refresh the list."));
         }
         Ok(stored.slots.len())
@@ -232,7 +332,11 @@ mod tests {
 
     use super::*;
     use crate::model::{Inbox, Model};
-    use crate::testing::{onboard, onboard_slots, online, sent};
+    use crate::testing::{editing, mixed_profile, onboard, onboard_slots, online, profile, sent};
+
+    fn mixed() -> ipc::Profile {
+        mixed_profile("p")
+    }
 
     fn list() -> Request {
         onboard(OnboardRequest::List)
@@ -560,5 +664,127 @@ mod tests {
         form.confirm = Some(Confirm::Restore);
         form.select(1);
         assert_eq!(form.confirm, Some(Confirm::Restore));
+    }
+
+    #[test]
+    fn a_preview_converts_the_applied_profile_without_touching_the_keyboard() {
+        let mut model = editing(mixed(), &["a"]);
+        model.preview_onboard_save(SaveTarget::NewSlot).unwrap();
+        assert!(sent(&mut model).is_empty());
+        let preview = model.onboard.preview.clone().unwrap();
+        assert_eq!(preview.conversion, onboard::convert(&mixed()));
+        let lines = preview_lines(&preview.conversion);
+        assert!(lines.iter().any(|line| line.starts_with("skipped: layer \"fade\"")), "{lines:?}");
+        assert_eq!(
+            preview_heading(&preview, &model.onboard.slots.as_ref().unwrap().slots),
+            "Saves \"p\" as a new slot."
+        );
+    }
+
+    #[test]
+    fn preview_lines_sum_the_files_and_say_when_nothing_is_left_out() {
+        let conversion = onboard::convert(&profile("p"));
+        let files = conversion.tree.manifest();
+        let bytes: usize = files.iter().map(|file| file.bytes).sum();
+        assert_eq!(
+            preview_lines(&conversion),
+            [format!("{} files, {bytes} bytes", files.len()), "Nothing is left out.".into()]
+        );
+    }
+
+    #[test]
+    fn confirming_a_preview_saves_by_name_to_the_chosen_slot() {
+        let mut model = editing(mixed(), &["a", "b"]);
+        model.preview_onboard_save(SaveTarget::Over(1)).unwrap();
+        let preview = model.onboard.preview.clone().unwrap();
+        assert_eq!(
+            preview_heading(&preview, &model.onboard.slots.as_ref().unwrap().slots),
+            "Replaces slot 1 (\"b\") with \"p\"."
+        );
+        model.confirm_onboard_save().unwrap();
+        assert_eq!(sent(&mut model), [onboard(OnboardRequest::Save { profile: "p".into(), slot: Some(1) })]);
+        assert_eq!(model.onboard.preview, None);
+        assert!(model.confirm_onboard_save().is_err(), "the preview is used up");
+    }
+
+    #[test]
+    fn a_refused_confirmation_keeps_the_preview() {
+        let mut model = editing(mixed(), &["a"]);
+        model.preview_onboard_save(SaveTarget::NewSlot).unwrap();
+        model.onboard.pending = Some(OnboardRequest::List);
+        assert!(model.confirm_onboard_save().unwrap_err().contains("Wait for the current keyboard request"));
+        assert!(model.onboard.preview.is_some());
+        assert!(sent(&mut model).is_empty());
+    }
+
+    #[test]
+    fn unsaved_edits_block_saving_to_the_keyboard() {
+        let mut model = editing(mixed(), &["a"]);
+        model.draft.as_mut().unwrap().profile.apps.push("x.exe".into());
+        assert!(model.preview_onboard_save(SaveTarget::NewSlot).unwrap_err().starts_with("Apply your edits first"));
+        model.draft.as_mut().unwrap().profile.apps.clear();
+        model.draft.as_mut().unwrap().saving = true;
+        assert!(model.save_source().is_err());
+        model.draft = None;
+        assert_eq!(model.save_source().unwrap_err(), "No profile is loaded yet.");
+    }
+
+    #[test]
+    fn a_preview_of_an_older_profile_cannot_be_written() {
+        let mut model = editing(profile("p"), &["a"]);
+        model.preview_onboard_save(SaveTarget::NewSlot).unwrap();
+        model.apply(Inbox::reply(Request::GetProfile { name: "p".into() }, Reply::Profile { profile: mixed() }));
+        assert!(!model.onboard_preview_is_current());
+        assert!(model.confirm_onboard_save().unwrap_err().ends_with("Preview again."));
+        assert!(sent(&mut model).is_empty());
+    }
+
+    #[test]
+    fn overwriting_a_slot_that_is_gone_is_refused() {
+        let mut model = editing(mixed(), &["a", "b"]);
+        assert_eq!(
+            model.preview_onboard_save(SaveTarget::Over(5)).unwrap_err(),
+            "There is no stored slot 5; refresh the list."
+        );
+        model.preview_onboard_save(SaveTarget::Over(1)).unwrap();
+        onboard_slots(&mut model, &["a"], Some(0));
+        assert!(!model.onboard_preview_is_current());
+        assert!(model.confirm_onboard_save().is_err());
+        assert!(sent(&mut model).is_empty());
+    }
+
+    #[test]
+    fn a_new_preview_clears_the_last_error_and_a_cancel_drops_it() {
+        let mut model = editing(mixed(), &["a"]);
+        model.onboard.error = Some("old".into());
+        model.preview_onboard_save(SaveTarget::NewSlot).unwrap();
+        assert_eq!(model.onboard.error, None);
+        model.cancel_onboard_preview();
+        assert_eq!(model.onboard.preview, None);
+    }
+
+    #[test]
+    fn a_keyboard_change_forgets_the_preview() {
+        let mut model = editing(mixed(), &["a"]);
+        model.preview_onboard_save(SaveTarget::NewSlot).unwrap();
+        model.apply(Inbox::Event(Event::DeviceState { state: DeviceState::Disconnected }));
+        assert_eq!(model.onboard.preview, None);
+    }
+
+    #[test]
+    fn a_finished_save_shows_the_daemons_notes_and_lists_again() {
+        let mut model = editing(mixed(), &["a"]);
+        model.preview_onboard_save(SaveTarget::NewSlot).unwrap();
+        model.confirm_onboard_save().unwrap();
+        sent(&mut model);
+        let save = onboard(OnboardRequest::Save { profile: "p".into(), slot: None });
+        let done = Reply::OnboardDone {
+            message: "saved \"p\" to slot 1 (5 files, 300 bytes)".into(),
+            backup: Some("/b/3".into()),
+            notes: vec!["skipped: layer \"fade\": gradient has no hardware layout".into()],
+        };
+        model.apply(Inbox::reply(save, done));
+        assert_eq!(model.onboard.outcome.as_ref().unwrap().notes.len(), 1);
+        assert_eq!(sent(&mut model), [list()]);
     }
 }
