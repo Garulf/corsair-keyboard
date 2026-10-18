@@ -3,7 +3,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::Duration;
 
-use ipc::{Client, ClientError, Reply, Request};
+use ipc::{Client, ClientError, OnboardRequest, Reply, Request};
 
 use crate::model::Inbox;
 
@@ -56,10 +56,19 @@ fn attempt(connector: &Connector, cached: &mut Option<Client>, request: &Request
     Ok(reply)
 }
 
+fn retry_is_safe(request: &Request) -> bool {
+    match request {
+        Request::Onboard { request } => *request == OnboardRequest::List,
+        _ => true,
+    }
+}
+
 fn exchange(connector: &Connector, cached: &mut Option<Client>, request: &Request) -> Result<Reply, ClientError> {
     let reused = cached.is_some();
     match attempt(connector, cached, request) {
-        Err(ClientError::Io(_) | ClientError::Closed) if reused => attempt(connector, cached, request),
+        Err(ClientError::Io(_) | ClientError::Closed) if reused && retry_is_safe(request) => {
+            attempt(connector, cached, request)
+        }
         outcome => outcome,
     }
 }
@@ -129,7 +138,7 @@ mod tests {
     use super::*;
     use crate::testing::state;
 
-    fn serve(stream: Stream) {
+    fn serve(stream: Stream, saves: &AtomicUsize) {
         let mut reader = BufReader::new(stream);
         while let Ok(Some(request)) = read_message::<_, Request>(&mut reader) {
             let reply = match request {
@@ -146,20 +155,28 @@ mod tests {
                     write_message(reader.get_mut(), &Reply::Done).unwrap();
                     return;
                 }
+                Request::Onboard { request: OnboardRequest::Save { .. } } => {
+                    saves.fetch_add(1, Ordering::SeqCst);
+                    return;
+                }
                 _ => Reply::Done,
             };
             write_message(reader.get_mut(), &reply).unwrap();
         }
     }
 
-    fn fake_daemon(name: &'static str) {
+    fn fake_daemon(name: &'static str) -> Arc<AtomicUsize> {
         let listener =
             ListenerOptions::new().name(name.to_ns_name::<GenericNamespaced>().unwrap()).create_sync().unwrap();
+        let saves = Arc::new(AtomicUsize::new(0));
+        let counted = saves.clone();
         std::thread::spawn(move || {
             for stream in listener.incoming().filter_map(Result::ok) {
-                std::thread::spawn(move || serve(stream));
+                let counted = counted.clone();
+                std::thread::spawn(move || serve(stream, &counted));
             }
         });
+        saves
     }
 
     fn connector_to(name: &'static str) -> Connector {
@@ -243,5 +260,30 @@ mod tests {
             second.iter().any(|m| matches!(m.as_reply(), Some((Request::GetState, Reply::State { .. })))),
             "{second:?}"
         );
+    }
+
+    #[test]
+    fn a_save_cut_off_by_a_dropped_connection_is_sent_once_and_reported() {
+        let saves = fake_daemon("k100-gui-io-save");
+        let backend = Backend::spawn(connector_to("k100-gui-io-save"), Arc::new(|| {}), Duration::from_secs(60));
+        backend.send(Request::GetState);
+        collect(&backend, |seen| seen.iter().any(|m| m.as_reply().is_some()));
+        let save = Request::Onboard { request: OnboardRequest::Save { profile: "games".into(), slot: None } };
+        backend.send(save.clone());
+        let seen = collect(&backend, |seen| seen.iter().any(|m| matches!(m, Inbox::RequestFailed(..))));
+        assert!(seen.iter().any(|m| matches!(m, Inbox::RequestFailed(request, _) if **request == save)), "{seen:?}");
+        assert_eq!(saves.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn only_a_listing_may_be_sent_again_after_a_dropped_connection() {
+        let onboard = |request| Request::Onboard { request };
+        assert!(retry_is_safe(&onboard(OnboardRequest::List)));
+        assert!(retry_is_safe(&Request::GetState));
+        assert!(!retry_is_safe(&onboard(OnboardRequest::Save { profile: "a".into(), slot: None })));
+        assert!(!retry_is_safe(&onboard(OnboardRequest::Delete { slot: 1 })));
+        assert!(!retry_is_safe(&onboard(OnboardRequest::Activate { slot: 1 })));
+        assert!(!retry_is_safe(&onboard(OnboardRequest::Backup { to: None })));
+        assert!(!retry_is_safe(&onboard(OnboardRequest::Restore { from: "/b".into() })));
     }
 }

@@ -1,8 +1,8 @@
 use eframe::egui::{self, Vec2};
 use egui_kittest::Harness;
-use ipc::{DaemonState, DeviceState, Profile, Request, Settings};
+use ipc::{DaemonState, DeviceState, OnboardRequest, OnboardSlot, Profile, Reply, Request, Settings};
 
-use crate::model::{Connection, Draft, Effect, Model};
+use crate::model::{Connection, Draft, Effect, Inbox, Model};
 
 pub fn profile(name: &str) -> Profile {
     Profile {
@@ -13,6 +13,16 @@ pub fn profile(name: &str) -> Profile {
         assignments: Vec::new(),
         dial: actions::DialConfig::default(),
     }
+}
+
+pub fn mixed_profile(name: &str) -> Profile {
+    let mut mixed = profile(name);
+    mixed.layers.push(engine::LayerConfig::new(
+        "fade",
+        engine::Zone::Named(engine::NamedZone::Logo),
+        engine::EffectConfig::Gradient { from: k100::Rgb::BLACK, to: k100::Rgb::BLACK, angle: 0.0 },
+    ));
+    mixed
 }
 
 pub fn state(active: &str, profiles: &[&str]) -> DaemonState {
@@ -56,4 +66,24 @@ pub fn copy(model: &Model) -> Model {
     copy.settings = model.settings.clone();
     copy.draft = model.draft.clone();
     copy
+}
+
+pub fn onboard(request: OnboardRequest) -> Request {
+    Request::Onboard { request }
+}
+
+pub fn onboard_slots(model: &mut Model, names: &[&str], active: Option<u32>) {
+    let slots = (0u32..)
+        .zip(names)
+        .map(|(index, name)| OnboardSlot { index, name: (*name).to_owned(), files: 6, bytes: 400 })
+        .collect();
+    let reply = Reply::OnboardSlots { slots, active, free_bytes: Some(8_000_000) };
+    model.apply(Inbox::reply(onboard(OnboardRequest::List), reply));
+}
+
+pub fn editing(edited: Profile, names: &[&str]) -> Model {
+    let mut model = online("p", &["p", "games"]);
+    model.draft = Some(Draft::new(edited));
+    onboard_slots(&mut model, names, Some(0));
+    model
 }

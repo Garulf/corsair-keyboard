@@ -10,6 +10,8 @@ mod dial;
 mod io;
 mod layers;
 mod model;
+mod onboard_page;
+mod onboard_state;
 mod profiles;
 
 #[cfg(test)]

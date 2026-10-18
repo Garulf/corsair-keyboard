@@ -1911,6 +1911,7 @@ dependencies = [
  "interprocess",
  "ipc",
  "k100",
+ "onboard",
  "windows-sys 0.61.2",
 ]
 

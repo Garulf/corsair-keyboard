@@ -12,6 +12,7 @@ eframe.workspace = true
 engine.workspace = true
 ipc.workspace = true
 k100.workspace = true
+onboard.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_StationsAndDesktops"] }
