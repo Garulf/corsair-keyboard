@@ -19,7 +19,7 @@ impl Default for Policy {
 impl Policy {
     pub fn allows(&self, exe: &str) -> bool {
         let name = exe_file_name(exe);
-        self.enabled && !self.blocked.iter().any(|blocked| blocked.eq_ignore_ascii_case(name))
+        self.enabled && !self.blocked.iter().any(|blocked| exe_file_name(blocked).eq_ignore_ascii_case(name))
     }
 }
 
@@ -63,6 +63,15 @@ mod tests {
         assert!(!policy.allows(r"C:\Program Files\Elgato\StreamDeck\StreamDeck.exe"));
         assert!(!policy.allows("/opt/StreamDeck.exe"));
         assert!(policy.allows("StreamDeck2.exe"));
+    }
+
+    #[test]
+    fn a_blocked_entry_stored_as_a_path_matches_by_its_file_name() {
+        let policy =
+            Policy { blocked: vec![r"C:\Program Files\Elgato\StreamDeck\StreamDeck.exe".into()], ..Policy::default() };
+        assert!(!policy.allows("streamdeck.exe"));
+        assert!(!policy.allows(r"D:\Other\StreamDeck.exe"));
+        assert!(policy.allows("game.exe"));
     }
 
     #[test]
