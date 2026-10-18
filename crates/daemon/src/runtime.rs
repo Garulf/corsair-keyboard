@@ -12,6 +12,7 @@ use k100::{Frame, InputEvent, InputSource, KeyStateTracker, Session};
 use crate::config::ConfigDir;
 use crate::conflict::{remove_ignored, running_conflicts};
 use crate::controller::{Controller, DeviceLink, LinkInfo};
+use crate::sdk_server::{SdkBridge, SdkCommand};
 
 const RECONNECT_INTERVAL: Duration = Duration::from_secs(2);
 const INPUT_POLL: Duration = Duration::from_millis(100);
@@ -24,6 +25,7 @@ pub enum Command {
     Input(InputEvent),
     Reload,
     Focus(Option<String>),
+    Sdk(SdkCommand),
     Shutdown,
 }
 
@@ -62,6 +64,8 @@ impl Connector for HidConnector {
             model: opened.model.name.to_owned(),
             firmware: format_firmware(session.info().firmware),
             max_polling_rate: session.info().max_polling_rate,
+            serial: opened.serial,
+            layout: session.info().layout,
         };
         Ok(Connection { link: Box::new(session), info, input: Some(Box::new(opened.input)) })
     }
@@ -78,7 +82,9 @@ pub fn run(
     commands: Receiver<Command>,
     sender: Sender<Command>,
     mut connector: impl Connector,
+    sdk_enabled: Arc<AtomicBool>,
 ) {
+    let mut sdk = SdkBridge::new(sdk::ServerConfig::default(), config.sdk_trace_path(), sdk_enabled);
     let started = Instant::now();
     let mut subscribers = Subscribers::default();
     let mut presses: Vec<KeyPress> = Vec::new();
@@ -99,6 +105,7 @@ pub fn run(
                     presses.push(KeyPress { led, at: started.elapsed() });
                 }
                 controller.input(event, started.elapsed(), &config);
+                sdk.input(&event, &mut controller);
                 if let Some(event) = input_event(event) {
                     subscribers.broadcast(event);
                 }
@@ -109,6 +116,7 @@ pub fn run(
                 controller.reload(profiles, errors, failed);
             }
             Ok(Command::Focus(exe)) => controller.focus(exe),
+            Ok(Command::Sdk(command)) => sdk.handle(command, &mut controller),
             Err(RecvTimeoutError::Timeout) => {}
         }
 
@@ -144,6 +152,7 @@ pub fn run(
             }
         }
 
+        sdk.sync(&mut controller);
         for event in controller.take_events() {
             subscribers.broadcast(event);
         }
@@ -239,7 +248,8 @@ mod tests {
 
     use super::*;
     use crate::config::{Settings, default_profile};
-    use crate::controller::DiscardOutput;
+    use crate::controller::{DiscardOutput, OutputPort};
+    use crate::sdk_server::{OUTBOX_QUEUE, SdkCommand};
 
     struct CountingLink(Arc<Mutex<usize>>);
 
@@ -284,9 +294,42 @@ mod tests {
             let next = if self.attempts.is_empty() { Ok(()) } else { self.attempts.remove(0) };
             next.map(|()| Connection {
                 link: Box::new(CountingLink(self.frames.clone())),
-                info: LinkInfo { model: "K100".into(), firmware: "1.15.61".into(), max_polling_rate: None },
+                info: LinkInfo {
+                    model: "K100".into(),
+                    firmware: "1.15.61".into(),
+                    max_polling_rate: None,
+                    serial: "SERIAL".into(),
+                    layout: 1,
+                },
                 input: None,
             })
+        }
+    }
+
+    fn gate() -> Arc<AtomicBool> {
+        Arc::new(AtomicBool::new(true))
+    }
+
+    #[derive(Clone, Default)]
+    struct RecordingOutput(Arc<Mutex<Vec<actions::OutputCommand>>>);
+
+    impl OutputPort for RecordingOutput {
+        fn send(&mut self, command: actions::OutputCommand) {
+            self.0.lock().unwrap().push(command);
+        }
+
+        fn is_busy(&self) -> bool {
+            false
+        }
+    }
+
+    impl RecordingOutput {
+        fn presses_of(&self, source: u8) -> usize {
+            let commands = self.0.lock().unwrap();
+            commands
+                .iter()
+                .filter(|command| matches!(command, actions::OutputCommand::Press { source: s, .. } if *s == source))
+                .count()
         }
     }
 
@@ -310,7 +353,7 @@ mod tests {
         let (events_tx, events_rx) = mpsc::sync_channel(SUBSCRIBER_QUEUE);
         sender.send(Command::Subscribe { events: events_tx, frames: false }).unwrap();
         let loop_sender = sender.clone();
-        let handle = std::thread::spawn(move || run(controller, config, receiver, loop_sender, connector));
+        let handle = std::thread::spawn(move || run(controller, config, receiver, loop_sender, connector, gate()));
 
         let first = events_rx.recv_timeout(Duration::from_secs(5)).unwrap();
         let blocked = DeviceState::Blocked { processes: vec!["iCUE.exe".into()] };
@@ -406,7 +449,7 @@ mod tests {
         sender.send(Command::Subscribe { events: plain_tx, frames: false }).unwrap();
         let loop_sender = sender.clone();
         let started = Instant::now();
-        let handle = std::thread::spawn(move || run(controller, config, receiver, loop_sender, connector));
+        let handle = std::thread::spawn(move || run(controller, config, receiver, loop_sender, connector, gate()));
         std::thread::sleep(Duration::from_millis(600));
         sender.send(Command::Shutdown).unwrap();
         handle.join().unwrap();
@@ -417,5 +460,68 @@ mod tests {
         let ceiling = (elapsed.as_millis() / FRAME_EVENT_INTERVAL.as_millis()) as usize + 1;
         assert!((2..=ceiling).contains(&frames), "{frames} frames in {elapsed:?}");
         assert_eq!(plain, 0);
+    }
+
+    #[test]
+    fn a_client_that_hangs_up_is_cleaned_up_through_the_runtime() {
+        const DEVICE: &str = "{00000000-0000-4000-8000-000000000001}";
+        let temp = tempfile::tempdir().unwrap();
+        let config = ConfigDir::new(temp.path().to_path_buf());
+        let settings = Settings {
+            sdk: ipc::SdkSettings { device_id: Some(DEVICE.into()), ..ipc::SdkSettings::default() },
+            ..Settings::default()
+        };
+        let macro_g1 = actions::Assignment {
+            key: actions::Key::named("g1").unwrap(),
+            action: actions::Action::Macro {
+                steps: vec![actions::MacroStep::Text("g1".into())],
+                mode: actions::RepeatMode::Once,
+            },
+            pass_through: vec![],
+        };
+        let profile = ipc::Profile { assignments: vec![macro_g1], ..default_profile() };
+        let output = RecordingOutput::default();
+        let controller = Controller::new(settings, vec![profile], vec![], Box::new(output.clone()));
+        let connector = ScriptedConnector { attempts: vec![], frames: Arc::new(Mutex::new(0)) };
+        let (sender, receiver) = mpsc::channel();
+        let (events_tx, events_rx) = mpsc::sync_channel(SUBSCRIBER_QUEUE);
+        sender.send(Command::Subscribe { events: events_tx, frames: false }).unwrap();
+        let loop_sender = sender.clone();
+        let handle = std::thread::spawn(move || run(controller, config, receiver, loop_sender, connector, gate()));
+        while !matches!(
+            events_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+            Reply::Event { event: Event::DeviceState { state: DeviceState::Connected { .. } } }
+        ) {}
+
+        let (outbox, replies) = mpsc::sync_channel(OUTBOX_QUEUE);
+        sender.send(Command::Sdk(SdkCommand::Connected { client: 1, exe: "StreamDeck.exe".into(), outbox })).unwrap();
+        let messages = [
+            r#"{"method":0,"code":-1,"params":{"pid":1,"clientVersion":"4.0.84"}}"#.to_owned(),
+            format!(r#"{{"method":12,"code":1,"params":{{"deviceId":"{DEVICE}","accessLevel":3}}}}"#),
+            format!(r#"{{"method":16,"code":2,"params":{{"deviceId":"{DEVICE}","keyId":1,"isIntercepted":true}}}}"#),
+        ];
+        for message in messages {
+            sender.send(Command::Sdk(SdkCommand::Message { client: 1, payload: message.into_bytes() })).unwrap();
+            let reply: serde_json::Value =
+                serde_json::from_slice(&replies.recv_timeout(Duration::from_secs(5)).unwrap()).unwrap();
+            assert_eq!(reply["error"], 0, "{reply}");
+        }
+        let tap = |sender: &mpsc::Sender<Command>| {
+            sender.send(Command::Input(InputEvent::KeyDown(k100::led::G1))).unwrap();
+            sender.send(Command::Input(InputEvent::KeyUp(k100::led::G1))).unwrap();
+        };
+        tap(&sender);
+        let Reply::State { state } = request(&sender, Request::GetState) else { panic!("expected the state") };
+        assert_eq!(state.sdk.clients[0].intercepted, ["G1"]);
+        assert_eq!(output.presses_of(k100::led::G1), 0);
+
+        sender.send(Command::Sdk(SdkCommand::Disconnected { client: 1 })).unwrap();
+        tap(&sender);
+        let Reply::State { state } = request(&sender, Request::GetState) else { panic!("expected the state") };
+        assert!(state.sdk.clients.is_empty());
+        assert_eq!(output.presses_of(k100::led::G1), 1);
+
+        sender.send(Command::Shutdown).unwrap();
+        handle.join().unwrap();
     }
 }

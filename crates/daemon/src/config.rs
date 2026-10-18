@@ -7,6 +7,8 @@ use serde::Serialize;
 
 const SETTINGS_FILE: &str = "settings.toml";
 const PROFILES_DIR: &str = "profiles";
+const LOGS_DIR: &str = "logs";
+const SDK_TRACE_FILE: &str = "sdk-trace.jsonl";
 
 fn default_profile_name() -> String {
     "default".into()
@@ -62,6 +64,19 @@ impl ConfigDir {
 
     pub fn profiles_dir(&self) -> PathBuf {
         self.root.join(PROFILES_DIR)
+    }
+
+    pub fn sdk_trace_path(&self) -> PathBuf {
+        self.logs_dir().join(SDK_TRACE_FILE)
+    }
+
+    pub fn only_logs_changed(&self, paths: &[PathBuf]) -> bool {
+        let logs = self.logs_dir();
+        !paths.is_empty() && paths.iter().all(|path| path.starts_with(&logs))
+    }
+
+    fn logs_dir(&self) -> PathBuf {
+        self.root.join(LOGS_DIR)
     }
 
     pub fn load_settings(&self) -> Result<Settings, String> {
@@ -167,6 +182,16 @@ mod tests {
         assert_eq!(mask, 5);
         assert_eq!(settings.dial_ring, DialRing::Continuous);
         assert_eq!(Settings::default().winlock_disables, None);
+    }
+
+    #[test]
+    fn the_sdk_trace_lives_under_logs_and_log_writes_are_not_config_changes() {
+        let config = ConfigDir::new(PathBuf::from("/config"));
+        assert_eq!(config.sdk_trace_path(), Path::new("/config/logs/sdk-trace.jsonl"));
+        assert!(config.only_logs_changed(&[config.sdk_trace_path(), PathBuf::from("/config/logs")]));
+        assert!(!config.only_logs_changed(&[config.sdk_trace_path(), PathBuf::from("/config/settings.toml")]));
+        assert!(!config.only_logs_changed(&[PathBuf::from("/config/logsettings.toml")]));
+        assert!(!config.only_logs_changed(&[]));
     }
 
     fn dir() -> (tempfile::TempDir, ConfigDir) {

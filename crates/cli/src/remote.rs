@@ -156,6 +156,7 @@ mod tests {
             recording: actions::RecorderState::Idle,
             autostart: true,
             audio: AudioState::Off,
+            sdk: ipc::SdkState::default(),
         };
         let text = format_state(&state);
         assert!(text.contains("connected: K100 RGB (firmware 1.15.61)"), "{text}");

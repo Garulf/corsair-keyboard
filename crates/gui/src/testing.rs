@@ -35,6 +35,16 @@ pub fn state(active: &str, profiles: &[&str]) -> DaemonState {
     }
 }
 
+pub fn streamdeck() -> ipc::SdkClient {
+    ipc::SdkClient {
+        exe: "StreamDeck.exe".into(),
+        access: ipc::SdkAccess::ExclusiveKeys,
+        priority: 128,
+        intercepted: vec!["G1".into()],
+        refused: false,
+    }
+}
+
 pub fn online(active: &str, profiles: &[&str]) -> Model {
     let mut model = Model::new();
     model.connection = Connection::Online;

@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
@@ -8,6 +10,7 @@ use daemon::audio::SystemAudio;
 use daemon::config::ConfigDir;
 use daemon::controller::Controller;
 use daemon::runtime::{self, Command, HidConnector};
+use daemon::sdk_server::with_device_id;
 use daemon::server;
 use daemon::shutdown::{self, ReleaseSignal};
 use notify::{RecursiveMode, Watcher};
@@ -47,7 +50,8 @@ fn run(instance: ipc::InstanceLock) -> Result<(), Box<dyn std::error::Error>> {
         None => ConfigDir::default_location().ok_or("no home directory")?,
     };
     config.ensure_default_profile()?;
-    let settings = config.load_settings()?;
+    let settings = with_device_id(&config, config.load_settings()?);
+    let sdk_enabled = Arc::new(AtomicBool::new(settings.sdk.enabled));
     let (profiles, errors) = config.load_profiles();
     for error in &errors {
         eprintln!("k100d: config: {error}");
@@ -63,8 +67,11 @@ fn run(instance: ipc::InstanceLock) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let reload = sender.clone();
+    let watched = config.clone();
     let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-        if event.is_ok_and(|e| e.kind.is_modify() || e.kind.is_create() || e.kind.is_remove()) {
+        let Ok(event) = event else { return };
+        let changed = event.kind.is_modify() || event.kind.is_create() || event.kind.is_remove();
+        if changed && !watched.only_logs_changed(&event.paths) {
             let _ = reload.send(Command::Reload);
         }
     })?;
@@ -106,7 +113,7 @@ fn run(instance: ipc::InstanceLock) -> Result<(), Box<dyn std::error::Error>> {
     let _ = no_tray;
 
     eprintln!("k100d: config in {}", config.root().display());
-    runtime::run(controller, config, receiver, sender, HidConnector);
+    runtime::run(controller, config, receiver, sender, HidConnector, sdk_enabled);
     #[cfg(any(windows, feature = "tray"))]
     if let Some(tray) = tray {
         tray.stop();

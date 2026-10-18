@@ -36,8 +36,10 @@ impl Dispatcher {
         self.firing.clear();
     }
 
-    pub fn set_taken_keys(&mut self, leds: &[u8]) {
+    pub fn set_taken_keys(&mut self, leds: &[u8]) -> Vec<u8> {
+        let newly_taken = leds.iter().copied().filter(|led| !self.taken.contains(led)).collect();
         self.taken = leds.iter().copied().collect();
+        newly_taken
     }
 
     pub fn forget_held_keys(&mut self) {
@@ -441,6 +443,14 @@ mod tests {
         assert!(dispatcher.handle(&InputEvent::KeyUp(131), ms(10)).is_empty());
         dispatcher.set_taken_keys(&[]);
         assert!(!dispatcher.handle(&InputEvent::KeyDown(131), ms(20)).is_empty());
+    }
+
+    #[test]
+    fn taking_keys_reports_only_the_newly_taken_ones() {
+        let mut dispatcher = Dispatcher::new(&[remap_g1()], &DialConfig::default());
+        assert_eq!(dispatcher.set_taken_keys(&[131, 132]), [131, 132]);
+        assert_eq!(dispatcher.set_taken_keys(&[132, 133]), [133]);
+        assert!(dispatcher.set_taken_keys(&[]).is_empty());
     }
 
     #[test]

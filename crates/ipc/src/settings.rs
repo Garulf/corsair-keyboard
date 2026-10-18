@@ -91,6 +91,29 @@ pub struct Settings {
     pub auto_switch: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub debounce: Option<Debounce>,
+    #[serde(default)]
+    pub sdk: SdkSettings,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SdkSettings {
+    #[serde(default = "enabled")]
+    pub enabled: bool,
+    #[serde(default = "enabled")]
+    pub exclusive_control: bool,
+    #[serde(default)]
+    pub blocked: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_id: Option<String>,
+    #[serde(default)]
+    pub trace: bool,
+}
+
+impl Default for SdkSettings {
+    fn default() -> Self {
+        Self { enabled: true, exclusive_control: true, blocked: Vec::new(), device_id: None, trace: false }
+    }
 }
 
 impl Default for Settings {
@@ -106,6 +129,7 @@ impl Default for Settings {
             dial_ring: DialRing::default(),
             auto_switch: true,
             debounce: None,
+            sdk: SdkSettings::default(),
         }
     }
 }
@@ -172,6 +196,25 @@ mod tests {
         let with: Settings = toml::from_str("debounce = { enabled = true, timeout = 30 }").unwrap();
         assert_eq!(with.debounce, Some(Debounce { enabled: true, timeout: 30 }));
         assert!(toml::from_str::<Settings>("debounce = { enabled = true }").is_err());
+    }
+
+    #[test]
+    fn settings_without_sdk_use_the_defaults_and_sdk_parses() {
+        let settings: Settings = toml::from_str("brightness = 35").unwrap();
+        assert_eq!(settings.sdk, SdkSettings::default());
+        assert!(settings.sdk.enabled && settings.sdk.exclusive_control && !settings.sdk.trace);
+        assert_eq!((settings.sdk.blocked.len(), settings.sdk.device_id.as_deref()), (0, None));
+        let with: Settings = toml::from_str("[sdk]\nenabled = false\nblocked = [\"StreamDeck.exe\"]").unwrap();
+        assert_eq!((with.sdk.enabled, with.sdk.blocked.as_slice()), (false, &["StreamDeck.exe".to_owned()][..]));
+        assert!(toml::from_str::<Settings>("[sdk]\npopup = true").is_err());
+        let text = toml::to_string(&Settings::default()).unwrap();
+        assert_eq!(toml::from_str::<Settings>(&text).unwrap(), Settings::default());
+        let identified = Settings {
+            sdk: SdkSettings { device_id: Some("{x}".into()), trace: true, ..SdkSettings::default() },
+            ..Settings::default()
+        };
+        let text = toml::to_string(&identified).unwrap();
+        assert_eq!(toml::from_str::<Settings>(&text).unwrap(), identified);
     }
 
     #[test]

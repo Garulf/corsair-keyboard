@@ -130,7 +130,7 @@ pub fn run(command: Diag) -> Result<()> {
 }
 
 fn keyboard(command: KeyboardDiag, stop: &AtomicBool) -> Result<()> {
-    let OpenedDevice { commands, input, model } = open_device()?;
+    let OpenedDevice { commands, input, model, .. } = open_device()?;
     println!("found {} (pid {:04x}){}", model.name, model.pid, if model.tested { "" } else { " [untested]" });
     match command {
         KeyboardDiag::Info => info(commands),
