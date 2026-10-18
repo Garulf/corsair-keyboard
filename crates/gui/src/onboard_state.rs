@@ -35,6 +35,7 @@ pub enum SaveTarget {
 pub struct Preview {
     pub profile: Profile,
     pub target: SaveTarget,
+    pub replaces: Option<String>,
     pub conversion: Conversion,
 }
 
@@ -119,14 +120,12 @@ pub fn preview_lines(conversion: &Conversion) -> Vec<String> {
     lines
 }
 
-pub fn preview_heading(preview: &Preview, slots: &[OnboardSlot]) -> String {
+pub fn preview_heading(preview: &Preview) -> String {
     let name = &preview.profile.name;
-    match preview.target {
-        SaveTarget::NewSlot => format!("Saves \"{name}\" as a new slot."),
-        SaveTarget::Over(slot) => match slots.iter().find(|listed| listed.index == slot) {
-            Some(listed) => format!("Replaces slot {slot} (\"{}\") with \"{name}\".", listed.name),
-            None => format!("Replaces slot {slot} with \"{name}\"."),
-        },
+    match (preview.target, &preview.replaces) {
+        (SaveTarget::Over(slot), Some(old)) => format!("Replaces slot {slot} (\"{old}\") with \"{name}\"."),
+        (SaveTarget::Over(slot), None) => format!("Replaces slot {slot} with \"{name}\"."),
+        (SaveTarget::NewSlot, _) => format!("Saves \"{name}\" as a new slot."),
     }
 }
 
@@ -204,12 +203,14 @@ impl Model {
             return Err(blocker);
         }
         let profile = self.save_source()?;
+        let mut replaces = None;
         if let SaveTarget::Over(slot) = target {
             self.listed_slot_count(slot)?;
+            replaces = self.listed_name(slot).map(str::to_owned);
         }
         self.onboard.error = None;
         let conversion = convert(&profile);
-        self.onboard.preview = Some(Preview { profile, target, conversion });
+        self.onboard.preview = Some(Preview { profile, target, replaces, conversion });
         Ok(())
     }
 
@@ -218,7 +219,7 @@ impl Model {
         self.save_source().as_ref() == Ok(&preview.profile)
             && match preview.target {
                 SaveTarget::NewSlot => true,
-                SaveTarget::Over(slot) => self.slot_is_listed(slot),
+                SaveTarget::Over(slot) => self.listed_name(slot) == preview.replaces.as_deref(),
             }
     }
 
@@ -233,6 +234,9 @@ impl Model {
             SaveTarget::NewSlot => None,
             SaveTarget::Over(slot) => {
                 self.listed_slot_count(slot)?;
+                if self.listed_name(slot) != preview.replaces.as_deref() {
+                    return Err(PREVIEW_OUTDATED.into());
+                }
                 Some(slot)
             }
         };
@@ -294,8 +298,9 @@ impl Model {
         }
     }
 
-    fn slot_is_listed(&self, slot: u32) -> bool {
-        self.onboard.slots.as_ref().is_some_and(|stored| stored.slots.iter().any(|listed| listed.index == slot))
+    fn listed_name(&self, slot: u32) -> Option<&str> {
+        let stored = self.onboard.slots.as_ref()?;
+        stored.slots.iter().find(|listed| listed.index == slot).map(|listed| listed.name.as_str())
     }
 
     fn listed_slot_count(&self, slot: u32) -> Result<usize, String> {
@@ -303,7 +308,7 @@ impl Model {
             return Err(blocker);
         }
         let Some(stored) = self.onboard.slots.as_ref() else { return Err("Refresh the slot list first.".into()) };
-        if !self.slot_is_listed(slot) {
+        if self.listed_name(slot).is_none() {
             return Err(format!("There is no stored slot {slot}; refresh the list."));
         }
         Ok(stored.slots.len())
@@ -675,10 +680,7 @@ mod tests {
         assert_eq!(preview.conversion, onboard::convert(&mixed()));
         let lines = preview_lines(&preview.conversion);
         assert!(lines.iter().any(|line| line.starts_with("skipped: layer \"fade\"")), "{lines:?}");
-        assert_eq!(
-            preview_heading(&preview, &model.onboard.slots.as_ref().unwrap().slots),
-            "Saves \"p\" as a new slot."
-        );
+        assert_eq!(preview_heading(&preview), "Saves \"p\" as a new slot.");
     }
 
     #[test]
@@ -697,10 +699,7 @@ mod tests {
         let mut model = editing(mixed(), &["a", "b"]);
         model.preview_onboard_save(SaveTarget::Over(1)).unwrap();
         let preview = model.onboard.preview.clone().unwrap();
-        assert_eq!(
-            preview_heading(&preview, &model.onboard.slots.as_ref().unwrap().slots),
-            "Replaces slot 1 (\"b\") with \"p\"."
-        );
+        assert_eq!(preview_heading(&preview), "Replaces slot 1 (\"b\") with \"p\".");
         model.confirm_onboard_save().unwrap();
         assert_eq!(sent(&mut model), [onboard(OnboardRequest::Save { profile: "p".into(), slot: Some(1) })]);
         assert_eq!(model.onboard.preview, None);
@@ -751,6 +750,23 @@ mod tests {
         assert!(!model.onboard_preview_is_current());
         assert!(model.confirm_onboard_save().is_err());
         assert!(sent(&mut model).is_empty());
+    }
+
+    #[test]
+    fn a_preview_stays_with_the_slot_it_was_made_for() {
+        let mut model = editing(mixed(), &["a", "b", "c"]);
+        model.preview_onboard_save(SaveTarget::Over(1)).unwrap();
+        onboard_slots(&mut model, &["b", "c"], Some(0));
+        assert!(!model.onboard_preview_is_current(), "slot 1 is now \"c\"");
+        assert!(model.confirm_onboard_save().unwrap_err().ends_with("Preview again."));
+        assert!(sent(&mut model).is_empty());
+        let preview = model.onboard.preview.clone().unwrap();
+        assert_eq!(preview_heading(&preview), "Replaces slot 1 (\"b\") with \"p\".");
+
+        onboard_slots(&mut model, &["a", "b", "c"], Some(0));
+        assert!(model.onboard_preview_is_current());
+        model.confirm_onboard_save().unwrap();
+        assert_eq!(sent(&mut model), [onboard(OnboardRequest::Save { profile: "p".into(), slot: Some(1) })]);
     }
 
     #[test]

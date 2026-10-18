@@ -2,13 +2,9 @@ use eframe::egui;
 use ipc::{DeviceState, OnboardRequest, OnboardSlot, Request};
 
 use crate::model::Model;
-use crate::onboard_state::{
-    APPLY_FIRST, Confirm, PREVIEW_OUTDATED, SaveTarget, preview_heading, preview_lines, restore_problem,
-};
+use crate::onboard_state::{Confirm, PREVIEW_OUTDATED, SaveTarget, preview_heading, preview_lines, restore_problem};
 
 pub const HARDWARE_MODE_HINT: &str = "The keyboard plays its active stored slot whenever k100d is not controlling it: after Release to hardware mode, or when k100d quits.";
-const APPLY_IN_THE_PAGES_FIRST: &str =
-    "Apply your edits in the Lighting/Actions page first: k100d saves the profile as it was last applied.";
 pub const RELEASED_HINT: &str =
     "The keyboard is playing its active stored slot. Take it back to change the stored slots.";
 
@@ -163,7 +159,7 @@ fn save_area(ui: &mut egui::Ui, model: &mut Model) {
     profile_to_save(ui, model);
     let source = model.save_source();
     if let Err(reason) = &source {
-        ui.weak(if reason == APPLY_FIRST { APPLY_IN_THE_PAGES_FIRST } else { reason });
+        ui.weak(reason);
     }
     let usable = model.onboard_blocker().is_none() && source.is_ok();
     let selected = model.onboard.selected;
@@ -201,8 +197,7 @@ fn profile_to_save(ui: &mut egui::Ui, model: &mut Model) {
 
 fn preview_panel(ui: &mut egui::Ui, model: &mut Model) {
     let Some(preview) = model.onboard.preview.clone() else { return };
-    let slots = model.onboard.slots.as_ref().map(|stored| stored.slots.clone()).unwrap_or_default();
-    ui.strong(preview_heading(&preview, &slots));
+    ui.strong(preview_heading(&preview));
     for line in preview_lines(&preview.conversion) {
         ui.label(line);
     }
@@ -566,8 +561,19 @@ mod tests {
         let mut model = editing(profile("p"), &["a"]);
         model.draft.as_mut().unwrap().profile.apps.push("x.exe".into());
         let harness = page(model);
-        harness.get_by_label_contains("Apply your edits in the Lighting/Actions page first");
+        harness.get_by_label_contains("Apply your edits first");
         assert!(harness.get_by_label("Save as a new slot").accesskit_node().is_disabled());
+    }
+
+    #[test]
+    fn an_overwrite_preview_cannot_be_written_once_its_slot_moved() {
+        let mut model = editing(mixed_profile("p"), &["a", "b", "c"]);
+        model.preview_onboard_save(SaveTarget::Over(1)).unwrap();
+        onboard_slots(&mut model, &["b", "c"], Some(0));
+        let mut harness = page(model);
+        harness.get_by_label("The profile or the slot list changed since this preview. Preview again.");
+        assert!(harness.get_by_label("Write to the keyboard").accesskit_node().is_disabled());
+        assert!(sent(harness.state_mut()).is_empty());
     }
 
     #[test]
