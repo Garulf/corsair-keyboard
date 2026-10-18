@@ -215,6 +215,7 @@ impl Server {
             .sessions
             .iter()
             .filter(|session| match session.stage {
+                _ if !policy.enabled => true,
                 Stage::Connected => !policy.allows(&session.exe),
                 Stage::Refused => policy.allows(&session.exe),
                 Stage::AwaitingHandshake => false,
@@ -1052,7 +1053,7 @@ mod tests {
     }
 
     #[test]
-    fn refused_and_waiting_clients_stay_connected_on_sync() {
+    fn refused_and_waiting_clients_stay_connected_on_sync_while_enabled() {
         let mut host = FakeHost {
             policy: Policy { blocked: vec!["blocked.exe".into()], ..Policy::default() },
             ..FakeHost::k100()
@@ -1063,10 +1064,28 @@ mod tests {
         connected(&mut server, &mut host, 2, "game.exe");
         server.connect(3, "waiting.exe".into(), &mut host);
         assert!(server.sync(&mut host).is_empty());
+        assert_eq!(host.clients.iter().map(|summary| summary.id).collect::<Vec<_>>(), [1, 2, 3]);
+    }
+
+    #[test]
+    fn disabling_the_sdk_closes_every_client_whatever_its_stage() {
+        let mut host = FakeHost {
+            policy: Policy { blocked: vec!["blocked.exe".into()], ..Policy::default() },
+            ..FakeHost::k100()
+        };
+        let mut server = Server::new(ServerConfig::default());
+        server.connect(1, "blocked.exe".into(), &mut host);
+        assert_eq!(exchange(&mut server, &mut host, 1, HANDSHAKE)[0]["result"]["state"], 4);
+        connected(&mut server, &mut host, 2, "game.exe");
+        server.connect(3, "waiting.exe".into(), &mut host);
         host.policy.enabled = false;
-        assert_eq!(server.sync(&mut host), [Output::Close { client: 2 }]);
-        assert_eq!(host.clients.iter().map(|summary| summary.id).collect::<Vec<_>>(), [1, 3]);
-        assert_eq!(exchange(&mut server, &mut host, 3, HANDSHAKE)[0]["result"]["state"], 4);
+        assert_eq!(
+            server.sync(&mut host),
+            [Output::Close { client: 1 }, Output::Close { client: 2 }, Output::Close { client: 3 }]
+        );
+        assert!(host.clients.is_empty());
+        host.policy.enabled = true;
+        assert!(server.sync(&mut host).is_empty(), "closed clients are gone, so re-enabling closes nothing more");
     }
 
     #[test]
@@ -1092,7 +1111,6 @@ mod tests {
         let mut server = Server::new(ServerConfig::default());
         server.connect(1, "game.exe".into(), &mut host);
         assert_eq!(exchange(&mut server, &mut host, 1, HANDSHAKE)[0]["result"]["state"], 4);
-        assert!(server.sync(&mut host).is_empty());
         host.policy.enabled = true;
         assert_eq!(server.sync(&mut host), [Output::Close { client: 1 }]);
     }
