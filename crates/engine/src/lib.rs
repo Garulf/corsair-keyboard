@@ -1,3 +1,4 @@
+mod clients;
 pub mod color;
 pub mod effects;
 mod layer;
@@ -5,6 +6,7 @@ pub mod layout;
 mod spectrum;
 mod zone;
 
+pub use clients::{ClientLayer, ClientLighting};
 pub use effects::EffectConfig;
 pub use layer::{BlendMode, Compositor, Effect, FrameCtx, KeyPress, LayerConfig};
 pub use layout::{Layout, LedGeometry, LedKind, Rect};
