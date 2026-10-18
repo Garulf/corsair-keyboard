@@ -58,7 +58,7 @@ Audio capture for the audio visualizer needs a PulseAudio server or PipeWire wit
 
 `k100d` runs in the background and is the only program that talks to the keyboard. `k100 gui`, the tray and the command line all talk to it over a local socket, so you can use any of them together.
 
-`k100 gui` shows the keyboard and has panes for lighting layers, key assignments and macros (select a key and record a macro into it, then click Stop), the dial modes, device settings and profiles. If the daemon is not running, the window offers to start it.
+`k100 gui` shows the keyboard and has panes for lighting layers, key assignments and macros (select a key and record a macro into it, then click Stop), the dial modes, device settings, profiles and onboard profiles. If the daemon is not running, the window offers to start it.
 
 | Command | What it does |
 | --- | --- |
@@ -102,6 +102,8 @@ The keyboard stores less than a profile file can describe. Layers become hardwar
 While k100d runs, the onboard commands go through it, and the keyboard shows a change once k100d releases the keyboard or quits. Without k100d, `k100` opens the keyboard itself, and it refuses to if k100d is running but does not answer. After a change made that way the keyboard is switched back to hardware mode, so it shows the result at once. `--config-dir` picks the config folder for that direct access and for dry runs.
 
 Before every save, delete and restore, the keyboard's slots are copied to a new folder under `onboard-backup/` in the config folder, and the command prints its path. `k100 onboard restore <folder>` puts all slots in that folder back, and `k100 onboard backup [--to DIR]` makes a copy on demand.
+
+The GUI's Onboard pane does the same through k100d: it lists the stored slots with the active one marked, saves the edited profile as a new slot or over the selected one after a preview of what is left out, activates and deletes slots, and backs them up and restores them. Saving uses the profile as it was last applied, so apply your edits first. Restore takes the full path of a backup folder, and "Use the latest backup" fills in the folder of the last backup k100d reported. While k100d has released the keyboard the pane offers to take it back first.
 
 ### Things to know
 
