@@ -30,10 +30,12 @@ pub enum Pane {
     Dial,
     Device,
     Profiles,
+    Onboard,
 }
 
 impl Pane {
-    pub const ALL: &[Pane] = &[Pane::Overview, Pane::Lighting, Pane::Keys, Pane::Dial, Pane::Device, Pane::Profiles];
+    pub const ALL: &[Pane] =
+        &[Pane::Overview, Pane::Lighting, Pane::Keys, Pane::Dial, Pane::Device, Pane::Profiles, Pane::Onboard];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -43,6 +45,7 @@ impl Pane {
             Pane::Dial => "Dial",
             Pane::Device => "Device",
             Pane::Profiles => "Profiles",
+            Pane::Onboard => "Onboard",
         }
     }
 
@@ -54,6 +57,7 @@ impl Pane {
             Pane::Dial => true,
             Pane::Device => false,
             Pane::Profiles => true,
+            Pane::Onboard => false,
         }
     }
 }

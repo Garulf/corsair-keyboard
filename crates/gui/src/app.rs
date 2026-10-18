@@ -121,6 +121,7 @@ pub fn root(ui: &mut egui::Ui, model: &mut Model) {
             Pane::Dial => crate::dial::dial(ui, model),
             Pane::Device => crate::device::device(ui, model),
             Pane::Profiles => crate::profiles::profiles(ui, model),
+            Pane::Onboard => crate::onboard_page::onboard_page(ui, model),
         }
     });
 }
@@ -563,6 +564,23 @@ mod tests {
         assert_eq!(harness.state().pane, Pane::Profiles);
         harness.get_by_label("Editing games");
         harness.get_by_label("Add program");
+    }
+
+    #[test]
+    fn the_onboard_pane_is_in_the_navigation_and_leaves_the_profile_alone() {
+        assert!(!Pane::Onboard.edits_profile());
+        let mut model = online("games", &["games"]);
+        model.draft.as_mut().unwrap().profile.apps.push("game.exe".into());
+        model.pane = Pane::Lighting;
+        let mut harness = harness(model, root);
+        harness.run();
+        harness.get_by_label("Unsaved changes");
+        harness.get_by_label("Onboard").click();
+        harness.run();
+        assert_eq!(harness.state().pane, Pane::Onboard);
+        harness.get_by_label("Onboard profiles");
+        assert!(harness.query_by_label("Unsaved changes").is_none());
+        assert!(harness.state().draft.as_ref().unwrap().dirty());
     }
 
     #[test]
