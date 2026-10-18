@@ -617,6 +617,15 @@ mod tests {
             .collect()
     }
 
+    fn unnormalized_replies(transcript: &Transcript, method: i64) -> Vec<&Value> {
+        transcript
+            .entries
+            .iter()
+            .filter(|entry| entry.direction == Direction::Received && entry.message["method"] == method)
+            .map(|entry| &entry.message)
+            .collect()
+    }
+
     #[test]
     fn the_server_answers_the_icue_capture_like_icue() {
         let mut capture: Transcript = serde_json::from_str(include_str!("../fixtures/icue-k100-capture.json")).unwrap();
@@ -626,6 +635,9 @@ mod tests {
         let ours = replay(&capture, FakeHost::k100());
         assert_eq!(differences(&capture, &ours), Vec::<String>::new());
         assert_eq!(events(&ours), events(&capture));
+        for method in [Method::Handshake, Method::GetLedColors] {
+            assert_eq!(unnormalized_replies(&ours, method.id()), unnormalized_replies(&capture, method.id()));
+        }
     }
 
     #[test]
