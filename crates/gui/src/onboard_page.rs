@@ -2,7 +2,9 @@ use eframe::egui;
 use ipc::{DeviceState, OnboardRequest, OnboardSlot, Request};
 
 use crate::model::Model;
-use crate::onboard_state::{Confirm, PREVIEW_OUTDATED, SaveTarget, preview_heading, preview_lines, restore_problem};
+use crate::onboard_state::{
+    Confirm, PREVIEW_OUTDATED, SaveTarget, list_error_line, preview_heading, preview_lines, restore_problem,
+};
 
 pub const HARDWARE_MODE_HINT: &str = "The keyboard plays its active stored slot whenever k100d is not controlling it: after Release to hardware mode, or when k100d quits.";
 pub const RELEASED_HINT: &str =
@@ -95,6 +97,9 @@ fn report(ui: &mut egui::Ui, model: &Model) {
 fn slot_list(ui: &mut egui::Ui, model: &mut Model) {
     let Some(stored) = model.onboard.slots.clone() else {
         ui.weak("No slots listed yet.");
+        if let Some(message) = &model.onboard.list_error {
+            ui.weak(list_error_line(message));
+        }
         return;
     };
     for slot in &stored.slots {
@@ -268,11 +273,10 @@ fn restore_buttons(ui: &mut egui::Ui, model: &mut Model, allowed: bool) {
 mod tests {
     use egui_kittest::Harness;
     use egui_kittest::kittest::{NodeT, Queryable};
-    use ipc::{DeviceState, OnboardRequest, OnboardSlot, Request};
+    use ipc::{DeviceState, OnboardRequest, OnboardSlot, Reply, Request};
 
     use super::*;
-    use crate::model::Draft;
-    use crate::model::Model;
+    use crate::model::{Draft, Inbox, Model};
     use crate::onboard_state::{Confirm, Outcome, SaveTarget};
     use crate::testing::{editing, harness, mixed_profile, onboard, onboard_slots, online, profile, sent};
 
@@ -606,5 +610,29 @@ mod tests {
         let harness = page(model);
         harness.get_by_label("Saving \"p\" as a new slot...");
         assert!(harness.get_by_label("Save as a new slot").accesskit_node().is_disabled());
+    }
+
+    #[test]
+    fn a_failed_list_shows_the_line_and_leaves_no_slot_to_act_on() {
+        let mut model = editing(mixed_profile("p"), &["a", "b"]);
+        model.onboard.select(1);
+        model.delete_slot(1).unwrap();
+        let message = "keyboard: no reply; put it back with: k100 onboard restore \"/b/1\"";
+        model
+            .apply(Inbox::reply(onboard(OnboardRequest::Delete { slot: 1 }), Reply::Error { message: message.into() }));
+        model.apply(Inbox::reply(
+            onboard(OnboardRequest::List),
+            Reply::Error { message: "no reply to the listing".into() },
+        ));
+        sent(&mut model);
+        let harness = page(model);
+        harness.get_by_label("The slot list could not be read: no reply to the listing. Click Refresh.");
+        harness.get_by_label_contains("put it back with");
+        harness.get_by_label("No slots listed yet.");
+        for label in ["Activate", "Delete", "Overwrite the selected slot"] {
+            assert!(harness.get_by_label(label).accesskit_node().is_disabled(), "{label}");
+        }
+        assert!(harness.query_by_label("Write to the keyboard").is_none());
+        assert!(!harness.get_by_label("Refresh").accesskit_node().is_disabled());
     }
 }

@@ -533,6 +533,9 @@ impl Model {
 
     fn accept_state(&mut self, state: DaemonState) {
         let active = state.active_profile.clone();
+        if self.state.as_ref().is_some_and(|current| current.device != state.device) {
+            self.onboard.keyboard_changed();
+        }
         self.state = Some(state);
         if self.draft.is_none() && !active.is_empty() {
             self.send(Request::GetProfile { name: active });

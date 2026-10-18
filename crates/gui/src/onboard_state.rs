@@ -48,6 +48,7 @@ pub struct OnboardForm {
     pub pending: Option<OnboardRequest>,
     pub outcome: Option<Outcome>,
     pub error: Option<String>,
+    pub list_error: Option<String>,
     pub selected: Option<u32>,
     pub confirm: Option<Confirm>,
     pub restore_from: String,
@@ -63,6 +64,7 @@ impl OnboardForm {
         self.confirm = None;
         self.preview = None;
         self.list_failed = false;
+        self.list_error = None;
     }
 
     pub fn select(&mut self, slot: u32) {
@@ -73,28 +75,52 @@ impl OnboardForm {
     }
 
     fn accept_slots(&mut self, stored: StoredSlots) {
-        let count = stored.slots.len();
-        let past_the_end = |slot: u32| usize::try_from(slot).map_or(true, |index| index >= count);
-        if self.selected.is_some_and(past_the_end) {
+        let name_at = |slots: Option<&StoredSlots>, slot: u32| {
+            slots?.slots.iter().find(|listed| listed.index == slot).map(|listed| listed.name.clone())
+        };
+        let renamed = |slot: u32| name_at(self.slots.as_ref(), slot) != name_at(Some(&stored), slot);
+        if self.selected.is_some_and(renamed) {
             self.selected = None;
         }
-        if matches!(self.confirm, Some(Confirm::Delete(slot)) if past_the_end(slot)) {
+        if matches!(self.confirm, Some(Confirm::Delete(slot)) if renamed(slot)) {
             self.confirm = None;
         }
         self.slots = Some(stored);
         self.list_failed = false;
+        self.list_error = None;
     }
 
     fn fail(&mut self, request: &OnboardRequest, message: String) {
         if *request == OnboardRequest::List {
+            self.forget_slots();
             self.list_failed = true;
-            if self.error.is_none() && self.outcome.is_none() {
-                self.error = Some(message);
-            }
+            self.list_error = Some(message);
         } else {
             self.error = Some(message);
         }
     }
+
+    fn forget_slots(&mut self) {
+        self.slots = None;
+        self.selected = None;
+        if matches!(self.confirm, Some(Confirm::Delete(_))) {
+            self.confirm = None;
+        }
+        if matches!(&self.preview, Some(Preview { target: SaveTarget::Over(_), .. })) {
+            self.preview = None;
+        }
+    }
+}
+
+pub fn list_error_line(message: &str) -> String {
+    format!("The slot list could not be read: {message}. Click Refresh.")
+}
+
+pub fn restore_folder_in(message: &str) -> Option<&str> {
+    const MARKER: &str = "k100 onboard restore \"";
+    let (_, after) = message.split_once(MARKER)?;
+    let (folder, _) = after.split_once('"')?;
+    Some(folder)
 }
 
 pub fn restore_problem(folder: &str) -> Option<&'static str> {
@@ -288,6 +314,9 @@ impl Model {
     }
 
     fn onboard_failed(&mut self, request: &OnboardRequest, message: String) {
+        if let Some(folder) = restore_folder_in(&message) {
+            self.onboard.latest_backup = Some(folder.to_owned());
+        }
         self.onboard.fail(request, message);
         self.list_after_change(request);
     }
@@ -319,6 +348,7 @@ impl Model {
             return Err(blocker);
         }
         self.onboard.error = None;
+        self.onboard.list_error = None;
         self.onboard.outcome = None;
         self.onboard.confirm = None;
         self.send_onboard(request);
@@ -449,6 +479,7 @@ mod tests {
         ));
         errored.apply(Inbox::reply(list(), Reply::Error { message: "no reply to the listing".into() }));
         assert_eq!(errored.onboard.error.as_deref(), Some("restore with: k100 onboard restore \"/b/1\""));
+        assert_eq!(errored.onboard.list_error.as_deref(), Some("no reply to the listing"));
 
         let mut reported = with_slots(&["a", "b"], Some(0));
         reported.delete_slot(1).unwrap();
@@ -456,6 +487,7 @@ mod tests {
         reported.apply(Inbox::reply(onboard(OnboardRequest::Delete { slot: 1 }), done));
         reported.apply(Inbox::request_failed(list(), "k100d closed the connection"));
         assert_eq!(reported.onboard.error, None);
+        assert_eq!(reported.onboard.list_error.as_deref(), Some("k100d closed the connection"));
         assert_eq!(reported.onboard.outcome.as_ref().unwrap().message, "deleted");
         assert!(!reported.onboard_needs_listing(), "a failed list is not repeated by itself");
     }
@@ -466,11 +498,11 @@ mod tests {
         model.refresh_onboard().unwrap();
         sent(&mut model);
         model.apply(Inbox::reply(list(), Reply::Error { message: "no keyboard connected".into() }));
-        assert_eq!(model.onboard.error.as_deref(), Some("no keyboard connected"));
+        assert_eq!(model.onboard.list_error.as_deref(), Some("no keyboard connected"));
         assert!(sent(&mut model).is_empty());
         assert!(!model.onboard_needs_listing());
         model.refresh_onboard().unwrap();
-        assert_eq!(model.onboard.error, None);
+        assert_eq!(model.onboard.list_error, None);
     }
 
     #[test]
@@ -483,7 +515,7 @@ mod tests {
         model.apply(Inbox::Event(Event::DeviceState {
             state: DeviceState::Connected { model: "K100 RGB".into(), firmware: "1.15.61".into() },
         }));
-        assert_eq!(model.onboard.error.as_deref(), Some("no keyboard connected"), "the error is not cleared");
+        assert_eq!(model.onboard.list_error, None);
         assert!(model.onboard_needs_listing());
     }
 
@@ -540,7 +572,7 @@ mod tests {
         let mut model = online("p", &["p"]);
         model.refresh_onboard().unwrap();
         model.apply(Inbox::reply(list(), Reply::Done));
-        assert!(model.onboard.error.as_deref().unwrap().contains("unexpected reply"));
+        assert!(model.onboard.list_error.as_deref().unwrap().contains("unexpected reply"));
         assert_eq!(model.onboard.pending, None);
     }
 
@@ -615,7 +647,7 @@ mod tests {
         listing.refresh_onboard().unwrap();
         sent(&mut listing);
         listing.apply(Inbox::request_failed(list(), "k100d closed the connection"));
-        assert_eq!(listing.onboard.error.as_deref(), Some("k100d closed the connection"));
+        assert_eq!(listing.onboard.list_error.as_deref(), Some("k100d closed the connection"));
         assert!(sent(&mut listing).is_empty());
         assert!(!listing.onboard_needs_listing());
 
@@ -802,5 +834,138 @@ mod tests {
         model.apply(Inbox::reply(save, done));
         assert_eq!(model.onboard.outcome.as_ref().unwrap().notes.len(), 1);
         assert_eq!(sent(&mut model), [list()]);
+    }
+
+    const AFTER_BACKUP_ERROR: &str = "keyboard: no reply to WriteBufferBegin; left on the keyboard: 0x6d6f; \
+         the backup taken before the change is in /b/1; put it back with: k100 onboard restore \"/b/1\"";
+
+    #[test]
+    fn a_failed_list_after_a_change_leaves_nothing_slot_specific_to_act_on() {
+        let mut model = editing(mixed(), &["a", "b", "c"]);
+        model.preview_onboard_save(SaveTarget::Over(1)).unwrap();
+        model.onboard.select(1);
+        model.delete_slot(1).unwrap();
+        model.apply(Inbox::reply(
+            onboard(OnboardRequest::Delete { slot: 1 }),
+            Reply::Error { message: AFTER_BACKUP_ERROR.into() },
+        ));
+        assert_eq!(sent(&mut model).len(), 2);
+        model.onboard.confirm = Some(Confirm::Delete(1));
+        model.apply(Inbox::reply(list(), Reply::Error { message: "no reply to the listing".into() }));
+
+        assert_eq!(
+            (model.onboard.slots.clone(), model.onboard.selected, model.onboard.confirm.clone()),
+            (None, None, None)
+        );
+        assert_eq!(model.onboard.preview, None);
+        assert_eq!(model.onboard.list_error.as_deref(), Some("no reply to the listing"));
+        assert_eq!(model.onboard.error.as_deref(), Some(AFTER_BACKUP_ERROR));
+        assert_eq!(model.activate_slot(1).unwrap_err(), "Refresh the slot list first.");
+        assert_eq!(model.delete_slot(1).unwrap_err(), "Refresh the slot list first.");
+        assert_eq!(model.preview_onboard_save(SaveTarget::Over(1)).unwrap_err(), "Refresh the slot list first.");
+        assert!(sent(&mut model).is_empty());
+    }
+
+    #[test]
+    fn a_failed_list_keeps_a_restore_confirmation_and_a_new_slot_preview() {
+        let mut model = editing(mixed(), &["a", "b"]);
+        model.preview_onboard_save(SaveTarget::NewSlot).unwrap();
+        model.refresh_onboard().unwrap();
+        model.onboard.confirm = Some(Confirm::Restore);
+        model.apply(Inbox::reply(list(), Reply::Error { message: "no reply".into() }));
+        assert_eq!(model.onboard.confirm, Some(Confirm::Restore));
+        assert!(model.onboard.preview.is_some());
+    }
+
+    #[test]
+    fn a_good_list_clears_the_list_error() {
+        let mut model = online("p", &["p"]);
+        model.refresh_onboard().unwrap();
+        model.apply(Inbox::reply(list(), Reply::Error { message: "no reply".into() }));
+        model.refresh_onboard().unwrap();
+        assert_eq!(model.onboard.list_error, None);
+        model.apply(Inbox::reply(list(), Reply::Error { message: "no reply".into() }));
+        onboard_slots(&mut model, &["a"], Some(0));
+        assert_eq!(model.onboard.list_error, None);
+    }
+
+    #[test]
+    fn the_list_error_line_tells_the_user_to_refresh() {
+        assert_eq!(list_error_line("no reply"), "The slot list could not be read: no reply. Click Refresh.");
+    }
+
+    #[test]
+    fn the_restore_folder_in_an_error_reply_becomes_the_latest_backup() {
+        let mut model = with_slots(&["a", "b"], Some(0));
+        model.delete_slot(1).unwrap();
+        model.apply(Inbox::reply(
+            onboard(OnboardRequest::Delete { slot: 1 }),
+            Reply::Error { message: AFTER_BACKUP_ERROR.into() },
+        ));
+        assert_eq!(model.onboard.latest_backup.as_deref(), Some("/b/1"));
+    }
+
+    #[test]
+    fn the_restore_folder_is_found_when_the_slot_list_may_be_damaged() {
+        let message = "file 0x000f read back different from what was written; the keyboard's slot list may be \
+                       damaged: put it back with: k100 onboard restore \"/b/2\"";
+        assert_eq!(restore_folder_in(message), Some("/b/2"));
+        assert_eq!(restore_folder_in("keyboard: no reply to CreateFile"), None);
+        assert_eq!(restore_folder_in("restore \"/b/2"), None);
+    }
+
+    #[test]
+    fn an_error_without_a_restore_folder_keeps_the_latest_backup() {
+        let mut model = with_slots(&["a", "b"], Some(0));
+        model.onboard.latest_backup = Some("/b/0".into());
+        model.delete_slot(1).unwrap();
+        model.apply(Inbox::reply(
+            onboard(OnboardRequest::Delete { slot: 1 }),
+            Reply::Error { message: "keyboard: no reply".into() },
+        ));
+        assert_eq!(model.onboard.latest_backup.as_deref(), Some("/b/0"));
+    }
+
+    #[test]
+    fn a_list_that_renames_the_selected_slot_drops_the_selection_and_the_delete_question() {
+        let mut model = with_slots(&["a", "b", "c"], Some(0));
+        model.onboard.select(1);
+        model.onboard.confirm = Some(Confirm::Delete(1));
+        onboard_slots(&mut model, &["a", "c"], Some(0));
+        assert_eq!((model.onboard.selected, model.onboard.confirm.clone()), (None, None));
+    }
+
+    #[test]
+    fn a_list_that_keeps_the_selected_name_keeps_the_selection() {
+        let mut model = with_slots(&["a", "b", "c"], Some(0));
+        model.onboard.select(1);
+        model.onboard.confirm = Some(Confirm::Delete(1));
+        onboard_slots(&mut model, &["a", "b"], Some(0));
+        assert_eq!((model.onboard.selected, model.onboard.confirm.clone()), (Some(1), Some(Confirm::Delete(1))));
+    }
+
+    #[test]
+    fn a_state_reply_that_changes_the_device_forgets_the_slots() {
+        let mut model = editing(mixed(), &["a", "b"]);
+        model.preview_onboard_save(SaveTarget::Over(1)).unwrap();
+        model.onboard.select(1);
+        let mut released = crate::testing::state("p", &["p"]);
+        released.device = DeviceState::Released;
+        model.apply(Inbox::reply(Request::GetState, Reply::State { state: released }));
+        assert_eq!(
+            (model.onboard.slots.clone(), model.onboard.selected, model.onboard.preview.clone()),
+            (None, None, None)
+        );
+        let taken_back = crate::testing::state("p", &["p"]);
+        model.apply(Inbox::reply(Request::GetState, Reply::State { state: taken_back }));
+        assert!(model.onboard_needs_listing());
+    }
+
+    #[test]
+    fn a_state_reply_that_keeps_the_device_keeps_the_slots() {
+        let mut model = with_slots(&["a", "b"], Some(0));
+        model.onboard.select(1);
+        model.apply(Inbox::reply(Request::GetState, Reply::State { state: crate::testing::state("p", &["p"]) }));
+        assert_eq!((model.onboard.slots.is_some(), model.onboard.selected), (true, Some(1)));
     }
 }
