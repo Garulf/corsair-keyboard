@@ -1,5 +1,7 @@
 use k100::Rgb;
 
+pub const PROFILE_PRIORITY: u8 = 127;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClientLayer {
     pub priority: u8,

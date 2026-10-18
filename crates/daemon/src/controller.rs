@@ -6,7 +6,7 @@ use actions::{
     RecorderState, RepeatMode,
 };
 use bragi::{PollingRate, PropertyId};
-use engine::{Compositor, KeyPress, Layout};
+use engine::{ClientLighting, Compositor, KeyPress, Layout};
 use ipc::{
     AudioState, DaemonState, Debounce, DeviceState, Event, MAX_DEBOUNCE_TIMEOUT, OnboardRequest, PROTOCOL_VERSION,
     Profile, Reply, Request, SettingsPatch,
@@ -142,6 +142,7 @@ pub struct Controller {
     now: Duration,
     events: Vec<Event>,
     last_frame: Option<Frame>,
+    client_lighting: ClientLighting,
     autostart: Box<dyn install::Autostart>,
     audio: Box<dyn AudioPort>,
     announced_audio: AudioState,
@@ -195,6 +196,7 @@ impl Controller {
             now: Duration::ZERO,
             events: Vec::new(),
             last_frame: None,
+            client_lighting: ClientLighting::NONE,
             autostart: Box::new(install::Unavailable("autostart is not configured".into())),
             audio: Box::new(NoAudio),
             announced_audio: AudioState::Off,
@@ -301,6 +303,14 @@ impl Controller {
         self.apply_all(intents, config);
     }
 
+    pub fn set_client_lighting(&mut self, lighting: ClientLighting) {
+        self.client_lighting = lighting;
+    }
+
+    pub fn set_sdk_taken_keys(&mut self, leds: &[u8]) {
+        self.dispatcher.set_taken_keys(leds);
+    }
+
     pub fn tick(&mut self, now: Duration, presses: &[KeyPress], config: &ConfigDir) {
         self.now = now;
         let intents = self.dispatcher.poll(now);
@@ -317,7 +327,7 @@ impl Controller {
         if self.link.is_none() {
             return;
         }
-        let frame = self.compositor.render(now, presses, &self.audio.spectrum());
+        let frame = self.compositor.render_with(now, presses, &self.audio.spectrum(), &self.client_lighting);
         self.last_frame = Some(frame);
         let _ = self.with_link(|link| link.write_frame(&frame));
         let records = self.indicators.records(now);
@@ -2417,5 +2427,33 @@ mod tests {
         let frames = rig.log.lock().unwrap().frames;
         rig.controller.tick(ms(16), &[], &rig.config);
         assert_eq!(rig.log.lock().unwrap().frames, frames + 1);
+    }
+
+    #[test]
+    fn client_lighting_reaches_the_written_frame_and_survives_a_profile_switch() {
+        let mut rig = rig(vec![profile("default"), profile("games")]);
+        let blue = Rgb::new(0, 0, 255);
+        let layer = engine::ClientLayer { priority: 128, colors: vec![(26, blue, 255)] };
+        rig.controller.set_client_lighting(ClientLighting::Exclusive(layer));
+        rig.controller.tick(ms(16), &[], &rig.config);
+        assert_eq!(rig.log.lock().unwrap().last_frame.unwrap()[26], blue);
+        rig.controller.handle(Request::SetActiveProfile { name: "games".into() }, &rig.config);
+        rig.controller.tick(ms(32), &[], &rig.config);
+        assert_eq!(rig.log.lock().unwrap().last_frame.unwrap()[26], blue);
+    }
+
+    #[test]
+    fn taken_g_keys_skip_their_assignment_across_profile_switches() {
+        let remap = Action::Remap { key: key("a"), modifiers: vec![] };
+        let mut rig = rig(vec![assigned("default", "g1", remap), profile("games")]);
+        rig.controller.set_sdk_taken_keys(&[led::G1]);
+        rig.controller.handle(Request::SetActiveProfile { name: "games".into() }, &rig.config);
+        rig.controller.handle(Request::SetActiveProfile { name: "default".into() }, &rig.config);
+        rig.output.take();
+        tap_key(&mut rig, led::G1, 10, 20);
+        assert!(rig.output.take().is_empty());
+        rig.controller.set_sdk_taken_keys(&[]);
+        tap_key(&mut rig, led::G1, 30, 40);
+        assert!(!rig.output.take().is_empty());
     }
 }
