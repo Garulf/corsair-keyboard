@@ -111,7 +111,9 @@ impl SdkBridge {
 }
 
 pub fn new_device_id() -> String {
-    let hex = format!("{:016x}{:016x}", RandomState::new().hash_one(0u8), RandomState::new().hash_one(1u8));
+    let high = RandomState::new().hash_one(0u8) & !0xF000 | 0x4000;
+    let low = RandomState::new().hash_one(1u8) & !(0xC << 60) | (0x8 << 60);
+    let hex = format!("{high:016x}{low:016x}");
     format!("{{{}-{}-{}-{}-{}}}", &hex[..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..])
 }
 
@@ -421,6 +423,15 @@ mod tests {
             }
         }
         assert_ne!(new_device_id(), new_device_id());
+    }
+
+    #[test]
+    fn device_ids_are_rfc_4122_version_4() {
+        for _ in 0..64 {
+            let id = new_device_id();
+            assert_eq!(id.as_bytes()[15], b'4', "{id}");
+            assert!(matches!(id.as_bytes()[20], b'8' | b'9' | b'a' | b'b'), "{id}");
+        }
     }
 
     #[test]
