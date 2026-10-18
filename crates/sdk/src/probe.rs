@@ -535,8 +535,12 @@ mod tests {
         let mut listened = false;
         let options = ProbeOptions { listen: Duration::from_millis(50), ..ProbeOptions::default() };
         let transcript = run_probe(&mut pipe, &options, &mut || listened = true);
-        let keys: Vec<&Value> =
-            transcript.entries.iter().filter(|e| e.message["method"] == 17).map(|e| &e.message).collect();
+        let keys: Vec<&Value> = transcript
+            .entries
+            .iter()
+            .filter(|e| e.message["result"]["keyEvent"].is_object())
+            .map(|e| &e.message)
+            .collect();
         assert!(listened);
         assert_eq!(
             keys.iter().map(|m| m["result"]["keyEvent"]["isPressed"].clone()).collect::<Vec<_>>(),

@@ -41,7 +41,6 @@ pub struct ClientSummary {
 pub trait SdkHost {
     fn device(&self) -> Option<DeviceSnapshot>;
     fn policy(&self) -> Policy;
-    fn current_frame(&self) -> Option<k100::Frame>;
     fn set_lighting(&mut self, lighting: ClientLighting);
     fn set_intercepted(&mut self, leds: Vec<u8>);
     fn clients_changed(&mut self, clients: Vec<ClientSummary>);

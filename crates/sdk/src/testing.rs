@@ -1,16 +1,19 @@
-use crate::device::DeviceSnapshot;
+use crate::device::{DeviceSnapshot, macro_key_led};
 use crate::host::{ClientSummary, Policy, SdkHost};
-use crate::server::{ClientId, Output, Server};
+use crate::ids::{MacroKey, Method};
+use crate::server::{ClientId, Output, Server, ServerConfig};
+use crate::transcript::{Direction, Entry, Transcript};
 use engine::ClientLighting;
 use serde_json::Value;
 
 pub(crate) const DEVICE: &str = "{00000000-0000-4000-8000-000000000001}";
+const REPLAY_CLIENT: ClientId = 1;
+const KEY_EVENT_ID: i64 = 2;
 pub(crate) const HANDSHAKE: &str = r#"{"method":0,"code":-1,"params":{"pid":1,"clientVersion":"4.0.84"}}"#;
 
 pub(crate) struct FakeHost {
     pub device: Option<DeviceSnapshot>,
     pub policy: Policy,
-    pub frame: Option<k100::Frame>,
     pub lighting: ClientLighting,
     pub intercepted: Vec<u8>,
     pub clients: Vec<ClientSummary>,
@@ -24,7 +27,6 @@ impl FakeHost {
         Self {
             device: Some(device),
             policy: Policy::default(),
-            frame: None,
             lighting: ClientLighting::default(),
             intercepted: Vec::new(),
             clients: Vec::new(),
@@ -40,10 +42,6 @@ impl SdkHost for FakeHost {
 
     fn policy(&self) -> Policy {
         self.policy.clone()
-    }
-
-    fn current_frame(&self) -> Option<k100::Frame> {
-        self.frame
     }
 
     fn set_lighting(&mut self, lighting: ClientLighting) {
@@ -92,4 +90,41 @@ pub(crate) fn recipients(outputs: &[Output]) -> Vec<ClientId> {
             Output::Close { .. } => None,
         })
         .collect()
+}
+
+pub(crate) fn replay(capture: &Transcript, mut host: FakeHost) -> Transcript {
+    let mut server = Server::new(ServerConfig::default());
+    server.connect(REPLAY_CLIENT, "k100.exe".into(), &mut host);
+    let mut entries = Vec::new();
+    for entry in &capture.entries {
+        let outputs = match entry.direction {
+            Direction::Sent => {
+                entries.push(entry.clone());
+                server.receive(REPLAY_CLIENT, entry.message.to_string().as_bytes(), &mut host)
+            }
+            Direction::Received => match captured_key(&entry.message) {
+                Some((led, pressed)) => server.key(led, pressed, &mut host),
+                None => Vec::new(),
+            },
+            Direction::Note => Vec::new(),
+        };
+        entries.extend(outputs.into_iter().filter_map(|output| match output {
+            Output::Send { client: REPLAY_CLIENT, payload } => Some(Entry {
+                at_ms: entry.at_ms,
+                direction: Direction::Received,
+                message: serde_json::from_slice(&payload).unwrap(),
+            }),
+            _ => None,
+        }));
+    }
+    Transcript { entries, ..capture.clone() }
+}
+
+fn captured_key(message: &Value) -> Option<(u8, bool)> {
+    let result = &message["result"];
+    if message["method"].as_i64() != Some(Method::Event.id()) || result["id"].as_i64() != Some(KEY_EVENT_ID) {
+        return None;
+    }
+    let key = u8::try_from(result["keyEvent"]["keyId"].as_u64()?).ok()?;
+    Some((macro_key_led(MacroKey(key))?, result["keyEvent"]["isPressed"].as_bool()?))
 }

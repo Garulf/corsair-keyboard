@@ -5,7 +5,9 @@ use serde_json::{Map, Value, json};
 const EVENT_METHOD: i64 = 17;
 const KEY_EVENT_ID: i64 = 2;
 const DEVICE_EVENT_ID: i64 = 1;
+const EVENT_CODE: i64 = -1;
 const EXACT_FLOAT_LIMIT: f64 = 9_007_199_254_740_992.0;
+const NO_DEVICE_TYPES: u32 = 0;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Envelope {
@@ -90,10 +92,9 @@ pub fn parse_request(envelope: &Envelope) -> Result<Request, RequestError> {
             pid: fields.optional_integer("pid")?,
             client_version: fields.optional_string("clientVersion")?,
         }),
-        Some(Method::GetDevices) => Ok(Request::GetDevices {
-            type_mask: fields.unsigned("deviceTypeMask")?,
-            size_max: fields.integer("sizeMax")?,
-        }),
+        Some(Method::GetDevices) => {
+            Ok(Request::GetDevices { type_mask: fields.device_type_mask()?, size_max: fields.integer("sizeMax")? })
+        }
         Some(Method::GetDeviceInfo) => Ok(Request::GetDeviceInfo { device_id: fields.string("deviceId")? }),
         Some(Method::GetPropertyInfo) => Ok(Request::GetPropertyInfo {
             device_id: fields.string("deviceId")?,
@@ -186,6 +187,11 @@ impl<'a> Fields<'a> {
         self.map.get(key).and_then(unsigned32).ok_or_else(|| self.bad(key, "a 32-bit integer"))
     }
 
+    fn device_type_mask(&self) -> Result<u32, RequestError> {
+        let mask = self.integer("deviceTypeMask")?;
+        Ok(i32::try_from(mask).map_or(NO_DEVICE_TYPES, |mask| mask as u32))
+    }
+
     fn index(&self) -> Result<u32, RequestError> {
         match self.map.get("index") {
             None => Ok(0),
@@ -198,15 +204,12 @@ impl<'a> Fields<'a> {
     }
 
     fn key_name(&self) -> Result<char, RequestError> {
-        let key = match self.map.get("keyName") {
-            Some(Value::String(text)) => {
-                let mut chars = text.chars();
-                chars.next().filter(|_| chars.next().is_none())
-            }
-            Some(value) => integral(value).filter(|code| (0..=127).contains(code)).map(|code| code as u8 as char),
-            None => None,
-        };
-        key.ok_or_else(|| self.bad("keyName", "a character or a code from 0 to 127"))
+        self.map
+            .get("keyName")
+            .and_then(integral)
+            .filter(|code| (0..=127).contains(code))
+            .map(|code| code as u8 as char)
+            .ok_or_else(|| self.bad("keyName", "a character code from 0 to 127"))
     }
 
     fn array(&self, key: &str) -> Result<&'a [Value], RequestError> {
@@ -264,14 +267,16 @@ pub fn reply(method: i64, code: i64, error: ErrorCode, result: Value) -> Vec<u8>
 
 pub fn key_event(device_id: &str, key: MacroKey, pressed: bool) -> Vec<u8> {
     let event = json!({"deviceId": device_id, "isPressed": pressed, "keyId": key.0});
-    to_bytes(&json!({"method": EVENT_METHOD, "result": {"id": KEY_EVENT_ID, "keyEvent": event}}))
+    event_payload(json!({"id": KEY_EVENT_ID, "keyEvent": event}))
 }
 
 pub fn device_event(device_id: &str, connected: bool) -> Vec<u8> {
     let event = json!({"deviceId": device_id, "isConnected": connected});
-    to_bytes(
-        &json!({"method": EVENT_METHOD, "result": {"id": DEVICE_EVENT_ID, "deviceConnectionStatusChangedEvent": event}}),
-    )
+    event_payload(json!({"id": DEVICE_EVENT_ID, "deviceConnectionStatusChangedEvent": event}))
+}
+
+fn event_payload(result: Value) -> Vec<u8> {
+    reply(EVENT_METHOD, EVENT_CODE, ErrorCode::Success, result)
 }
 
 pub fn number(value: f64) -> Value {
@@ -315,12 +320,17 @@ mod tests {
     }
 
     #[test]
-    fn the_all_devices_mask_is_accepted_signed_or_unsigned() {
-        for mask in ["4294967295", "-1", "4294967295.0"] {
-            let text = format!(r#"{{"method":1,"code":1,"params":{{"deviceTypeMask":{mask},"sizeMax":64}}}}"#);
-            assert_eq!(
-                request(&text).unwrap(),
-                Request::GetDevices { type_mask: device_type::ALL, size_max: 64 },
+    fn the_all_devices_mask_is_minus_one_and_masks_beyond_an_int_match_nothing() {
+        let parse = |mask: &str| {
+            request(&format!(r#"{{"method":1,"code":1,"params":{{"deviceTypeMask":{mask},"sizeMax":64}}}}"#))
+        };
+        assert_eq!(parse("-1").unwrap(), Request::GetDevices { type_mask: device_type::ALL, size_max: 64 });
+        for mask in ["4294967295", "4294967295.0", "2147483648", "-2147483649"] {
+            assert_eq!(parse(mask).unwrap(), Request::GetDevices { type_mask: 0, size_max: 64 }, "{mask}");
+        }
+        for mask in ["1.5", r#""1""#, "null"] {
+            assert!(
+                matches!(parse(mask), Err(RequestError::BadParams(key)) if key.contains("deviceTypeMask")),
                 "{mask}"
             );
         }
@@ -328,12 +338,9 @@ mod tests {
 
     #[test]
     fn u32_fields_reject_values_outside_the_signed_and_unsigned_range() {
-        for mask in ["4294967296", "-2147483649", "1.5", r#""1""#, "null"] {
-            let text = format!(r#"{{"method":1,"code":1,"params":{{"deviceTypeMask":{mask},"sizeMax":64}}}}"#);
-            assert!(
-                matches!(request(&text), Err(RequestError::BadParams(key)) if key.contains("deviceTypeMask")),
-                "{mask}"
-            );
+        for luid in ["4294967296", "-2147483649", "1.5", r#""1""#, "null"] {
+            let text = format!(r#"{{"method":8,"code":1,"params":{{"deviceId":"d","luids":[{luid}]}}}}"#);
+            assert!(matches!(request(&text), Err(RequestError::BadParams(key)) if key.contains("luids[0]")), "{luid}");
         }
     }
 
@@ -357,11 +364,11 @@ mod tests {
     }
 
     #[test]
-    fn key_names_are_accepted_as_a_character_or_its_code() {
+    fn key_names_are_accepted_as_a_character_code_only() {
         let parse =
             |key: &str| request(&format!(r#"{{"method":6,"code":3,"params":{{"deviceId":"d","keyName":{key}}}}}"#));
-        assert_eq!(parse(r#""A""#).unwrap(), Request::LuidForKeyName { device_id: "d".into(), key: 'A' });
         assert_eq!(parse("65").unwrap(), Request::LuidForKeyName { device_id: "d".into(), key: 'A' });
+        assert!(matches!(parse(r#""A""#), Err(RequestError::BadParams(_))));
         assert!(matches!(parse(r#""AB""#), Err(RequestError::BadParams(_))));
         assert!(matches!(parse(r#""""#), Err(RequestError::BadParams(_))));
         assert!(matches!(parse("128"), Err(RequestError::BadParams(_))));
@@ -421,7 +428,7 @@ mod tests {
                 r#"{"deviceId":"d","propertyId":2,"index":0,"property":{"dataType":0,"value":true}}"#,
                 Request::WriteProperty { device_id: device(), property: 2, index: 0 },
             ),
-            (6, r#"{"deviceId":"d","keyName":"A"}"#, Request::LuidForKeyName { device_id: device(), key: 'A' }),
+            (6, r#"{"deviceId":"d","keyName":65}"#, Request::LuidForKeyName { device_id: device(), key: 'A' }),
             (7, r#"{"deviceId":"d","sizeMax":512}"#, Request::GetLedPositions { device_id: device(), size_max: 512 }),
             (
                 8,
@@ -469,11 +476,11 @@ mod tests {
     fn events_have_the_method_17_shape() {
         assert_eq!(
             key_event("{d}", MacroKey(1), true),
-            br#"{"method":17,"result":{"id":2,"keyEvent":{"deviceId":"{d}","isPressed":true,"keyId":1}}}"#
+            br#"{"code":-1,"error":0,"method":17,"result":{"id":2,"keyEvent":{"deviceId":"{d}","isPressed":true,"keyId":1}}}"#
         );
         assert_eq!(
             device_event("{d}", false),
-            br#"{"method":17,"result":{"deviceConnectionStatusChangedEvent":{"deviceId":"{d}","isConnected":false},"id":1}}"#
+            br#"{"code":-1,"error":0,"method":17,"result":{"deviceConnectionStatusChangedEvent":{"deviceId":"{d}","isConnected":false},"id":1}}"#
         );
     }
 

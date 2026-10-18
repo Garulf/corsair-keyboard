@@ -14,11 +14,11 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 pub type ClientId = u64;
 
-pub const SERVER_VERSION: &str = "4.0.18";
+pub const SERVER_VERSION: &str = "4.0.19";
 pub const HOST_VERSION: &str = "5.52.93";
 pub const DEFAULT_PRIORITY: u8 = 128;
 
-const OPAQUE: u8 = 255;
+const UNSET_COLOR: u32 = 0xFFFF_FFFF;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerConfig {
@@ -179,6 +179,10 @@ impl Server {
                     Err(error) => (error, json!({})),
                 };
                 outputs.push(Output::Send { client, payload: reply(envelope.method, envelope.code, error, result) });
+                if error == ErrorCode::Success && envelope.method == Method::Subscribe.id() {
+                    outputs
+                        .extend(self.device.iter().map(|id| Output::Send { client, payload: device_event(id, true) }));
+                }
             }
             Err(_) => {
                 self.remove(client);
@@ -344,8 +348,7 @@ impl Server {
                 Ok(json!({"dataType": data_type.id(), "flags": flags}))
             }
             Request::ReadProperty { device_id, property, .. } => {
-                let value = read_property(&attached(host, &device_id)?, property)?;
-                Ok(json!({"property": value.to_json()}))
+                Ok(read_property(&attached(host, &device_id)?, property)?.to_json())
             }
             Request::WriteProperty { device_id, .. } => {
                 attached(host, &device_id)?;
@@ -368,15 +371,18 @@ impl Server {
             }
             Request::GetLedColors { device_id, luids } => {
                 attached(host, &device_id)?;
-                let frame = host.current_frame();
-                let colors = luids
+                let session = self.served(client);
+                let colors: Vec<Value> = luids
                     .into_iter()
-                    .map(|luid| {
-                        let led = led_for(luid).ok_or(ErrorCode::InvalidArguments)?;
-                        let rgb = frame.map_or(Rgb::BLACK, |frame| frame[led as usize]);
-                        Ok(json!({"id": luid.0, "value": LedColor { luid, rgb, alpha: OPAQUE }.value()}))
+                    .filter_map(|luid| {
+                        let led = led_for(luid)?;
+                        let value = session
+                            .colors
+                            .get(&led)
+                            .map_or(UNSET_COLOR, |&(rgb, alpha)| LedColor { luid, rgb, alpha }.value());
+                        Some(json!({"id": luid.0, "value": value}))
                     })
-                    .collect::<Result<Vec<Value>, ErrorCode>>()?;
+                    .collect();
                 Ok(json!({"ledColors": colors}))
             }
             Request::SetLayerPriority { priority } => {
@@ -525,6 +531,7 @@ mod tests {
     use crate::ids::{AccessLevel, MacroKey};
     use crate::message::{device_event, key_event, number};
     use crate::testing::*;
+    use crate::transcript::{Direction, Transcript, differences, normalize};
     use crate::{device_info, leds};
     use engine::{ClientLayer, ClientLighting};
     use k100::Rgb;
@@ -584,6 +591,43 @@ mod tests {
             .collect()
     }
 
+    type Exception = (&'static str, fn(&mut Transcript));
+
+    const ICUE_EXCEPTIONS: [Exception; 1] =
+        [("the other Corsair devices iCUE listed: k100d serves the K100 only", drop_other_devices)];
+
+    fn drop_other_devices(capture: &mut Transcript) {
+        let other = |value: &Value| value.as_str().is_some_and(|id| id != DEVICE);
+        capture
+            .entries
+            .retain(|entry| !other(&entry.message["result"]["deviceConnectionStatusChangedEvent"]["deviceId"]));
+        for entry in &mut capture.entries {
+            if let Some(Value::Array(infos)) = entry.message["result"].get_mut("deviceInfos") {
+                infos.retain(|info| !other(&info["id"]));
+            }
+        }
+    }
+
+    fn events(transcript: &Transcript) -> Vec<Value> {
+        transcript
+            .entries
+            .iter()
+            .filter(|entry| entry.direction == Direction::Received && entry.message["method"] == 17)
+            .map(|entry| normalize(&entry.message))
+            .collect()
+    }
+
+    #[test]
+    fn the_server_answers_the_icue_capture_like_icue() {
+        let mut capture: Transcript = serde_json::from_str(include_str!("../fixtures/icue-k100-capture.json")).unwrap();
+        for (_, exception) in ICUE_EXCEPTIONS {
+            exception(&mut capture);
+        }
+        let ours = replay(&capture, FakeHost::k100());
+        assert_eq!(differences(&capture, &ours), Vec::<String>::new());
+        assert_eq!(events(&ours), events(&capture));
+    }
+
     #[test]
     fn the_handshake_connects_with_the_server_versions() {
         let (mut server, mut host) = server_and_host();
@@ -591,7 +635,7 @@ mod tests {
         assert_eq!(
             exchange(&mut server, &mut host, 1, HANDSHAKE),
             [json!({"code": -1, "error": 0, "method": 0,
-                    "result": {"serverHostVersion": HOST_VERSION, "serverVersion": "4.0.18", "state": 6}})]
+                    "result": {"serverHostVersion": HOST_VERSION, "serverVersion": "4.0.19", "state": 6}})]
         );
     }
 
@@ -642,6 +686,7 @@ mod tests {
         let k100 = json!([device_info(host.device.as_ref().unwrap())]);
         assert_eq!(get_devices(&mut server, &mut host, 1, 64), k100);
         assert_eq!(get_devices(&mut server, &mut host, -1, 64), k100);
+        assert_eq!(get_devices(&mut server, &mut host, 4_294_967_295, 64), json!([]), "too big for an int");
         assert_eq!(get_devices(&mut server, &mut host, 2, 64), json!([]));
         assert_eq!(get_devices(&mut server, &mut host, 1, 0), json!([]));
         host.device = None;
@@ -676,13 +721,14 @@ mod tests {
         let all = exchange(&mut server, &mut host, 1, &positions(512));
         let entries = all[0]["result"]["ledPositions"].as_array().unwrap().clone();
         assert_eq!(entries.len(), 173);
-        assert_eq!(entries[0], json!({"cx": number(leds()[0].cx), "cy": number(leds()[0].cy), "id": 1}));
+        assert_eq!(entries[0], json!({"cx": number(leds()[0].cx), "cy": number(leds()[0].cy), "id": leds()[0].luid.0}));
+        assert_eq!(entries[0], json!({"cx": 498, "cy": 71, "id": 131_099}));
         let ten = exchange(&mut server, &mut host, 1, &positions(10));
         assert_eq!(ten[0]["result"]["ledPositions"].as_array().unwrap().len(), 10);
-        let luid =
-            |key: &str| format!(r#"{{"method":6,"code":3,"params":{{"deviceId":"{DEVICE}","keyName":"{key}"}}}}"#);
-        assert_eq!(exchange(&mut server, &mut host, 1, &luid("W"))[0]["result"], json!({"ledLuid": 30}));
-        assert_eq!(error(&exchange(&mut server, &mut host, 1, &luid("?"))), 4);
+        let luid = |key: &str| format!(r#"{{"method":6,"code":3,"params":{{"deviceId":"{DEVICE}","keyName":{key}}}}}"#);
+        assert_eq!(exchange(&mut server, &mut host, 1, &luid("87"))[0]["result"], json!({"ledLuid": 30}));
+        assert_eq!(error(&exchange(&mut server, &mut host, 1, &luid("63"))), 4);
+        assert_eq!(error(&exchange(&mut server, &mut host, 1, &luid(r#""W""#))), 4, "names go as char codes");
     }
 
     #[test]
@@ -698,7 +744,7 @@ mod tests {
         );
         assert_eq!(
             exchange(&mut server, &mut host, 1, &property(4, 8))[0]["result"],
-            json!({"property": {"dataType": 17, "value": [1, 2, 3, 4, 5, 6]}})
+            json!({"dataType": 17, "value": [1, 2, 3, 4, 5, 6]})
         );
         assert_eq!(error(&exchange(&mut server, &mut host, 1, &property(4, 2))), 5);
         assert_eq!(error(&exchange(&mut server, &mut host, 1, &property(3, 2))), 5);
@@ -894,7 +940,8 @@ mod tests {
         let Output::Send { payload, .. } = &g1[0] else { panic!("expected a send") };
         assert_eq!(
             serde_json::from_slice::<Value>(payload).unwrap(),
-            json!({"method": 17, "result": {"id": 2, "keyEvent": {"deviceId": DEVICE, "isPressed": true, "keyId": 1}}})
+            json!({"code": -1, "error": 0, "method": 17,
+                   "result": {"id": 2, "keyEvent": {"deviceId": DEVICE, "isPressed": true, "keyId": 1}}})
         );
         assert_eq!(recipients(&server.key(132, true, &mut host)), [1, 2]);
         assert!(server.key(41, true, &mut host).is_empty());
@@ -935,9 +982,10 @@ mod tests {
         let (mut server, mut host) = server_and_host();
         connected(&mut server, &mut host, 1, "x.exe");
         assert!(server.key(131, true, &mut host).is_empty(), "not subscribed yet");
+        let connected_event = serde_json::from_slice::<Value>(&device_event(DEVICE, true)).unwrap();
         assert_eq!(
             exchange(&mut server, &mut host, 1, SUBSCRIBE),
-            [json!({"code": 5, "error": 0, "method": 14, "result": {}})]
+            [json!({"code": 5, "error": 0, "method": 14, "result": {}}), connected_event]
         );
         assert!(summary(&host, 1).subscribed);
         exchange(&mut server, &mut host, 1, r#"{"method":15,"code":6}"#);
@@ -1030,23 +1078,29 @@ mod tests {
     }
 
     #[test]
-    fn led_colors_read_back_from_the_last_frame() {
+    fn led_colors_read_back_the_clients_own_colors_and_white_where_it_set_none() {
         let (mut server, mut host) = server_and_host();
         connected(&mut server, &mut host, 1, "game.exe");
+        connected(&mut server, &mut host, 2, "other.exe");
         let read =
             |luids: &str| format!(r#"{{"method":8,"code":2,"params":{{"deviceId":"{DEVICE}","luids":{luids}}}}}"#);
         assert_eq!(
             exchange(&mut server, &mut host, 1, &read("[30]"))[0]["result"],
-            json!({"ledColors": [{"id": 30, "value": 4278190080u32}]})
+            json!({"ledColors": [{"id": 30, "value": 4294967295u32}]})
         );
-        let mut frame = [Rgb::BLACK; k100::LED_COUNT];
-        frame[26] = Rgb::new(255, 0, 0);
-        host.frame = Some(frame);
+        exchange(&mut server, &mut host, 1, &set_colors(1, &[(30, RED)]));
         assert_eq!(
-            exchange(&mut server, &mut host, 1, &read("[30]"))[0]["result"],
-            json!({"ledColors": [{"id": 30, "value": 4294901760u32}]})
+            exchange(&mut server, &mut host, 1, &read("[30, 42]"))[0]["result"],
+            json!({"ledColors": [{"id": 30, "value": RED}, {"id": 42, "value": 4294967295u32}]})
         );
-        assert_eq!(error(&exchange(&mut server, &mut host, 1, &read("[30, 2147418113]"))), 4);
+        assert_eq!(
+            exchange(&mut server, &mut host, 2, &read("[30]"))[0]["result"],
+            json!({"ledColors": [{"id": 30, "value": 4294967295u32}]})
+        );
+        assert_eq!(
+            exchange(&mut server, &mut host, 1, &read("[2147418113, 30, 0]")),
+            [json!({"code": 2, "error": 0, "method": 8, "result": {"ledColors": [{"id": 30, "value": RED}]}})]
+        );
     }
 
     #[test]
