@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::mpsc::Sender;
 use std::thread;
@@ -262,7 +263,7 @@ pub fn draft_bar(ui: &mut egui::Ui, model: &mut Model) {
 
 fn overview(ui: &mut egui::Ui, model: &mut Model) {
     ui.heading("Overview");
-    let Some(state) = model.state.clone() else { return };
+    let Some(state) = model.state.as_ref() else { return };
     egui::Grid::new("overview").num_columns(2).spacing([24.0, 6.0]).show(ui, |ui| {
         let mut row = |name: &str, value: String| {
             ui.label(name);
@@ -287,7 +288,8 @@ fn overview(ui: &mut egui::Ui, model: &mut Model) {
     for problem in &state.config_errors {
         ui.colored_label(Color32::LIGHT_RED, problem);
     }
-    sdk_section(ui, model, &state.sdk);
+    let sdk = state.sdk.clone();
+    sdk_section(ui, model, &sdk);
 }
 
 fn sdk_section(ui: &mut egui::Ui, model: &mut Model, sdk: &SdkState) {
@@ -301,10 +303,12 @@ fn sdk_section(ui: &mut egui::Ui, model: &mut Model, sdk: &SdkState) {
     ui.add_space(12.0);
     ui.heading("iCUE SDK");
     ui.label(status);
+    let mut offered = HashSet::new();
     for client in &sdk.clients {
         ui.horizontal(|ui| {
             ui.label(sdk_client_text(client));
-            if ui.button(format!("Block {}", client.exe)).clicked() {
+            let first = offered.insert(client.exe.to_lowercase());
+            if !client.refused && first && ui.button(format!("Block {}", client.exe)).clicked() {
                 model.send(Request::SdkBlock { exe: client.exe.clone(), blocked: true });
             }
         });
@@ -458,6 +462,17 @@ mod tests {
         harness.get_by_label("Block StreamDeck.exe").click();
         harness.run();
         assert_eq!(sent(harness.state_mut()), [Request::SdkBlock { exe: "StreamDeck.exe".into(), blocked: true }]);
+    }
+
+    #[test]
+    fn each_connected_exe_gets_one_block_button_and_refused_ones_none() {
+        let refused = SdkClient { exe: "bad.exe".into(), refused: true, ..streamdeck() };
+        let model = with_sdk(SdkStatus::Listening, vec![streamdeck(), streamdeck(), refused], &["bad.exe"]);
+        let mut harness = harness(model, overview);
+        harness.run();
+        assert_eq!(harness.query_all_by_label("Block StreamDeck.exe").count(), 1);
+        assert!(harness.query_by_label("Block bad.exe").is_none());
+        harness.get_by_label("Unblock bad.exe");
     }
 
     #[test]

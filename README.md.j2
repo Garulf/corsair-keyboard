@@ -110,11 +110,11 @@ The GUI's Onboard pane does the same through k100d: it lists the stored slots wi
 
 ### iCUE SDK apps (Windows)
 
-With iCUE closed, apps that use version 4 of the iCUE SDK talk to k100d instead. Elgato Stream Deck's Corsair G-key support and the SDK lighting in some games are the usual ones. k100d is compatible with the iCUE SDK and is not iCUE. At most 32 SDK apps can be connected at once.
+With iCUE closed, apps that use version 4 of the iCUE SDK talk to k100d instead. Elgato Stream Deck's Corsair G-key support and the SDK lighting in some games are the usual ones. k100d is compatible with the iCUE SDK and is not iCUE. It accepts at most 32 SDK connections at once and drops further ones.
 
-- An app that asks for exclusive G-key control takes those G-keys, and their k100d actions pause until it lets go.
+- An app that asks for exclusive G-key control takes the G-keys it intercepts, and their k100d actions pause until it lets go or disconnects.
 - Each app's lighting sits above your profile, unless the app asks for a priority of 127 or lower, which puts it underneath. An app that asks for exclusive lighting replaces the profile's lighting while it holds it.
-- `k100 status` and the GUI's Overview list the connected apps and what each one holds. Either one can block an app by its exe name, and an app that was already connected is disconnected.
+- `k100 status` and the GUI's Overview list the connected apps and what each one holds. The Overview has Block and Unblock buttons, and `k100 sdk block <exe>` does the same from the command line. Blocking an app that is connected disconnects it.
 - If iCUE is running, it owns the SDK pipe. k100d waits, tries again every 10 s, and shows "in use by another program".
 - Older games on the v3 SDK or Corsair's Game SDK are not supported yet.
 
@@ -123,8 +123,8 @@ The `[sdk]` table in `settings.toml` has these keys:
 - `enabled` (default `true`): with `enabled = false` k100d does not offer the SDK, so a running iCUE can serve SDK apps.
 - `exclusive_control` (default `true`): with `false`, requests for exclusive lighting or G-key control are refused and apps run shared.
 - `blocked` (default empty): exe names to refuse. `k100 sdk block` edits this list.
-- `device_id`: the id k100d reports for the keyboard. It is generated once and saved. To keep Stream Deck's existing G-key bindings, set it to the id iCUE reported for the keyboard.
-- `trace` (default `false`): write every SDK message to `logs/sdk-trace.jsonl` in the config folder. The file stops growing at 16 MiB.
+- `device_id`: the id k100d reports for the keyboard. It is generated once and saved. To keep Stream Deck's existing G-key bindings, set it to the id iCUE reported for the keyboard: run `k100 diag sdk-probe` while iCUE is running and k100d is stopped, and copy the K100's `id` from the transcript. k100d picks up the change without a restart.
+- `trace` (default `false`): write every SDK message to `logs/sdk-trace.jsonl` in the config folder. Tracing stops at 16 MiB with a notice as the last line. Restart k100d, or switch `trace` off and on, to start a fresh file; the full one is kept as `sdk-trace.old.jsonl`.
 
 ### Things to know
 
