@@ -2215,9 +2215,12 @@ dependencies = [
  "ipc",
  "k100",
  "onboard",
+ "sdk",
  "serde",
+ "serde_json",
  "tempfile",
  "toml 1.1.8+spec-1.1.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

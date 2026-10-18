@@ -3,6 +3,7 @@ mod effect;
 mod launch;
 mod onboard_cmd;
 mod remote;
+mod sdk_probe;
 
 use clap::{Parser, Subcommand};
 use ipc::Request;
@@ -60,7 +61,7 @@ enum Command {
     Events,
     /// Manage the profiles stored on the keyboard
     Onboard(onboard_cmd::OnboardArgs),
-    /// Low-level hardware checks that talk to the keyboard directly (stop k100d first, except for `diag audio`)
+    /// Low-level hardware checks that talk to the keyboard directly (stop k100d first, except for `diag audio`, `diag sdk-probe` and `diag sdk-compare`)
     #[command(subcommand)]
     Diag(diag::Diag),
 }
@@ -155,6 +156,38 @@ mod tests {
             let line = ["k100", "onboard"].iter().chain(words);
             assert!(Cli::try_parse_from(line).is_ok(), "{words:?}");
         }
+    }
+
+    #[test]
+    fn sdk_probe_takes_its_options_after_diag() {
+        let line =
+            ["k100", "diag", "sdk-probe", "--write", "--listen-seconds", "3", "--pipe", "other", "--out", "x.json"];
+        let Command::Diag(diag::Diag::SdkProbe { out, write, listen_seconds, pipe }) =
+            Cli::try_parse_from(line).unwrap().command
+        else {
+            panic!("expected sdk-probe")
+        };
+        assert_eq!((write, listen_seconds, pipe.as_str()), (true, 3, "other"));
+        assert_eq!(out.as_deref(), Some(std::path::Path::new("x.json")));
+    }
+
+    #[test]
+    fn sdk_probe_defaults_to_reading_the_icue_pipe_for_fifteen_seconds() {
+        let cli = Cli::try_parse_from(["k100", "diag", "sdk-probe"]).unwrap();
+        let Command::Diag(diag::Diag::SdkProbe { out, write, listen_seconds, pipe }) = cli.command else {
+            panic!("expected sdk-probe")
+        };
+        assert_eq!((out, write, listen_seconds, pipe.as_str()), (None, false, 15, "iCUESDKv4"));
+    }
+
+    #[test]
+    fn sdk_compare_takes_two_transcripts() {
+        let cli = Cli::try_parse_from(["k100", "diag", "sdk-compare", "a.json", "b.json"]).unwrap();
+        let Command::Diag(diag::Diag::SdkCompare { expected, actual }) = cli.command else {
+            panic!("expected sdk-compare")
+        };
+        assert_eq!((expected.to_str(), actual.to_str()), (Some("a.json"), Some("b.json")));
+        assert!(Cli::try_parse_from(["k100", "diag", "sdk-compare", "a.json"]).is_err());
     }
 
     #[test]

@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
@@ -11,6 +12,8 @@ use k100::{
     led,
 };
 
+use crate::sdk_probe;
+
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 #[derive(Debug, Subcommand)]
@@ -22,6 +25,19 @@ pub enum Diag {
         #[arg(long, default_value_t = 10)]
         seconds: u64,
     },
+    /// Talk to whatever serves the iCUE SDK pipe and save every message as JSON (reads only, unless --write)
+    SdkProbe {
+        #[arg(long)]
+        out: Option<PathBuf>,
+        #[arg(long)]
+        write: bool,
+        #[arg(long, default_value_t = 15)]
+        listen_seconds: u64,
+        #[arg(long, default_value = "iCUESDKv4")]
+        pipe: String,
+    },
+    /// Compare two sdk-probe transcripts and list the differences
+    SdkCompare { expected: PathBuf, actual: PathBuf },
 }
 
 #[derive(Debug, Subcommand)]
@@ -106,6 +122,10 @@ pub fn run(command: Diag) -> Result<()> {
     match command {
         Diag::Audio { seconds } => audio(seconds, &stop),
         Diag::Keyboard(command) => keyboard(command, &stop),
+        Diag::SdkProbe { out, write, listen_seconds, pipe } => {
+            sdk_probe::probe(sdk_probe::ProbeArgs { out, write, listen_seconds, pipe })
+        }
+        Diag::SdkCompare { expected, actual } => sdk_probe::print_comparison(&expected, &actual),
     }
 }
 
@@ -595,6 +615,12 @@ mod tests {
         assert!(matches!(prop, Diag::Keyboard(KeyboardDiag::Prop { id: 0x6E, set: Some(1) })));
         let remove = Cli::try_parse_from(["diag", "file-remove", "0x6d71"]).unwrap().diag;
         assert!(matches!(remove, Diag::Keyboard(KeyboardDiag::FileRemove { id: 0x6D71 })));
+        let probe = Cli::try_parse_from(["diag", "sdk-probe", "--write", "--listen-seconds", "3", "--out", "x.json"])
+            .unwrap()
+            .diag;
+        assert!(matches!(probe, Diag::SdkProbe { write: true, listen_seconds: 3, .. }));
+        let compare = Cli::try_parse_from(["diag", "sdk-compare", "a.json", "b.json"]).unwrap().diag;
+        assert!(matches!(compare, Diag::SdkCompare { .. }));
     }
 
     #[test]
