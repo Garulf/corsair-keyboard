@@ -132,7 +132,7 @@ unsafe impl Send for PendingConnect {}
 
 impl NamedPipeInstance {
     fn raw(&self) -> HANDLE {
-        self.handle.as_ref().map_or(INVALID_HANDLE_VALUE, AsRawHandle::as_raw_handle)
+        self.handle.as_ref().expect("a pipe instance is used only before accept takes its handle").as_raw_handle()
     }
 
     fn start_connect(&mut self) -> io::Result<bool> {
@@ -149,7 +149,9 @@ impl NamedPipeInstance {
             ERROR_PIPE_CONNECTED => Ok(true),
             ERROR_NO_DATA => {
                 // SAFETY: resets the instance this struct owns after a client that left before being connected.
-                unsafe { DisconnectNamedPipe(self.raw()) };
+                if unsafe { DisconnectNamedPipe(self.raw()) } == 0 {
+                    return Err(io::Error::last_os_error());
+                }
                 Ok(false)
             }
             code => Err(io::Error::from_raw_os_error(code as i32)),
@@ -204,7 +206,7 @@ impl PipeInstance for NamedPipeInstance {
 
 impl Drop for NamedPipeInstance {
     fn drop(&mut self) {
-        if !self.connecting {
+        if !self.connecting || self.handle.is_none() {
             return;
         }
         let mut transferred = 0;

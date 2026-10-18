@@ -285,7 +285,7 @@ impl Controller {
 
     fn sdk_state(&self) -> SdkState {
         let status = match &self.sdk_status {
-            SdkStatus::Listening if !self.settings.sdk.enabled => SdkStatus::Off,
+            _ if !self.settings.sdk.enabled => SdkStatus::Off,
             status => status.clone(),
         };
         SdkState { status, clients: self.sdk_clients.clone(), blocked: self.settings.sdk.blocked.clone() }
@@ -2627,6 +2627,19 @@ mod tests {
         rig.controller.set_sdk_status(ipc::SdkStatus::Listening);
         let sdk = rig.controller.state().sdk;
         assert_eq!((sdk.status, sdk.clients), (ipc::SdkStatus::Listening, vec![client]));
+    }
+
+    #[test]
+    fn a_disabled_sdk_reports_off_whatever_the_listener_said() {
+        let mut rig = rig_with(
+            with_sdk(ipc::SdkSettings { enabled: false, ..ipc::SdkSettings::default() }),
+            vec![profile("default")],
+        );
+        let failed = ipc::SdkStatus::Failed { reason: "no token".into() };
+        for status in [ipc::SdkStatus::Listening, ipc::SdkStatus::InUse, failed] {
+            rig.controller.set_sdk_status(status);
+            assert_eq!(rig.controller.state().sdk.status, ipc::SdkStatus::Off);
+        }
     }
 
     #[test]
