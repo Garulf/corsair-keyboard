@@ -34,7 +34,7 @@ pub trait PipeFactory: Send {
 }
 
 pub fn listen<F: PipeFactory>(factory: F, commands: Sender<Command>, enabled: Arc<AtomicBool>, stop: Arc<AtomicBool>) {
-    listen_with(factory, commands, enabled, stop, IN_USE_RETRY);
+    listen_with(factory, commands, enabled, stop, IN_USE_RETRY, Arc::default());
 }
 
 pub fn listen_with<F: PipeFactory>(
@@ -43,17 +43,10 @@ pub fn listen_with<F: PipeFactory>(
     enabled: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     retry: Duration,
+    live: Arc<AtomicUsize>,
 ) {
-    let mut listener = Listener {
-        commands,
-        enabled,
-        stop,
-        retry,
-        next_client: 1,
-        off_reported: false,
-        live: Arc::default(),
-        refusing: false,
-    };
+    let mut listener =
+        Listener { commands, enabled, stop, retry, next_client: 1, off_reported: false, live, refusing: false };
     let mut pending: Option<F::Instance> = None;
     while !listener.stopped() {
         if !listener.enabled() {
@@ -91,12 +84,13 @@ pub fn listen_with<F: PipeFactory>(
             }
         }
         pending = factory.create(false).map_err(|error| listener.report(status_of(error))).ok();
-        if listener.full() {
+        let refused = listener.full();
+        if refused {
             listener.refuse(instance);
         } else {
             listener.serve(instance);
         }
-        if pending.is_none() {
+        if refused || pending.is_none() {
             listener.pause();
         }
     }
@@ -308,6 +302,7 @@ mod tests {
         commands: Receiver<Command>,
         enabled: Arc<AtomicBool>,
         stop: Arc<AtomicBool>,
+        live: Arc<AtomicUsize>,
         thread: JoinHandle<()>,
     }
 
@@ -354,13 +349,18 @@ mod tests {
     }
 
     fn start(script: &Script, enabled: bool) -> Running {
+        start_with_retry(script, enabled, Duration::from_millis(10))
+    }
+
+    fn start_with_retry(script: &Script, enabled: bool, retry: Duration) -> Running {
         let (sender, commands) = mpsc::channel();
         let enabled = Arc::new(AtomicBool::new(enabled));
         let stop = Arc::new(AtomicBool::new(false));
+        let live = Arc::new(AtomicUsize::new(0));
         let factory = FakeFactory(script.clone());
-        let (gate, flag) = (enabled.clone(), stop.clone());
-        let thread = thread::spawn(move || listen_with(factory, sender, gate, flag, Duration::from_millis(10)));
-        Running { commands, enabled, stop, thread }
+        let (gate, flag, count) = (enabled.clone(), stop.clone(), live.clone());
+        let thread = thread::spawn(move || listen_with(factory, sender, gate, flag, retry, count));
+        Running { commands, enabled, stop, live, thread }
     }
 
     fn wait_until(what: &str, done: impl Fn() -> bool) {
@@ -484,10 +484,30 @@ mod tests {
         assert!(!running.connected_within(Duration::from_millis(100)));
 
         outboxes.pop();
-        wait_until("the client's writer hangs up", || script.hang_ups.load(Ordering::SeqCst) == 1);
+        wait_until("the dropped client's instance is let go", || {
+            running.live.load(Ordering::SeqCst) == MAX_CLIENTS - 1
+        });
         script.queue("next.exe");
         let (client, exe, _outbox) = running.next_connection();
         assert_eq!((client, exe.as_str()), (MAX_CLIENTS as ClientId + 1, "next.exe"));
+        assert_eq!(script.refused.load(Ordering::SeqCst), 1);
         running.finish();
+    }
+
+    #[test]
+    fn the_listener_pauses_after_refusing_a_client_at_the_limit() {
+        let script = Script::default();
+        for index in 0..MAX_CLIENTS + 2 {
+            script.queue(&format!("{index}.exe"));
+        }
+        let running = start_with_retry(&script, true, Duration::from_secs(60));
+        let _outboxes: Vec<_> = (0..MAX_CLIENTS).map(|_| running.next_connection().2).collect();
+        wait_until("the first extra client is refused", || script.refused.load(Ordering::SeqCst) >= 1);
+        assert!(!running.connected_within(Duration::from_millis(200)));
+        assert_eq!(script.refused.load(Ordering::SeqCst), 1, "the second extra client waits out the pause");
+        assert_eq!(script.clients.lock().unwrap().len(), 1);
+        let stopping = Instant::now();
+        running.finish();
+        assert!(stopping.elapsed() < Duration::from_secs(1), "stopping ends the pause");
     }
 }
