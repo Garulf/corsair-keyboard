@@ -1,7 +1,8 @@
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use sdk::{Direction, ProbeOptions, ProbePipe, Transcript, differences, run_probe};
+use sdk::{Direction, ProbeOptions, ProbePipe, Transcript, differences, run_probe_until};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -12,7 +13,10 @@ pub struct ProbeArgs {
     pub pipe: String,
 }
 
-pub fn probe(args: ProbeArgs) -> Result<()> {
+pub fn probe(args: ProbeArgs, stop: &AtomicBool) -> Result<()> {
+    check_pipe_name(&args.pipe)?;
+    let out = args.out.clone().unwrap_or_else(|| default_out_name(unix_seconds()));
+    check_out_path(&out)?;
     let mut pipe = open_pipe(&args.pipe)?;
     let listen_seconds = args.listen_seconds;
     let options = ProbeOptions {
@@ -21,14 +25,41 @@ pub fn probe(args: ProbeArgs) -> Result<()> {
         pid: std::process::id(),
         ..ProbeOptions::default()
     };
-    let mut transcript = run_probe(pipe.as_mut(), &options, &mut || {
-        println!("listening for {listen_seconds} s: press G1, then G6");
-    });
+    let mut transcript = run_probe_until(
+        pipe.as_mut(),
+        &options,
+        &|| stop.load(Ordering::SeqCst),
+        &mut || println!("listening for {listen_seconds} s: press G1, then G6"),
+        &mut |step| println!("{step}"),
+    );
     transcript.pipe = pipe_path(&args.pipe);
-    let path = args.out.unwrap_or_else(|| default_out_name(unix_seconds()));
-    std::fs::write(&path, serde_json::to_string_pretty(&transcript)?)?;
-    println!("{}", path.display());
+    write_new(&out, &serde_json::to_string_pretty(&transcript)?)?;
+    println!("{}", out.display());
     println!("{}", summary(&transcript));
+    Ok(())
+}
+
+fn check_pipe_name(name: &str) -> Result<()> {
+    if name.is_empty() || name.contains(['\\', '/']) || name.contains("..") {
+        return Err(format!("pipe name {name:?} must be a plain name without \\, / or ..").into());
+    }
+    Ok(())
+}
+
+fn check_out_path(path: &Path) -> Result<()> {
+    let folder = path.parent().filter(|folder| !folder.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    if !folder.is_dir() {
+        return Err(format!("the folder for --out does not exist: {}", folder.display()).into());
+    }
+    if path.exists() {
+        return Err(format!("{} already exists; pick another --out", path.display()).into());
+    }
+    Ok(())
+}
+
+fn write_new(path: &Path, text: &str) -> Result<()> {
+    let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(path)?;
+    std::io::Write::write_all(&mut file, text.as_bytes())?;
     Ok(())
 }
 
@@ -67,11 +98,16 @@ fn unix_seconds() -> u64 {
 
 fn summary(transcript: &Transcript) -> String {
     let count = |direction| transcript.entries.iter().filter(|entry| entry.direction == direction).count();
+    let interrupted = transcript
+        .entries
+        .iter()
+        .any(|entry| entry.direction == Direction::Note && entry.message["interrupted"] == true);
     format!(
-        "sent {}, received {}, unanswered {}",
+        "sent {}, received {}, unanswered {}{}",
         count(Direction::Sent),
         count(Direction::Received),
-        transcript.unanswered().len()
+        transcript.unanswered().len(),
+        if interrupted { ", interrupted" } else { "" }
     )
 }
 
@@ -359,6 +395,56 @@ mod tests {
     }
 
     #[test]
+    fn an_interrupted_transcript_says_so_in_its_summary() {
+        let note = Entry { at_ms: 0, direction: Direction::Note, message: json!({"interrupted": true}) };
+        let transcript =
+            sdk::Transcript { tool: String::new(), pipe: String::new(), mode: String::new(), entries: vec![note] };
+        assert_eq!(summary(&transcript), "sent 0, received 0, unanswered 0, interrupted");
+    }
+
+    #[test]
+    fn pipe_names_that_leave_the_pipe_namespace_are_rejected() {
+        assert!(check_pipe_name("iCUESDKv4").is_ok());
+        for name in ["", "a\\b", "a/b", "..", "x..y", "..\\evil"] {
+            assert!(check_pipe_name(name).is_err(), "{name:?}");
+        }
+    }
+
+    #[test]
+    fn the_out_path_needs_an_existing_folder_and_no_existing_file() {
+        let folder = tempfile::tempdir().unwrap();
+        let fresh = folder.path().join("probe.json");
+        assert!(check_out_path(&fresh).is_ok());
+        assert!(check_out_path(Path::new("probe-that-does-not-exist.json")).is_ok());
+        let missing_folder = check_out_path(&folder.path().join("nope").join("probe.json")).unwrap_err();
+        assert!(missing_folder.to_string().contains("does not exist"), "{missing_folder}");
+        std::fs::write(&fresh, "x").unwrap();
+        let existing = check_out_path(&fresh).unwrap_err();
+        assert!(existing.to_string().contains("already exists"), "{existing}");
+    }
+
+    #[test]
+    fn writing_the_transcript_never_overwrites_a_file() {
+        let folder = tempfile::tempdir().unwrap();
+        let path = folder.path().join("probe.json");
+        write_new(&path, "first").unwrap();
+        assert!(write_new(&path, "second").is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "first");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn a_bad_pipe_name_or_out_path_fails_before_the_pipe_is_touched() {
+        let stop = AtomicBool::new(false);
+        let args =
+            |out: Option<PathBuf>, pipe: &str| ProbeArgs { out, write: false, listen_seconds: 0, pipe: pipe.into() };
+        let bad_pipe = probe(args(None, r"..\x"), &stop).unwrap_err().to_string();
+        assert!(bad_pipe.contains("plain name"), "{bad_pipe}");
+        let bad_out = probe(args(Some(PathBuf::from("no-such-folder/x.json")), "iCUESDKv4"), &stop).unwrap_err();
+        assert!(bad_out.to_string().contains("does not exist"), "{bad_out}");
+    }
+
+    #[test]
     fn the_default_file_name_carries_the_unix_time() {
         assert_eq!(default_out_name(1_790_000_000), PathBuf::from("k100-sdk-probe-1790000000.json"));
     }
@@ -367,7 +453,7 @@ mod tests {
     #[test]
     fn sdk_probe_explains_it_needs_windows() {
         let args = ProbeArgs { out: None, write: false, listen_seconds: 0, pipe: "iCUESDKv4".into() };
-        let error = probe(args).unwrap_err().to_string();
+        let error = probe(args, &AtomicBool::new(false)).unwrap_err().to_string();
         assert!(error.contains("needs Windows"), "{error}");
     }
 }

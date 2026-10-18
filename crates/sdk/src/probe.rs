@@ -17,6 +17,14 @@ pub const READ_ONLY_METHODS: [Method; 10] = [
     Method::Unsubscribe,
 ];
 
+pub const WRITE_METHODS: [Method; 5] = [
+    Method::SetLayerPriority,
+    Method::SetLedColors,
+    Method::RequestControl,
+    Method::ReleaseControl,
+    Method::ConfigureKeyEvent,
+];
+
 const CLIENT_VERSION: &str = "4.0.84";
 const HANDSHAKE_CODE: i64 = -1;
 const KEYBOARD_TYPE: i64 = 1;
@@ -30,6 +38,7 @@ const KEY_NAMES: [&str; 9] = ["A", "a", "W", "Z", "1", "0", ";", "\\", " "];
 const KEY_CODE: i64 = 65;
 const WRITE_PRIORITY: i64 = 200;
 const WRITE_PAUSE: Duration = Duration::from_secs(1);
+const STOP_POLL: Duration = Duration::from_millis(100);
 const RED: u32 = 0xFFFF_0000;
 const BLUE: u32 = 0xFF00_00FF;
 const LIGHTING_LEVEL: i64 = 1;
@@ -63,14 +72,26 @@ impl Default for ProbeOptions {
 }
 
 pub fn run_probe(pipe: &mut dyn ProbePipe, options: &ProbeOptions, on_listen: &mut dyn FnMut()) -> Transcript {
-    let mut probe = Probe { pipe, options, started: Instant::now(), entries: Vec::new(), next_code: 1 };
+    run_probe_until(pipe, options, &|| false, on_listen, &mut |_| {})
+}
+
+pub fn run_probe_until(
+    pipe: &mut dyn ProbePipe,
+    options: &ProbeOptions,
+    stop: &dyn Fn() -> bool,
+    on_listen: &mut dyn FnMut(),
+    on_progress: &mut dyn FnMut(&str),
+) -> Transcript {
+    let mut probe =
+        Probe { pipe, options, stop, on_progress, started: Instant::now(), entries: Vec::new(), next_code: 1 };
     if let Err(error) = probe.sequence(on_listen) {
-        probe.note(json!({"error": error.to_string()}));
+        let note = if probe.stopped() { json!({"interrupted": true}) } else { json!({"error": error.to_string()}) };
+        probe.note(note);
     }
     Transcript {
         tool: format!("k100 diag sdk-probe {}", env!("CARGO_PKG_VERSION")),
         pipe: String::new(),
-        mode: if options.write { "write" } else { "read-only" }.into(),
+        mode: probe.mode().into(),
         entries: probe.entries,
     }
 }
@@ -78,6 +99,8 @@ pub fn run_probe(pipe: &mut dyn ProbePipe, options: &ProbeOptions, on_listen: &m
 struct Probe<'a> {
     pipe: &'a mut dyn ProbePipe,
     options: &'a ProbeOptions,
+    stop: &'a dyn Fn() -> bool,
+    on_progress: &'a mut dyn FnMut(&str),
     started: Instant,
     entries: Vec<Entry>,
     next_code: i64,
@@ -88,17 +111,21 @@ impl Probe<'_> {
         if !self.handshake()? {
             return Ok(());
         }
+        (self.on_progress)("listing devices");
         let device_ids = self.list_devices()?;
         for id in &device_ids {
             self.call(Method::GetDeviceInfo, json!({"deviceId": id}))?;
         }
         self.call(Method::GetDeviceInfo, json!({"deviceId": NO_DEVICE}))?;
         if let Some(device) = device_ids.first() {
+            (self.on_progress)("reading properties, key names, LED positions and colours");
             let led_ids = self.inspect(device)?;
             if self.options.write {
+                (self.on_progress)("writing lighting and key interception (--write)");
                 self.write_sequence(device, &led_ids)?;
             }
         }
+        (self.on_progress)("subscribing to events");
         self.call(Method::Subscribe, json!({}))?;
         on_listen();
         self.collect(self.options.listen)?;
@@ -112,6 +139,7 @@ impl Probe<'_> {
     }
 
     fn handshake(&mut self) -> io::Result<bool> {
+        (self.on_progress)("waiting for the server to accept (iCUE may be asking you to allow access)");
         let params = json!({"pid": self.options.pid, "clientVersion": CLIENT_VERSION});
         let timeout = self.options.handshake_timeout;
         let reply = self.exchange(Method::Handshake, HANDSHAKE_CODE, params, timeout)?;
@@ -186,14 +214,36 @@ impl Probe<'_> {
         self.exchange(method, code, params, timeout)
     }
 
+    fn allows(&self, method: Method) -> bool {
+        READ_ONLY_METHODS.contains(&method) || (self.options.write && WRITE_METHODS.contains(&method))
+    }
+
+    fn mode(&self) -> &'static str {
+        if self.options.write { "write" } else { "read-only" }
+    }
+
+    fn stopped(&self) -> bool {
+        (self.stop)()
+    }
+
+    fn check_stop(&self) -> io::Result<()> {
+        if self.stopped() { Err(io::ErrorKind::Interrupted.into()) } else { Ok(()) }
+    }
+
     fn exchange(&mut self, method: Method, code: i64, params: Value, timeout: Duration) -> io::Result<Option<Value>> {
+        self.check_stop()?;
+        if !self.allows(method) {
+            let refusal = format!("method {} is not sent in {} mode", method.id(), self.mode());
+            return Err(io::Error::new(io::ErrorKind::PermissionDenied, refusal));
+        }
         let request = json!({"method": method.id(), "code": code, "params": params});
         self.pipe.send(&serde_json::to_vec(&request).expect("a JSON value always serializes"))?;
         self.record(Direction::Sent, request);
         let deadline = Instant::now() + timeout;
         loop {
+            self.check_stop()?;
             let remaining = deadline.saturating_duration_since(Instant::now());
-            match self.pipe.receive(remaining)? {
+            match self.pipe.receive(remaining.min(STOP_POLL))? {
                 Some(payload) => {
                     let message = self.record_received(&payload);
                     if message["method"] == method.id() && message["code"] == code {
@@ -212,8 +262,9 @@ impl Probe<'_> {
     fn collect(&mut self, duration: Duration) -> io::Result<()> {
         let deadline = Instant::now() + duration;
         loop {
+            self.check_stop()?;
             let remaining = deadline.saturating_duration_since(Instant::now());
-            if let Some(payload) = self.pipe.receive(remaining)? {
+            if let Some(payload) = self.pipe.receive(remaining.min(STOP_POLL))? {
                 self.record_received(&payload);
             } else if remaining.is_zero() {
                 return Ok(());
@@ -254,7 +305,9 @@ mod tests {
     use crate::host::Policy;
     use crate::server::{ClientId, Output, Server, ServerConfig};
     use crate::testing::FakeHost;
+    use std::cell::Cell;
     use std::collections::{BTreeSet, VecDeque};
+    use std::rc::Rc;
 
     const CLIENT: ClientId = 1;
     const FIRST_MACRO_LED: u8 = 131;
@@ -321,6 +374,46 @@ mod tests {
         fn receive(&mut self, _: Duration) -> io::Result<Option<Vec<u8>>> {
             Ok(None)
         }
+    }
+
+    struct CountingPipe {
+        inner: ServerPipe,
+        sends: Rc<Cell<usize>>,
+    }
+
+    impl ProbePipe for CountingPipe {
+        fn send(&mut self, payload: &[u8]) -> io::Result<()> {
+            self.sends.set(self.sends.get() + 1);
+            self.inner.send(payload)
+        }
+
+        fn receive(&mut self, timeout: Duration) -> io::Result<Option<Vec<u8>>> {
+            self.inner.receive(timeout)
+        }
+    }
+
+    struct SilentPipe {
+        receives: Rc<Cell<usize>>,
+    }
+
+    impl ProbePipe for SilentPipe {
+        fn send(&mut self, _: &[u8]) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn receive(&mut self, timeout: Duration) -> io::Result<Option<Vec<u8>>> {
+            self.receives.set(self.receives.get() + 1);
+            std::thread::sleep(timeout.min(Duration::from_millis(1)));
+            Ok(None)
+        }
+    }
+
+    fn interrupted_notes(transcript: &Transcript) -> usize {
+        transcript
+            .entries
+            .iter()
+            .filter(|entry| entry.direction == Direction::Note && entry.message == json!({"interrupted": true}))
+            .count()
     }
 
     fn quiet() -> ProbeOptions {
@@ -535,5 +628,113 @@ mod tests {
         let transcript = run_probe(&mut pipe, &quiet(), &mut || {});
         let text = serde_json::to_string_pretty(&transcript).unwrap();
         assert_eq!(serde_json::from_str::<Transcript>(&text).unwrap(), transcript);
+    }
+
+    #[test]
+    fn a_stop_between_steps_keeps_the_partial_transcript_and_sends_nothing_further() {
+        let sends = Rc::new(Cell::new(0));
+        let mut pipe = CountingPipe { inner: ServerPipe::new(FakeHost::k100()), sends: Rc::clone(&sends) };
+        let transcript = run_probe_until(&mut pipe, &quiet(), &|| sends.get() >= 5, &mut || {}, &mut |_| {});
+        assert_eq!(sends.get(), 5);
+        assert_eq!(transcript.sent_methods().count(), 5);
+        assert_eq!(transcript.sent_methods().next(), Some(0));
+        assert_eq!(interrupted_notes(&transcript), 1);
+        assert_eq!(transcript.entries.last().unwrap().message, json!({"interrupted": true}));
+        assert!(transcript.entries.iter().all(|entry| entry.message.get("error").is_none_or(|e| e.is_number())));
+    }
+
+    #[test]
+    fn a_stop_already_set_sends_nothing() {
+        let sends = Rc::new(Cell::new(0));
+        let mut pipe = CountingPipe { inner: ServerPipe::new(FakeHost::k100()), sends: Rc::clone(&sends) };
+        let transcript = run_probe_until(&mut pipe, &quiet(), &|| true, &mut || {}, &mut |_| {});
+        assert_eq!(sends.get(), 0);
+        assert_eq!(transcript.entries.len(), 1);
+        assert_eq!(interrupted_notes(&transcript), 1);
+    }
+
+    #[test]
+    fn a_stop_while_waiting_for_a_reply_ends_the_wait_at_once() {
+        let receives = Rc::new(Cell::new(0));
+        let mut pipe = SilentPipe { receives: Rc::clone(&receives) };
+        let options = ProbeOptions { handshake_timeout: Duration::from_secs(30), ..quiet() };
+        let started = Instant::now();
+        let transcript = run_probe_until(&mut pipe, &options, &|| receives.get() >= 3, &mut || {}, &mut |_| {});
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert_eq!(transcript.sent_methods().collect::<Vec<_>>(), [0]);
+        assert_eq!(interrupted_notes(&transcript), 1);
+        assert!(transcript.entries.iter().all(|entry| entry.message.get("timeout").is_none()));
+    }
+
+    #[test]
+    fn a_stop_during_the_listen_window_ends_it_and_skips_the_unsubscribe() {
+        let stopped = Cell::new(false);
+        let mut pipe = ServerPipe::new(FakeHost::k100());
+        let options = ProbeOptions { listen: Duration::from_secs(600), ..ProbeOptions::default() };
+        let transcript =
+            run_probe_until(&mut pipe, &options, &|| stopped.get(), &mut || stopped.set(true), &mut |_| {});
+        assert_eq!(transcript.sent_methods().last(), Some(Method::Subscribe.id()));
+        assert_eq!(interrupted_notes(&transcript), 1);
+    }
+
+    fn probe_over<'a>(
+        pipe: &'a mut dyn ProbePipe,
+        options: &'a ProbeOptions,
+        progress: &'a mut dyn FnMut(&str),
+    ) -> Probe<'a> {
+        Probe {
+            pipe,
+            options,
+            stop: &|| false,
+            on_progress: progress,
+            started: Instant::now(),
+            entries: Vec::new(),
+            next_code: 1,
+        }
+    }
+
+    #[test]
+    fn read_only_mode_refuses_every_write_method_without_sending() {
+        let sends = Rc::new(Cell::new(0));
+        let mut pipe = CountingPipe { inner: ServerPipe::new(FakeHost::k100()), sends: Rc::clone(&sends) };
+        let options = quiet();
+        let mut progress = |_: &str| {};
+        let mut probe = probe_over(&mut pipe, &options, &mut progress);
+        for method in WRITE_METHODS.into_iter().chain([Method::WriteProperty, Method::FlushLedColors, Method::Event]) {
+            let error = probe.call(method, json!({})).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{method:?}");
+        }
+        assert_eq!(sends.get(), 0);
+    }
+
+    #[test]
+    fn write_mode_still_refuses_methods_outside_the_write_set() {
+        let sends = Rc::new(Cell::new(0));
+        let mut pipe = CountingPipe { inner: ServerPipe::new(FakeHost::k100()), sends: Rc::clone(&sends) };
+        let options = ProbeOptions { write: true, ..quiet() };
+        let mut progress = |_: &str| {};
+        let mut probe = probe_over(&mut pipe, &options, &mut progress);
+        for method in [Method::WriteProperty, Method::FlushLedColors, Method::Event] {
+            assert!(probe.call(method, json!({})).is_err(), "{method:?}");
+        }
+        assert_eq!(sends.get(), 0);
+    }
+
+    #[test]
+    fn the_read_only_and_write_method_sets_do_not_overlap() {
+        assert!(READ_ONLY_METHODS.iter().all(|method| !WRITE_METHODS.contains(method)));
+    }
+
+    #[test]
+    fn progress_starts_with_the_handshake_wait_and_names_each_step() {
+        let mut pipe = ServerPipe::new(FakeHost::k100());
+        let mut lines: Vec<String> = Vec::new();
+        run_probe_until(&mut pipe, &quiet(), &|| false, &mut || {}, &mut |line| lines.push(line.into()));
+        assert_eq!(lines[0], "waiting for the server to accept (iCUE may be asking you to allow access)");
+        assert_eq!(lines.len(), 4, "{lines:?}");
+        let mut write_lines: Vec<String> = Vec::new();
+        let options = ProbeOptions { write: true, ..quiet() };
+        run_probe_until(&mut pipe, &options, &|| false, &mut || {}, &mut |line| write_lines.push(line.into()));
+        assert_eq!(write_lines.len(), 5, "{write_lines:?}");
     }
 }

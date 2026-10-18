@@ -123,7 +123,7 @@ pub fn run(command: Diag) -> Result<()> {
         Diag::Audio { seconds } => audio(seconds, &stop),
         Diag::Keyboard(command) => keyboard(command, &stop),
         Diag::SdkProbe { out, write, listen_seconds, pipe } => {
-            sdk_probe::probe(sdk_probe::ProbeArgs { out, write, listen_seconds, pipe })
+            sdk_probe::probe(sdk_probe::ProbeArgs { out, write, listen_seconds, pipe }, &stop)
         }
         Diag::SdkCompare { expected, actual } => sdk_probe::print_comparison(&expected, &actual),
     }
