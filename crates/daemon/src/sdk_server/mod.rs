@@ -3,6 +3,8 @@ mod host;
 pub mod listener;
 pub mod security;
 pub mod trace;
+#[cfg(windows)]
+pub mod windows;
 
 use std::collections::HashMap;
 use std::hash::{BuildHasher, RandomState};

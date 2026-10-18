@@ -58,6 +58,9 @@ pub fn platform_source() -> Option<Box<dyn ForegroundSource>> {
 }
 
 #[cfg(windows)]
+pub(crate) use windows::image_path_of;
+
+#[cfg(windows)]
 mod windows {
     use windows_sys::Win32::Foundation::CloseHandle;
     use windows_sys::Win32::System::Threading::{
@@ -71,27 +74,32 @@ mod windows {
 
     impl ForegroundSource for WindowsForeground {
         fn foreground_exe(&mut self) -> Option<String> {
-            // SAFETY: plain Win32 queries on handles owned by this function; the process handle is closed before returning.
-            unsafe {
+            // SAFETY: plain Win32 queries on a window handle that is only read, never owned or closed.
+            let pid = unsafe {
                 let window = GetForegroundWindow();
                 if window.is_null() {
                     return None;
                 }
                 let mut pid = 0u32;
                 GetWindowThreadProcessId(window, &mut pid);
-                if pid == 0 {
-                    return None;
-                }
-                let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-                if process.is_null() {
-                    return None;
-                }
-                let mut buffer = [0u16; 1024];
-                let mut length = buffer.len() as u32;
-                let ok = QueryFullProcessImageNameW(process, PROCESS_NAME_WIN32, buffer.as_mut_ptr(), &mut length);
-                CloseHandle(process);
-                (ok != 0).then(|| String::from_utf16_lossy(&buffer[..length as usize]))
+                pid
+            };
+            if pid == 0 { None } else { image_path_of(pid) }
+        }
+    }
+
+    pub(crate) fn image_path_of(pid: u32) -> Option<String> {
+        // SAFETY: plain Win32 queries on handles owned by this function; the process handle is closed before returning.
+        unsafe {
+            let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if process.is_null() {
+                return None;
             }
+            let mut buffer = [0u16; 1024];
+            let mut length = buffer.len() as u32;
+            let ok = QueryFullProcessImageNameW(process, PROCESS_NAME_WIN32, buffer.as_mut_ptr(), &mut length);
+            CloseHandle(process);
+            (ok != 0).then(|| String::from_utf16_lossy(&buffer[..length as usize]))
         }
     }
 }

@@ -88,6 +88,8 @@ fn run(instance: ipc::InstanceLock) -> Result<(), Box<dyn std::error::Error>> {
 
     let server_sender = sender.clone();
     thread::spawn(move || server::serve(listener, server_sender));
+    #[cfg(windows)]
+    let sdk_listener = spawn_sdk_listener(&sender, &sdk_enabled);
 
     let (sink, sink_warning): (Box<dyn actions::InputSink>, _) = match actions::platform_sink() {
         Ok(sink) => (sink, None),
@@ -114,6 +116,10 @@ fn run(instance: ipc::InstanceLock) -> Result<(), Box<dyn std::error::Error>> {
 
     eprintln!("k100d: config in {}", config.root().display());
     runtime::run(controller, config, receiver, sender, HidConnector, sdk_enabled);
+    #[cfg(windows)]
+    if let Some(sdk_listener) = sdk_listener {
+        sdk_listener.stop();
+    }
     #[cfg(any(windows, feature = "tray"))]
     if let Some(tray) = tray {
         tray.stop();
@@ -123,6 +129,22 @@ fn run(instance: ipc::InstanceLock) -> Result<(), Box<dyn std::error::Error>> {
     drop(instance);
     eprintln!("k100d: stopped");
     Ok(())
+}
+
+#[cfg(windows)]
+fn spawn_sdk_listener(
+    sender: &mpsc::Sender<Command>,
+    enabled: &Arc<AtomicBool>,
+) -> Option<daemon::sdk_server::windows::SdkListener> {
+    match daemon::sdk_server::windows::SdkListener::spawn(sender.clone(), enabled.clone()) {
+        Ok(listener) => Some(listener),
+        Err(error) => {
+            eprintln!("k100d: iCUE SDK server unavailable: {error}");
+            let status = ipc::SdkStatus::Failed { reason: error.to_string() };
+            let _ = sender.send(Command::Sdk(daemon::sdk_server::SdkCommand::Status(status)));
+            None
+        }
+    }
 }
 
 fn autostart_port() -> Box<dyn install::Autostart> {
