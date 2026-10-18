@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/bragi", "crates/k100", "crates/engine", "crates/audio", "crates/actions", "crates/ipc", "crates/install", "crates/daemon", "crates/cli", "crates/gui", "crates/onboard"]
+members = ["crates/bragi", "crates/k100", "crates/engine", "crates/audio", "crates/actions", "crates/ipc", "crates/install", "crates/daemon", "crates/cli", "crates/gui", "crates/onboard", "crates/sdk"]
 
 [workspace.package]
 version = "0.1.0"
@@ -20,6 +20,7 @@ pulseaudio = "0.3"
 actions = { path = "crates/actions" }
 ipc = { path = "crates/ipc" }
 onboard = { path = "crates/onboard" }
+sdk = { path = "crates/sdk" }
 install = { path = "crates/install" }
 winreg = "0.56"
 daemon = { path = "crates/daemon" }
