@@ -10,7 +10,6 @@ use daemon::audio::SystemAudio;
 use daemon::config::ConfigDir;
 use daemon::controller::Controller;
 use daemon::runtime::{self, Command, HidConnector};
-use daemon::sdk_server::with_device_id;
 use daemon::server;
 use daemon::shutdown::{self, ReleaseSignal};
 use notify::{RecursiveMode, Watcher};
@@ -50,7 +49,9 @@ fn run(instance: ipc::InstanceLock) -> Result<(), Box<dyn std::error::Error>> {
         None => ConfigDir::default_location().ok_or("no home directory")?,
     };
     config.ensure_default_profile()?;
-    let settings = with_device_id(&config, config.load_settings()?);
+    let settings = config.load_settings()?;
+    #[cfg(windows)]
+    let settings = daemon::sdk_server::with_device_id(&config, settings);
     let sdk_enabled = Arc::new(AtomicBool::new(settings.sdk.enabled));
     let (profiles, errors) = config.load_profiles();
     for error in &errors {

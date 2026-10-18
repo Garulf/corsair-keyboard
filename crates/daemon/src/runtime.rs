@@ -129,6 +129,7 @@ pub fn run(
                 next_frame = Instant::now() + controller.frame_interval();
             }
         }
+        sdk.sync(&mut controller);
 
         if controller.wants_device() {
             if let Some(stop) = input_stop.take() {

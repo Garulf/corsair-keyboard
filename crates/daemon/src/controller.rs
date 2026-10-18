@@ -285,6 +285,7 @@ impl Controller {
 
     fn sdk_state(&self) -> SdkState {
         let status = match &self.sdk_status {
+            SdkStatus::Unsupported => SdkStatus::Unsupported,
             _ if !self.settings.sdk.enabled => SdkStatus::Off,
             status => status.clone(),
         };
@@ -2628,6 +2629,15 @@ mod tests {
         rig.controller.set_sdk_status(ipc::SdkStatus::Listening);
         let sdk = rig.controller.state().sdk;
         assert_eq!((sdk.status, sdk.clients), (ipc::SdkStatus::Listening, vec![client]));
+    }
+
+    #[test]
+    fn a_platform_without_the_sdk_stays_unsupported_even_when_disabled() {
+        let rig = rig_with(
+            with_sdk(ipc::SdkSettings { enabled: false, ..ipc::SdkSettings::default() }),
+            vec![profile("default")],
+        );
+        assert_eq!(rig.controller.state().sdk.status, ipc::SdkStatus::Unsupported);
     }
 
     #[test]
