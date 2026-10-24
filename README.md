@@ -7,7 +7,7 @@ Run the Corsair K100 RGB keyboard without iCUE, on Windows and Linux.
 
 ## Installation
 
-Building needs Rust 1.95 or newer. On Linux install `pkg-config` and `libudev-dev` first.
+Building needs Rust 1.95 or newer. On Linux install `pkg-config` first.
 
 ```sh
 cargo build --release -p daemon -p k100-cli
