@@ -73,6 +73,10 @@ impl Player {
         }
     }
 
+    pub fn stop_source(&mut self, source: u8) -> Vec<SinkEvent> {
+        self.find(source).map(|index| self.stop(index)).unwrap_or_default()
+    }
+
     pub fn cancel_all(&mut self) -> Vec<SinkEvent> {
         let mut out = Vec::new();
         for mut task in self.tasks.drain(..) {
@@ -291,6 +295,17 @@ mod tests {
         assert!(player.is_playing(9));
         assert_eq!(player.press(9, program(steps, RepeatMode::Toggle), ms(20)), [up("a")]);
         assert!(!player.is_playing(9));
+    }
+
+    #[test]
+    fn stopping_a_source_ends_a_running_toggle_and_releases_its_keys() {
+        let steps = vec![MacroStep::Down(key("a")), MacroStep::Delay(100), MacroStep::Up(key("a"))];
+        let mut player = Player::new(false);
+        player.press(9, program(steps, RepeatMode::Toggle), ms(0));
+        player.release(9, ms(10));
+        assert_eq!(player.stop_source(9), [up("a")]);
+        assert!(!player.is_playing(9));
+        assert!(player.stop_source(9).is_empty());
     }
 
     #[test]

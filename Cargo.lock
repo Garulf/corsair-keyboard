@@ -946,6 +946,7 @@ dependencies = [
  "k100",
  "notify",
  "onboard",
+ "sdk",
  "serde",
  "serde_json",
  "sysinfo",
@@ -2215,9 +2216,12 @@ dependencies = [
  "ipc",
  "k100",
  "onboard",
+ "sdk",
  "serde",
+ "serde_json",
  "tempfile",
  "toml 1.1.8+spec-1.1.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3631,6 +3635,17 @@ name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
+
+[[package]]
+name = "sdk"
+version = "0.1.0"
+dependencies = [
+ "engine",
+ "k100",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+]
 
 [[package]]
 name = "self_cell"

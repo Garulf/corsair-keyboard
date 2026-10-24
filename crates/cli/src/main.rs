@@ -3,9 +3,12 @@ mod effect;
 mod launch;
 mod onboard_cmd;
 mod remote;
+mod sdk_cmd;
+mod sdk_probe;
 
 use clap::{Parser, Subcommand};
 use ipc::Request;
+use sdk_cmd::SdkArgs;
 
 #[derive(Debug, Parser)]
 #[command(name = "k100", version, about = "Control a Corsair K100 keyboard without iCUE")]
@@ -60,7 +63,9 @@ enum Command {
     Events,
     /// Manage the profiles stored on the keyboard
     Onboard(onboard_cmd::OnboardArgs),
-    /// Low-level hardware checks that talk to the keyboard directly (stop k100d first, except for `diag audio`)
+    /// Allow or refuse iCUE SDK apps by exe name
+    Sdk(SdkArgs),
+    /// Low-level hardware checks that talk to the keyboard directly (stop k100d first, except for `diag audio`, `diag sdk-probe` and `diag sdk-compare`)
     #[command(subcommand)]
     Diag(diag::Diag),
 }
@@ -91,6 +96,7 @@ fn main() {
         }
         Command::Events => remote::events(),
         Command::Onboard(args) => onboard_cmd::run(args),
+        Command::Sdk(args) => sdk_cmd::run(args),
         Command::Diag(diag) => diag::run(diag),
     };
     if let Err(error) = result {
@@ -105,6 +111,7 @@ mod tests {
 
     use super::*;
     use crate::onboard_cmd::OnboardCommand;
+    use crate::sdk_cmd::SdkAction;
 
     #[test]
     fn the_command_line_definition_is_valid() {
@@ -155,6 +162,51 @@ mod tests {
             let line = ["k100", "onboard"].iter().chain(words);
             assert!(Cli::try_parse_from(line).is_ok(), "{words:?}");
         }
+    }
+
+    #[test]
+    fn sdk_probe_takes_its_options_after_diag() {
+        let line =
+            ["k100", "diag", "sdk-probe", "--write", "--listen-seconds", "3", "--pipe", "other", "--out", "x.json"];
+        let Command::Diag(diag::Diag::SdkProbe { out, write, listen_seconds, pipe }) =
+            Cli::try_parse_from(line).unwrap().command
+        else {
+            panic!("expected sdk-probe")
+        };
+        assert_eq!((write, listen_seconds, pipe.as_str()), (true, 3, "other"));
+        assert_eq!(out.as_deref(), Some(std::path::Path::new("x.json")));
+    }
+
+    #[test]
+    fn sdk_probe_defaults_to_reading_the_icue_pipe_for_fifteen_seconds() {
+        let cli = Cli::try_parse_from(["k100", "diag", "sdk-probe"]).unwrap();
+        let Command::Diag(diag::Diag::SdkProbe { out, write, listen_seconds, pipe }) = cli.command else {
+            panic!("expected sdk-probe")
+        };
+        assert_eq!((out, write, listen_seconds, pipe.as_str()), (None, false, 15, "iCUESDKv4"));
+    }
+
+    #[test]
+    fn sdk_compare_takes_two_transcripts() {
+        let cli = Cli::try_parse_from(["k100", "diag", "sdk-compare", "a.json", "b.json"]).unwrap();
+        let Command::Diag(diag::Diag::SdkCompare { expected, actual }) = cli.command else {
+            panic!("expected sdk-compare")
+        };
+        assert_eq!((expected.to_str(), actual.to_str()), (Some("a.json"), Some("b.json")));
+        assert!(Cli::try_parse_from(["k100", "diag", "sdk-compare", "a.json"]).is_err());
+    }
+
+    #[test]
+    fn sdk_commands_parse() {
+        let cli = Cli::try_parse_from(["k100", "sdk", "block", "StreamDeck.exe"]).unwrap();
+        assert!(
+            matches!(cli.command, Command::Sdk(SdkArgs { command: SdkAction::Block { ref exe } }) if exe == "StreamDeck.exe")
+        );
+        let cli = Cli::try_parse_from(["k100", "sdk", "unblock", "x.exe"]).unwrap();
+        assert!(
+            matches!(cli.command, Command::Sdk(SdkArgs { command: SdkAction::Unblock { ref exe } }) if exe == "x.exe")
+        );
+        assert!(Cli::try_parse_from(["k100", "sdk", "block"]).is_err());
     }
 
     #[test]

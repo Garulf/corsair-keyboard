@@ -1,0 +1,36 @@
+{
+  "tool": "sdk-probe",
+  "pipe": "\\\\.\\pipe\\iCUESDKv4",
+  "mode": "read-only",
+  "entries": [
+    {
+      "at_ms": 0,
+      "direction": "sent",
+      "message": {"method": 0, "code": -1, "params": {"pid": 4242, "clientVersion": "4.0.84"}}
+    },
+    {
+      "at_ms": 12,
+      "direction": "received",
+      "message": {"code": -1, "error": 0, "method": 0, "result": {"serverHostVersion": "5.7.106", "serverVersion": "4.0.18", "state": 6}}
+    },
+    {
+      "at_ms": 13,
+      "direction": "sent",
+      "message": {"method": 1, "code": 1, "params": {"deviceTypeMask": 1, "sizeMax": 64}}
+    },
+    {
+      "at_ms": 20,
+      "direction": "received",
+      "message": {
+        "code": 1,
+        "error": 0,
+        "method": 1,
+        "result": {
+          "deviceInfos": [
+            {"channelCount": 0, "id": "{3f8b4d27-ad0e-459c-9987-5d769a8c2523}", "ledCount": 117, "model": "K70 MAX", "serial": "X", "type": 1}
+          ]
+        }
+      }
+    }
+  ]
+}

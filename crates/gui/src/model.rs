@@ -616,6 +616,7 @@ impl Model {
             Event::Recording { state } => self.update_state(|current| current.recording = state),
             Event::Brightness { percent } => self.update_state(|current| current.brightness = percent),
             Event::Audio { state } => self.update_state(|current| current.audio = state),
+            Event::Sdk { state } => self.update_state(|current| current.sdk = state),
             Event::Key { .. } | Event::Dial { .. } => {}
         }
     }
@@ -643,7 +644,7 @@ mod tests {
     use k100::Rgb;
 
     use super::*;
-    use crate::testing::{online, profile, sent, state};
+    use crate::testing::{online, profile, sent, state, streamdeck};
 
     fn edit(model: &mut Model) {
         model.draft.as_mut().unwrap().profile.apps.push("game.exe".into());
@@ -1124,6 +1125,18 @@ mod tests {
         assert_eq!(model.frame.unwrap()[26], Rgb::new(255, 0, 0));
         model.apply(Inbox::Event(Event::Frame { rgb: "garbage".into() }));
         assert!(model.frame.is_none());
+    }
+
+    #[test]
+    fn an_sdk_event_updates_the_state() {
+        let mut model = online("default", &["default"]);
+        let sdk = ipc::SdkState {
+            status: ipc::SdkStatus::Listening,
+            clients: vec![streamdeck()],
+            blocked: vec!["bad.exe".into()],
+        };
+        model.apply(Inbox::Event(Event::Sdk { state: sdk.clone() }));
+        assert_eq!(model.state.as_ref().unwrap().sdk, sdk);
     }
 
     #[test]

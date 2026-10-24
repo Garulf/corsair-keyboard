@@ -1,0 +1,14 @@
+[package]
+name = "sdk"
+description = "Wire protocol of the iCUE SDK v4 named pipe"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+engine.workspace = true
+k100.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

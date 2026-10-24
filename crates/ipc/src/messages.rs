@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::settings::{Settings, SettingsPatch};
 
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -56,6 +56,10 @@ pub enum Request {
     SubscribeFrames,
     Onboard {
         request: OnboardRequest,
+    },
+    SdkBlock {
+        exe: String,
+        blocked: bool,
     },
 }
 
@@ -120,6 +124,7 @@ pub enum Event {
     MacroRecorded { key: String },
     Brightness { percent: u8 },
     Audio { state: AudioState },
+    Sdk { state: SdkState },
     Frame { rgb: String },
 }
 
@@ -155,6 +160,61 @@ pub enum AudioState {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum SdkStatus {
+    #[default]
+    Unsupported,
+    Off,
+    Listening,
+    InUse,
+    Failed {
+        reason: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SdkAccess {
+    Shared,
+    ExclusiveLighting,
+    ExclusiveKeys,
+    Exclusive,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SdkClient {
+    pub exe: String,
+    pub access: SdkAccess,
+    pub priority: u8,
+    pub intercepted: Vec<String>,
+    pub refused: bool,
+}
+
+pub fn sdk_client_text(client: &SdkClient) -> String {
+    if client.refused {
+        return format!("{}: refused", client.exe);
+    }
+    let access = match client.access {
+        SdkAccess::Shared => "shared",
+        SdkAccess::ExclusiveLighting => "exclusive lighting",
+        SdkAccess::ExclusiveKeys => "exclusive G-keys",
+        SdkAccess::Exclusive => "exclusive lighting and G-keys",
+    };
+    if client.intercepted.is_empty() {
+        format!("{}: {access}", client.exe)
+    } else {
+        format!("{}: {access}, intercepts {}", client.exe, client.intercepted.join(" "))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct SdkState {
+    pub status: SdkStatus,
+    pub clients: Vec<SdkClient>,
+    pub blocked: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct DaemonState {
     pub device: DeviceState,
@@ -175,6 +235,8 @@ pub struct DaemonState {
     pub autostart: bool,
     #[serde(default)]
     pub audio: AudioState,
+    #[serde(default)]
+    pub sdk: SdkState,
 }
 
 fn version_one() -> u32 {
@@ -241,6 +303,65 @@ mod tests {
         let old_state = r#"{"device":{"state":"released"},"active_profile":"a","profiles":[],"brightness":5,"polling_rate_hz":null,"config_errors":[]}"#;
         let state: DaemonState = serde_json::from_str(old_state).unwrap();
         assert_eq!(state.audio, AudioState::Off);
+    }
+
+    #[test]
+    fn daemon_state_without_sdk_parses_as_unsupported() {
+        let old_state = r#"{"device":{"state":"released"},"active_profile":"a","profiles":[],"brightness":5,"polling_rate_hz":null,"config_errors":[]}"#;
+        let state: DaemonState = serde_json::from_str(old_state).unwrap();
+        assert_eq!(state.sdk, SdkState::default());
+        assert_eq!(state.sdk.status, SdkStatus::Unsupported);
+    }
+
+    #[test]
+    fn sdk_state_round_trips() {
+        let client = SdkClient {
+            exe: "StreamDeck.exe".into(),
+            access: SdkAccess::ExclusiveKeys,
+            priority: 128,
+            intercepted: vec!["G1".into()],
+            refused: false,
+        };
+        let listening = SdkState { status: SdkStatus::Listening, clients: vec![client], blocked: vec!["x.exe".into()] };
+        let json = serde_json::to_string(&listening).unwrap();
+        assert_eq!(
+            json,
+            r#"{"status":{"status":"listening"},"clients":[{"exe":"StreamDeck.exe","access":"exclusive_keys","priority":128,"intercepted":["G1"],"refused":false}],"blocked":["x.exe"]}"#
+        );
+        assert_eq!(serde_json::from_str::<SdkState>(&json).unwrap(), listening);
+        for status in [SdkStatus::InUse, SdkStatus::Off, SdkStatus::Failed { reason: "denied".into() }] {
+            let state = SdkState { status, ..SdkState::default() };
+            assert_eq!(serde_json::from_str::<SdkState>(&serde_json::to_string(&state).unwrap()).unwrap(), state);
+        }
+        let failed = serde_json::to_string(&SdkStatus::Failed { reason: "denied".into() }).unwrap();
+        assert_eq!(failed, r#"{"status":"failed","reason":"denied"}"#);
+        let event = Event::Sdk { state: SdkState::default() };
+        assert_eq!(serde_json::from_str::<Event>(&serde_json::to_string(&event).unwrap()).unwrap(), event);
+        let block = Request::SdkBlock { exe: "x.exe".into(), blocked: true };
+        assert_eq!(serde_json::to_string(&block).unwrap(), r#"{"type":"sdk_block","exe":"x.exe","blocked":true}"#);
+    }
+
+    #[test]
+    fn sdk_client_text_names_the_access_and_the_intercepted_keys() {
+        let client = |access, intercepted: &[&str], refused| SdkClient {
+            exe: "StreamDeck.exe".into(),
+            access,
+            priority: 128,
+            intercepted: intercepted.iter().map(|key| (*key).to_owned()).collect(),
+            refused,
+        };
+        let text = |access, intercepted: &[&str], refused| sdk_client_text(&client(access, intercepted, refused));
+        assert_eq!(text(SdkAccess::Shared, &[], false), "StreamDeck.exe: shared");
+        assert_eq!(text(SdkAccess::ExclusiveLighting, &[], false), "StreamDeck.exe: exclusive lighting");
+        assert_eq!(
+            text(SdkAccess::ExclusiveKeys, &["G1", "G2"], false),
+            "StreamDeck.exe: exclusive G-keys, intercepts G1 G2"
+        );
+        assert_eq!(
+            text(SdkAccess::Exclusive, &["G6"], false),
+            "StreamDeck.exe: exclusive lighting and G-keys, intercepts G6"
+        );
+        assert_eq!(text(SdkAccess::Shared, &[], true), "StreamDeck.exe: refused");
     }
 
     #[test]
@@ -312,7 +433,7 @@ mod tests {
         );
         let done = Reply::OnboardDone { message: "deleted slot 1".into(), backup: Some("/b".into()), notes: vec![] };
         assert_eq!(serde_json::from_str::<Reply>(&serde_json::to_string(&done).unwrap()).unwrap(), done);
-        assert_eq!(PROTOCOL_VERSION, 4);
+        assert_eq!(PROTOCOL_VERSION, 5);
     }
 
     #[test]

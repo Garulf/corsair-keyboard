@@ -12,6 +12,7 @@ use crate::sink::{InputSink, SinkEvent};
 pub enum OutputCommand {
     Press { source: u8, program: Program },
     Release { source: u8 },
+    Stop { source: u8 },
     Emit(Vec<SinkEvent>),
     CancelAll,
     Launch { program: String, args: Vec<String> },
@@ -70,6 +71,7 @@ fn apply(player: &mut Player, command: OutputCommand, now: Duration) -> Vec<Sink
     match command {
         OutputCommand::Press { source, program } => player.press(source, program, now),
         OutputCommand::Release { source } => player.release(source, now),
+        OutputCommand::Stop { source } => player.stop_source(source),
         OutputCommand::Emit(events) => events,
         OutputCommand::CancelAll => player.cancel_all(),
         OutputCommand::Launch { program, args } => {
@@ -145,6 +147,20 @@ mod tests {
         drop(handle);
         thread.join().unwrap();
         assert_eq!(sink.take(), [down("b"), up("b"), SinkEvent::Text("hi".into()), down("c"), up("c")]);
+    }
+
+    #[test]
+    fn stop_ends_what_a_source_plays() {
+        let sink = RecordingSink::default();
+        let (handle, thread) = spawn(Box::new(sink.clone()));
+        let toggle = Program::macro_steps(&[MacroStep::Down(key("c")), MacroStep::Delay(10_000)], RepeatMode::Toggle);
+        handle.send(OutputCommand::Press { source: 5, program: toggle });
+        handle.send(OutputCommand::Stop { source: 5 });
+        handle.send(OutputCommand::Emit(vec![SinkEvent::Text("after".into())]));
+        assert_eq!(collect(&sink, 3, Duration::from_secs(5)), [down("c"), up("c"), SinkEvent::Text("after".into())]);
+        drop(handle);
+        thread.join().unwrap();
+        assert_eq!(sink.take(), []);
     }
 
     fn collect(sink: &RecordingSink, count: usize, within: Duration) -> Vec<SinkEvent> {

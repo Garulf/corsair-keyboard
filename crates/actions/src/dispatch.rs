@@ -15,6 +15,7 @@ pub struct Dispatcher {
     dial: Dial,
     held: HashSet<u8>,
     firing: HashSet<u8>,
+    taken: HashSet<u8>,
 }
 
 impl Dispatcher {
@@ -25,6 +26,7 @@ impl Dispatcher {
             dial: Dial::new(dial),
             held: HashSet::new(),
             firing: HashSet::new(),
+            taken: HashSet::new(),
         }
     }
 
@@ -32,6 +34,12 @@ impl Dispatcher {
         self.bindings = bind(assignments);
         self.dial.reconfigure(dial);
         self.firing.clear();
+    }
+
+    pub fn set_taken_keys(&mut self, leds: &[u8]) -> Vec<u8> {
+        let newly_taken = leds.iter().copied().filter(|led| !self.taken.contains(led)).collect();
+        self.taken = leds.iter().copied().collect();
+        newly_taken
     }
 
     pub fn forget_held_keys(&mut self) {
@@ -103,6 +111,9 @@ impl Dispatcher {
         }
         if index == led::PROFILE && self.recorder.cancel() {
             return vec![Intent::Recording(RecorderState::Idle)];
+        }
+        if self.taken.contains(&index) {
+            return Vec::new();
         }
         if let Some(assignment) = self.bindings.get(&index) {
             let native = assignment
@@ -418,5 +429,62 @@ mod tests {
         dispatcher.handle(&InputEvent::KeyDown(57), ms(0));
         dispatcher.reconfigure(&[], &DialConfig::default());
         assert!(dispatcher.handle(&InputEvent::KeyUp(57), ms(10)).is_empty());
+    }
+
+    fn remap_g1() -> Assignment {
+        assign("g1", Action::Remap { key: key("a"), modifiers: vec![] })
+    }
+
+    #[test]
+    fn a_taken_g_key_does_not_run_its_assignment_until_given_back() {
+        let mut dispatcher = Dispatcher::new(&[remap_g1()], &DialConfig::default());
+        dispatcher.set_taken_keys(&[131]);
+        assert!(dispatcher.handle(&InputEvent::KeyDown(131), ms(0)).is_empty());
+        assert!(dispatcher.handle(&InputEvent::KeyUp(131), ms(10)).is_empty());
+        dispatcher.set_taken_keys(&[]);
+        assert!(!dispatcher.handle(&InputEvent::KeyDown(131), ms(20)).is_empty());
+    }
+
+    #[test]
+    fn taking_keys_reports_only_the_newly_taken_ones() {
+        let mut dispatcher = Dispatcher::new(&[remap_g1()], &DialConfig::default());
+        assert_eq!(dispatcher.set_taken_keys(&[131, 132]), [131, 132]);
+        assert_eq!(dispatcher.set_taken_keys(&[132, 133]), [133]);
+        assert!(dispatcher.set_taken_keys(&[]).is_empty());
+    }
+
+    #[test]
+    fn a_key_held_when_taken_still_releases_its_action() {
+        let mut dispatcher = Dispatcher::new(&[remap_g1()], &DialConfig::default());
+        assert!(matches!(
+            dispatcher.handle(&InputEvent::KeyDown(131), ms(0))[..],
+            [Intent::Output(OutputCommand::Press { source: 131, .. })]
+        ));
+        dispatcher.set_taken_keys(&[131]);
+        assert_eq!(
+            dispatcher.handle(&InputEvent::KeyUp(131), ms(10)),
+            [Intent::Output(OutputCommand::Release { source: 131 })]
+        );
+    }
+
+    #[test]
+    fn a_key_pressed_while_taken_and_released_after_does_nothing() {
+        let mut dispatcher = Dispatcher::new(&[remap_g1()], &DialConfig::default());
+        dispatcher.set_taken_keys(&[131]);
+        assert!(dispatcher.handle(&InputEvent::KeyDown(131), ms(0)).is_empty());
+        dispatcher.set_taken_keys(&[]);
+        assert!(dispatcher.handle(&InputEvent::KeyUp(131), ms(10)).is_empty());
+    }
+
+    #[test]
+    fn taken_keys_survive_a_reconfigure_and_macro_recording_still_targets_them() {
+        let mut dispatcher = Dispatcher::new(&[remap_g1()], &macro_dial());
+        dispatcher.set_taken_keys(&[131]);
+        dispatcher.reconfigure(&[remap_g1()], &macro_dial());
+        assert!(dispatcher.handle(&InputEvent::KeyDown(131), ms(0)).is_empty());
+        dispatcher.handle(&InputEvent::KeyUp(131), ms(10));
+        arm(&mut dispatcher, 100);
+        dispatcher.handle(&InputEvent::KeyDown(131), ms(800));
+        assert_eq!(dispatcher.recorder_state(), RecorderState::Recording { key: 131 });
     }
 }

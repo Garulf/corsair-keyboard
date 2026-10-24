@@ -22,6 +22,7 @@ pub struct OpenedDevice {
     pub commands: HidTransport,
     pub input: HidInput,
     pub model: &'static Model,
+    pub serial: String,
 }
 
 pub fn open_device() -> Result<OpenedDevice, OpenError> {
@@ -29,6 +30,7 @@ pub fn open_device() -> Result<OpenedDevice, OpenError> {
     let mut commands = None;
     let mut input = None;
     let mut found = None;
+    let mut serial = String::new();
     for info in api.device_list() {
         if info.vendor_id() != CORSAIR_VID || info.usage_page() != VENDOR_USAGE_PAGE {
             continue;
@@ -40,7 +42,10 @@ pub fn open_device() -> Result<OpenedDevice, OpenError> {
             continue;
         }
         match info.usage() {
-            COMMAND_USAGE => commands = Some(info.open_device(&api)?),
+            COMMAND_USAGE => {
+                commands = Some(info.open_device(&api)?);
+                serial = info.serial_number().unwrap_or_default().to_owned();
+            }
             INPUT_USAGE => input = Some(info.open_device(&api)?),
             _ => continue,
         }
@@ -51,6 +56,7 @@ pub fn open_device() -> Result<OpenedDevice, OpenError> {
         commands: HidTransport(commands.ok_or(OpenError::MissingInterface("command"))?),
         input: HidInput(input.ok_or(OpenError::MissingInterface("input"))?),
         model,
+        serial,
     })
 }
 

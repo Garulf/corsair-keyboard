@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
@@ -13,6 +15,10 @@ use daemon::shutdown::{self, ReleaseSignal};
 use notify::{RecursiveMode, Watcher};
 
 fn main() -> ExitCode {
+    if std::env::args().nth(1).as_deref() == Some(daemon::standin::MODE_ARG) {
+        daemon::standin::wait_for_parent(std::io::stdin());
+        return ExitCode::SUCCESS;
+    }
     let instance = match ipc::InstanceLock::acquire(&ipc::lock_path()) {
         Ok(instance) => instance,
         Err(error) => {
@@ -48,6 +54,9 @@ fn run(instance: ipc::InstanceLock) -> Result<(), Box<dyn std::error::Error>> {
     };
     config.ensure_default_profile()?;
     let settings = config.load_settings()?;
+    #[cfg(windows)]
+    let settings = daemon::sdk_server::with_device_id(&config, settings);
+    let sdk_enabled = Arc::new(AtomicBool::new(settings.sdk.enabled));
     let (profiles, errors) = config.load_profiles();
     for error in &errors {
         eprintln!("k100d: config: {error}");
@@ -63,8 +72,11 @@ fn run(instance: ipc::InstanceLock) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let reload = sender.clone();
+    let watched = config.clone();
     let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-        if event.is_ok_and(|e| e.kind.is_modify() || e.kind.is_create() || e.kind.is_remove()) {
+        let Ok(event) = event else { return };
+        let changed = event.kind.is_modify() || event.kind.is_create() || event.kind.is_remove();
+        if changed && !watched.only_generated_files_changed(&event.paths) {
             let _ = reload.send(Command::Reload);
         }
     })?;
@@ -81,6 +93,14 @@ fn run(instance: ipc::InstanceLock) -> Result<(), Box<dyn std::error::Error>> {
 
     let server_sender = sender.clone();
     thread::spawn(move || server::serve(listener, server_sender));
+    #[cfg(windows)]
+    let sdk_listener = spawn_sdk_listener(&sender, &sdk_enabled);
+    #[cfg(windows)]
+    let standin = spawn_standin(&config, &sdk_enabled);
+    #[cfg(windows)]
+    let standin_pid = standin.as_ref().map_or_else(Default::default, |standin| standin.pid());
+    #[cfg(not(windows))]
+    let standin_pid = Default::default();
 
     let (sink, sink_warning): (Box<dyn actions::InputSink>, _) = match actions::platform_sink() {
         Ok(sink) => (sink, None),
@@ -106,7 +126,15 @@ fn run(instance: ipc::InstanceLock) -> Result<(), Box<dyn std::error::Error>> {
     let _ = no_tray;
 
     eprintln!("k100d: config in {}", config.root().display());
-    runtime::run(controller, config, receiver, sender, HidConnector);
+    runtime::run(controller, config, receiver, sender, HidConnector::new(standin_pid), sdk_enabled);
+    #[cfg(windows)]
+    if let Some(sdk_listener) = sdk_listener {
+        sdk_listener.stop();
+    }
+    #[cfg(windows)]
+    if let Some(standin) = standin {
+        standin.stop();
+    }
     #[cfg(any(windows, feature = "tray"))]
     if let Some(tray) = tray {
         tray.stop();
@@ -116,6 +144,30 @@ fn run(instance: ipc::InstanceLock) -> Result<(), Box<dyn std::error::Error>> {
     drop(instance);
     eprintln!("k100d: stopped");
     Ok(())
+}
+
+#[cfg(windows)]
+fn spawn_sdk_listener(
+    sender: &mpsc::Sender<Command>,
+    enabled: &Arc<AtomicBool>,
+) -> Option<daemon::sdk_server::windows::SdkListener> {
+    match daemon::sdk_server::windows::SdkListener::spawn(sender.clone(), enabled.clone()) {
+        Ok(listener) => Some(listener),
+        Err(error) => {
+            eprintln!("k100d: iCUE SDK server unavailable: {error}");
+            let status = ipc::SdkStatus::Failed { reason: error.to_string() };
+            let _ = sender.send(Command::Sdk(daemon::sdk_server::SdkCommand::Status(status)));
+            None
+        }
+    }
+}
+
+#[cfg(windows)]
+fn spawn_standin(config: &ConfigDir, enabled: &Arc<AtomicBool>) -> Option<daemon::standin::SupervisorHandle> {
+    let source =
+        std::env::current_exe().map_err(|error| eprintln!("k100d: iCUE.exe stand-in unavailable: {error}")).ok()?;
+    let launcher = daemon::standin::ProcessLauncher::new(source, config.standin_exe());
+    Some(daemon::standin::spawn(launcher, enabled.clone()))
 }
 
 fn autostart_port() -> Box<dyn install::Autostart> {

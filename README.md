@@ -79,11 +79,14 @@ Audio capture for the audio visualizer needs a PulseAudio server or PipeWire wit
 | `k100 onboard save <profile> [--slot N] [--dry-run]` | Save a profile to the keyboard, as a new slot or over slot N. `--dry-run` shows what would be written without touching the keyboard |
 | `k100 onboard delete <slot>`, `k100 onboard activate <slot>` | Remove a stored profile, or choose the one the keyboard plays |
 | `k100 onboard backup [--to DIR]`, `k100 onboard restore <folder>` | Copy every stored profile to a folder, or put them back from one |
+| `k100 sdk block <exe>`, `k100 sdk unblock <exe>` | Refuse an iCUE SDK app by its exe name, or allow it again |
 | `k100 diag <subcommand>` | Low-level hardware checks (stop the daemon first, except for `diag audio`) |
 | `k100 diag audio [--seconds N]` | Print the captured audio spectrum as text, with no keyboard or daemon needed |
 | `k100 diag file <id> [--out PATH]` | Read one file from the keyboard's onboard memory (for example `0x0f`, the stored profile list) and print it as hex |
 | `k100 diag file-write <id> <path> [--create]`, `k100 diag file-remove <id>` | Replace or remove an onboard file (create and remove only for free-use ids 0x6D60..0x7FFF). These change the keyboard's stored profiles |
 | `k100 diag prop <id> [--set N]` | Read a device property by id, optionally writing it first |
+| `k100 diag sdk-probe [--write] [--out FILE]` | Talk to whatever serves the iCUE SDK pipe and save every message as JSON. Without `--write` it only reads |
+| `k100 diag sdk-compare <expected> <actual>` | Compare two probe transcripts and list the differences |
 
 The effects are `solid`, `rainbow_wave`, `spiral_rainbow`, `color_wave`, `visor`, `color_pulse`, `rain`, `type`, `ripple` and `audio_visualizer`. All but the rainbow ones and `audio_visualizer` need `--color`. The audio visualizer shows the system audio output as 32 frequency bands across the keyboard, and `--color` gives it a single color instead of its green to red gradient.
 
@@ -156,6 +159,25 @@ While k100d runs, the onboard commands go through it, and the keyboard shows a c
 Before every save, delete and restore, the keyboard's slots are copied to a new folder under `onboard-backup/` in the config folder, and the command prints its path. `k100 onboard restore <folder>` puts all slots in that folder back, and `k100 onboard backup [--to DIR]` makes a copy on demand.
 
 The GUI's Onboard pane does the same through k100d: it lists the stored slots with the active one marked, saves the edited profile as a new slot or over the selected one after a preview of what is left out, activates and deletes slots, and backs them up and restores them. Saving uses the profile as it was last applied, so apply your edits first. Restore takes the full path of a backup folder, and "Use the latest backup" fills in the folder of the last backup k100d reported. While k100d has released the keyboard the pane offers to take it back first.
+
+### iCUE SDK apps (Windows)
+
+With iCUE closed, apps that use version 4 of the iCUE SDK talk to k100d instead. Elgato Stream Deck's Corsair G-key support and the SDK lighting in some games are the usual ones. k100d is compatible with the iCUE SDK and is not iCUE. It accepts at most 32 SDK connections at once and drops further ones.
+
+- Stream Deck only connects while a program named `iCUE.exe` is running, so while the SDK is enabled k100d runs a copy of itself under that name from the `icue-standin` folder in the config folder. The copy does nothing and exits with k100d. Stream Deck looks for it when it starts, so start k100d first, or restart Stream Deck once after k100d starts. k100d does not count its own copy as a running iCUE.
+- An app that asks for exclusive G-key control takes the G-keys it intercepts, and their k100d actions pause until it lets go or disconnects.
+- Each app's lighting sits above your profile, unless the app asks for a priority of 127 or lower, which puts it underneath. An app that asks for exclusive lighting replaces the profile's lighting while it holds it.
+- `k100 status` and the GUI's Overview list the connected apps and what each one holds. The Overview has Block and Unblock buttons, and `k100 sdk block <exe>` does the same from the command line. Blocking an app that is connected disconnects it.
+- If iCUE was running when k100d started, it owns the SDK pipe. k100d waits, tries again every 10 s, and shows "in use by another program". Start iCUE only while k100d is stopped, since both would also fight over the keyboard.
+- Older games on the v3 SDK or Corsair's Game SDK are not supported yet.
+
+The `[sdk]` table in `settings.toml` has these keys:
+
+- `enabled` (default `true`): with `enabled = false` k100d does not offer the SDK, so a running iCUE can serve SDK apps.
+- `exclusive_control` (default `true`): with `false`, requests for exclusive lighting or G-key control are refused and apps run shared.
+- `blocked` (default empty): exe names to refuse. `k100 sdk block` edits this list.
+- `device_id`: the id k100d reports for the keyboard. It is generated once and saved. To keep Stream Deck's existing G-key bindings, set it to the id iCUE reported for the keyboard: run `k100 diag sdk-probe` while iCUE is running and k100d is stopped, and copy the K100's `id` from the transcript. k100d picks up the change without a restart.
+- `trace` (default `false`): write every SDK message to `logs/sdk-trace.jsonl` in the config folder. Tracing stops at 16 MiB with a notice as the last line. Restart k100d, or switch `trace` off and on, to start a fresh file; the full one is kept as `sdk-trace.old.jsonl`.
 
 ### Things to know
 

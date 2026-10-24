@@ -6,10 +6,10 @@ use actions::{
     RecorderState, RepeatMode,
 };
 use bragi::{PollingRate, PropertyId};
-use engine::{Compositor, KeyPress, Layout};
+use engine::{ClientLighting, Compositor, KeyPress, Layout};
 use ipc::{
     AudioState, DaemonState, Debounce, DeviceState, Event, MAX_DEBOUNCE_TIMEOUT, OnboardRequest, PROTOCOL_VERSION,
-    Profile, Reply, Request, SettingsPatch,
+    Profile, Reply, Request, SdkClient, SdkSettings, SdkState, SdkStatus, SettingsPatch,
 };
 use k100::{DeviceError, Frame, IndicatorRecord, InputEvent, KeyMappings, Session, Transport, led};
 use onboard::{Backups, FileStore};
@@ -17,6 +17,7 @@ use onboard::{Backups, FileStore};
 use crate::audio::{AudioPort, NoAudio, uses_audio};
 use crate::config::{ConfigDir, Settings, default_profile, profile_file_name};
 use crate::indicators::{DialRing, Indicators};
+use crate::sdk_server::new_device_id;
 
 const BRIGHTNESS_SCALE: u32 = 10;
 const BRIGHTNESS_STEP: u8 = 4;
@@ -110,6 +111,8 @@ pub struct LinkInfo {
     pub model: String,
     pub firmware: String,
     pub max_polling_rate: Option<PollingRate>,
+    pub serial: String,
+    pub layout: u32,
 }
 
 pub struct Controller {
@@ -129,6 +132,8 @@ pub struct Controller {
     native_while_recording: Option<u8>,
     link: Option<Box<dyn DeviceLink>>,
     max_polling_rate: Option<PollingRate>,
+    serial: String,
+    layout: u32,
     device: DeviceState,
     last_ping: Duration,
     profile_errors: Vec<String>,
@@ -142,9 +147,14 @@ pub struct Controller {
     now: Duration,
     events: Vec<Event>,
     last_frame: Option<Frame>,
+    client_lighting: ClientLighting,
     autostart: Box<dyn install::Autostart>,
     audio: Box<dyn AudioPort>,
     announced_audio: AudioState,
+    sdk_device_id: String,
+    sdk_status: SdkStatus,
+    sdk_clients: Vec<SdkClient>,
+    announced_sdk: SdkState,
 }
 
 impl Controller {
@@ -165,6 +175,7 @@ impl Controller {
         let dispatcher = Dispatcher::new(&profile.assignments, &profile.dial);
         let indicators = Indicators::new(settings.dial_ring);
         let applied = profile.clone();
+        let sdk_device_id = settings.sdk.device_id.clone().unwrap_or_else(new_device_id);
         Self {
             settings,
             profiles,
@@ -182,6 +193,8 @@ impl Controller {
             native_while_recording: None,
             link: None,
             max_polling_rate: None,
+            serial: String::new(),
+            layout: 0,
             device: DeviceState::Disconnected,
             last_ping: Duration::ZERO,
             profile_errors: config_errors,
@@ -195,9 +208,14 @@ impl Controller {
             now: Duration::ZERO,
             events: Vec::new(),
             last_frame: None,
+            client_lighting: ClientLighting::NONE,
             autostart: Box::new(install::Unavailable("autostart is not configured".into())),
             audio: Box::new(NoAudio),
             announced_audio: AudioState::Off,
+            sdk_device_id,
+            sdk_status: SdkStatus::default(),
+            sdk_clients: Vec::new(),
+            announced_sdk: SdkState::default(),
         }
     }
 
@@ -238,7 +256,40 @@ impl Controller {
             recording: self.dispatcher.recorder_state(),
             autostart: self.autostart.is_enabled().unwrap_or(false),
             audio: self.audio.state(),
+            sdk: self.sdk_state(),
         }
+    }
+
+    pub fn sdk_device(&self) -> Option<sdk::DeviceSnapshot> {
+        self.link.as_ref()?;
+        let (physical_layout, logical_layout) = sdk::layouts_for(self.layout);
+        Some(sdk::DeviceSnapshot {
+            id: self.sdk_device_id.clone(),
+            serial: self.serial.clone(),
+            physical_layout,
+            logical_layout,
+        })
+    }
+
+    pub fn sdk_settings(&self) -> &SdkSettings {
+        &self.settings.sdk
+    }
+
+    pub fn set_sdk_clients(&mut self, clients: Vec<SdkClient>) {
+        self.sdk_clients = clients;
+    }
+
+    pub fn set_sdk_status(&mut self, status: SdkStatus) {
+        self.sdk_status = status;
+    }
+
+    fn sdk_state(&self) -> SdkState {
+        let status = match &self.sdk_status {
+            SdkStatus::Unsupported => SdkStatus::Unsupported,
+            _ if !self.settings.sdk.enabled => SdkStatus::Off,
+            status => status.clone(),
+        };
+        SdkState { status, clients: self.sdk_clients.clone(), blocked: self.settings.sdk.blocked.clone() }
     }
 
     pub fn wants_device(&self) -> bool {
@@ -260,6 +311,8 @@ impl Controller {
     pub fn attach(&mut self, link: Box<dyn DeviceLink>, info: LinkInfo, now: Duration) {
         self.link = Some(link);
         self.max_polling_rate = info.max_polling_rate;
+        self.serial = info.serial;
+        self.layout = info.layout;
         self.last_ping = now;
         self.device_warning = None;
         let _ = self.apply_brightness();
@@ -301,6 +354,16 @@ impl Controller {
         self.apply_all(intents, config);
     }
 
+    pub fn set_client_lighting(&mut self, lighting: ClientLighting) {
+        self.client_lighting = lighting;
+    }
+
+    pub fn set_sdk_taken_keys(&mut self, leds: &[u8]) {
+        for source in self.dispatcher.set_taken_keys(leds) {
+            self.output.send(OutputCommand::Stop { source });
+        }
+    }
+
     pub fn tick(&mut self, now: Duration, presses: &[KeyPress], config: &ConfigDir) {
         self.now = now;
         let intents = self.dispatcher.poll(now);
@@ -314,10 +377,11 @@ impl Controller {
         }
         self.save_brightness_when_settled(config);
         self.announce_audio();
+        self.announce_sdk();
         if self.link.is_none() {
             return;
         }
-        let frame = self.compositor.render(now, presses, &self.audio.spectrum());
+        let frame = self.compositor.render_with(now, presses, &self.audio.spectrum(), &self.client_lighting);
         self.last_frame = Some(frame);
         let _ = self.with_link(|link| link.write_frame(&frame));
         let records = self.indicators.records(now);
@@ -390,6 +454,7 @@ impl Controller {
             }
             Request::Subscribe | Request::SubscribeFrames => Reply::Done,
             Request::Onboard { request } => self.onboard(&request, config),
+            Request::SdkBlock { exe, blocked } => self.sdk_block(exe, blocked, config),
         }
     }
 
@@ -423,6 +488,9 @@ impl Controller {
                 let reselect = settings.auto_switch != self.settings.auto_switch
                     || settings.default_profile != self.settings.default_profile;
                 self.indicators.set_ring(settings.dial_ring);
+                if let Some(id) = &settings.sdk.device_id {
+                    self.sdk_device_id = id.clone();
+                }
                 self.settings = settings;
                 if brightness_changed {
                     let _ = self.apply_brightness();
@@ -572,6 +640,14 @@ impl Controller {
         if state != self.announced_audio {
             self.announced_audio = state.clone();
             self.events.push(Event::Audio { state });
+        }
+    }
+
+    fn announce_sdk(&mut self) {
+        let state = self.sdk_state();
+        if state != self.announced_sdk {
+            self.announced_sdk = state.clone();
+            self.events.push(Event::Sdk { state });
         }
     }
 
@@ -784,6 +860,29 @@ impl Controller {
             Err(message) => return error(message),
         };
         patch.apply(&mut on_disk);
+        if let Err(failure) = config.save_settings(&on_disk) {
+            return error(format!("saving settings: {failure}"));
+        }
+        self.reload_settings(Ok(on_disk));
+        Reply::Done
+    }
+
+    fn sdk_block(&mut self, exe: String, blocked: bool, config: &ConfigDir) -> Reply {
+        let mut on_disk = match config.load_settings() {
+            Ok(settings) => settings,
+            Err(message) => return error(message),
+        };
+        let exe = sdk::exe_file_name(&exe);
+        if exe.is_empty() {
+            return error("an SDK block needs an exe file name".into());
+        }
+        let list = &mut on_disk.sdk.blocked;
+        let names_it = |listed: &String| sdk::exe_file_name(listed).eq_ignore_ascii_case(exe);
+        if !blocked {
+            list.retain(|listed| !names_it(listed));
+        } else if !list.iter().any(names_it) {
+            list.push(exe.into());
+        }
         if let Err(failure) = config.save_settings(&on_disk) {
             return error(format!("saving settings: {failure}"));
         }
@@ -1039,7 +1138,18 @@ mod tests {
     }
 
     fn info(max_polling_rate: Option<PollingRate>) -> LinkInfo {
-        LinkInfo { model: "K100".into(), firmware: "1.15.61".into(), max_polling_rate }
+        LinkInfo {
+            model: "K100".into(),
+            firmware: "1.15.61".into(),
+            max_polling_rate,
+            serial: "K100SERIAL".into(),
+            layout: 2,
+        }
+    }
+
+    fn reattach(rig: &mut Rig, now: Duration) {
+        rig.controller.set_device_state(DeviceState::Disconnected);
+        rig.controller.attach(Box::new(FakeLink(rig.log.clone())), info(Some(PollingRate::Hz8000)), now);
     }
 
     fn profile(name: &str) -> Profile {
@@ -2417,5 +2527,176 @@ mod tests {
         let frames = rig.log.lock().unwrap().frames;
         rig.controller.tick(ms(16), &[], &rig.config);
         assert_eq!(rig.log.lock().unwrap().frames, frames + 1);
+    }
+
+    #[test]
+    fn client_lighting_reaches_the_written_frame_and_survives_a_profile_switch() {
+        let mut rig = rig(vec![profile("default"), profile("games")]);
+        let blue = Rgb::new(0, 0, 255);
+        let layer = engine::ClientLayer { priority: 128, colors: vec![(26, blue, 255)] };
+        rig.controller.set_client_lighting(ClientLighting::Exclusive(layer));
+        rig.controller.tick(ms(16), &[], &rig.config);
+        assert_eq!(rig.log.lock().unwrap().last_frame.unwrap()[26], blue);
+        rig.controller.handle(Request::SetActiveProfile { name: "games".into() }, &rig.config);
+        rig.controller.tick(ms(32), &[], &rig.config);
+        assert_eq!(rig.log.lock().unwrap().last_frame.unwrap()[26], blue);
+        reattach(&mut rig, ms(40));
+        rig.controller.tick(ms(48), &[], &rig.config);
+        assert_eq!(rig.log.lock().unwrap().last_frame.unwrap()[26], blue);
+    }
+
+    #[test]
+    fn taken_g_keys_skip_their_assignment_across_profile_switches() {
+        let remap = Action::Remap { key: key("a"), modifiers: vec![] };
+        let mut rig = rig(vec![assigned("default", "g1", remap), profile("games")]);
+        rig.controller.set_sdk_taken_keys(&[led::G1]);
+        rig.controller.handle(Request::SetActiveProfile { name: "games".into() }, &rig.config);
+        rig.controller.handle(Request::SetActiveProfile { name: "default".into() }, &rig.config);
+        rig.output.take();
+        tap_key(&mut rig, led::G1, 10, 20);
+        assert!(rig.output.take().is_empty());
+        reattach(&mut rig, ms(25));
+        rig.output.take();
+        tap_key(&mut rig, led::G1, 26, 27);
+        assert!(rig.output.take().is_empty());
+        rig.controller.set_sdk_taken_keys(&[]);
+        tap_key(&mut rig, led::G1, 30, 40);
+        assert!(!rig.output.take().is_empty());
+    }
+
+    #[test]
+    fn taking_a_g_key_stops_what_its_action_still_plays() {
+        let mut rig = rig(vec![profile("default")]);
+        rig.output.take();
+        rig.controller.set_sdk_taken_keys(&[led::G1]);
+        assert_eq!(rig.output.take(), [OutputCommand::Stop { source: led::G1 }]);
+        rig.controller.set_sdk_taken_keys(&[led::G1, led::G1 + 1]);
+        assert_eq!(rig.output.take(), [OutputCommand::Stop { source: led::G1 + 1 }]);
+        rig.controller.set_sdk_taken_keys(&[]);
+        assert_eq!(rig.output.take(), []);
+    }
+
+    fn with_sdk(sdk: ipc::SdkSettings) -> Settings {
+        Settings { sdk: ipc::SdkSettings { device_id: Some("{d}".into()), ..sdk }, ..Settings::default() }
+    }
+
+    #[test]
+    fn the_sdk_device_is_absent_without_a_keyboard() {
+        let settings = with_sdk(ipc::SdkSettings::default());
+        let detached = Controller::new(settings.clone(), vec![profile("default")], vec![], Box::new(DiscardOutput));
+        assert_eq!(detached.sdk_device(), None);
+        let mut rig = rig_with(settings, vec![profile("default")]);
+        let expected = sdk::DeviceSnapshot {
+            id: "{d}".into(),
+            serial: "K100SERIAL".into(),
+            physical_layout: sdk::physical_layout::UK,
+            logical_layout: sdk::logical_layout::EU,
+        };
+        assert_eq!(rig.controller.sdk_device(), Some(expected));
+        assert_eq!(rig.controller.handle(Request::Release, &rig.config), Reply::Done);
+        assert_eq!(rig.controller.sdk_device(), None);
+        rig.controller.handle(Request::Reacquire, &rig.config);
+        rig.controller.set_device_state(DeviceState::Blocked { processes: vec!["iCUE.exe".into()] });
+        assert_eq!(rig.controller.sdk_device(), None);
+    }
+
+    #[test]
+    fn a_missing_device_id_is_made_up_once_and_survives_reloads() {
+        let mut rig = rig(vec![profile("default")]);
+        let id = rig.controller.sdk_device().unwrap().id;
+        assert_eq!(id.len(), 38);
+        rig.controller.reload_settings(Ok(Settings::default()));
+        assert_eq!(rig.controller.sdk_device().unwrap().id, id);
+        rig.controller.reload_settings(Ok(with_sdk(ipc::SdkSettings::default())));
+        assert_eq!(rig.controller.sdk_device().unwrap().id, "{d}");
+    }
+
+    #[test]
+    fn the_sdk_state_lists_clients_and_blocked_exes() {
+        let mut rig = rig_with(
+            with_sdk(ipc::SdkSettings { blocked: vec!["bad.exe".into()], ..ipc::SdkSettings::default() }),
+            vec![profile("default")],
+        );
+        assert_eq!(rig.controller.state().sdk, ipc::SdkState { blocked: vec!["bad.exe".into()], ..Default::default() });
+        let client = ipc::SdkClient {
+            exe: "StreamDeck.exe".into(),
+            access: ipc::SdkAccess::ExclusiveKeys,
+            priority: 128,
+            intercepted: vec!["G1".into()],
+            refused: false,
+        };
+        rig.controller.set_sdk_clients(vec![client.clone()]);
+        rig.controller.set_sdk_status(ipc::SdkStatus::Listening);
+        let sdk = rig.controller.state().sdk;
+        assert_eq!((sdk.status, sdk.clients), (ipc::SdkStatus::Listening, vec![client]));
+    }
+
+    #[test]
+    fn a_platform_without_the_sdk_stays_unsupported_even_when_disabled() {
+        let rig = rig_with(
+            with_sdk(ipc::SdkSettings { enabled: false, ..ipc::SdkSettings::default() }),
+            vec![profile("default")],
+        );
+        assert_eq!(rig.controller.state().sdk.status, ipc::SdkStatus::Unsupported);
+    }
+
+    #[test]
+    fn a_disabled_sdk_reports_off_whatever_the_listener_said() {
+        let mut rig = rig_with(
+            with_sdk(ipc::SdkSettings { enabled: false, ..ipc::SdkSettings::default() }),
+            vec![profile("default")],
+        );
+        let failed = ipc::SdkStatus::Failed { reason: "no token".into() };
+        for status in [ipc::SdkStatus::Listening, ipc::SdkStatus::InUse, failed] {
+            rig.controller.set_sdk_status(status);
+            assert_eq!(rig.controller.state().sdk.status, ipc::SdkStatus::Off);
+        }
+    }
+
+    #[test]
+    fn sdk_block_adds_once_and_removes_every_case_variant() {
+        let mut rig = rig(vec![profile("default")]);
+        let block = |exe: &str, blocked: bool| Request::SdkBlock { exe: exe.into(), blocked };
+        assert_eq!(rig.controller.handle(block("StreamDeck.exe", true), &rig.config), Reply::Done);
+        assert_eq!(rig.controller.handle(block("streamdeck.EXE", true), &rig.config), Reply::Done);
+        assert_eq!(rig.config.load_settings().unwrap().sdk.blocked, ["StreamDeck.exe"]);
+        assert_eq!(rig.controller.state().sdk.blocked, ["StreamDeck.exe"]);
+
+        let mut on_disk = rig.config.load_settings().unwrap();
+        on_disk.sdk.blocked = vec!["StreamDeck.exe".into(), "STREAMDECK.EXE".into(), "other.exe".into()];
+        rig.config.save_settings(&on_disk).unwrap();
+        assert_eq!(rig.controller.handle(block("streamdeck.exe", false), &rig.config), Reply::Done);
+        assert_eq!(rig.config.load_settings().unwrap().sdk.blocked, ["other.exe"]);
+        assert_eq!(rig.controller.sdk_settings().blocked, ["other.exe"]);
+    }
+
+    #[test]
+    fn sdk_block_matches_an_entry_already_stored_as_a_path_by_its_file_name() {
+        let path = r"C:\Program Files\Elgato\StreamDeck\StreamDeck.exe";
+        let settings = with_sdk(ipc::SdkSettings {
+            blocked: vec![path.into(), "other.exe".into()],
+            ..ipc::SdkSettings::default()
+        });
+        let mut rig = rig_with(settings.clone(), vec![profile("default")]);
+        rig.config.save_settings(&settings).unwrap();
+        let block = |exe: &str, blocked: bool| Request::SdkBlock { exe: exe.into(), blocked };
+        assert_eq!(rig.controller.handle(block("streamdeck.exe", true), &rig.config), Reply::Done);
+        assert_eq!(rig.config.load_settings().unwrap().sdk.blocked, [path, "other.exe"]);
+        assert_eq!(rig.controller.handle(block(path, false), &rig.config), Reply::Done);
+        assert_eq!(rig.config.load_settings().unwrap().sdk.blocked, ["other.exe"]);
+    }
+
+    #[test]
+    fn sdk_block_keeps_only_the_file_name_and_rejects_an_empty_one() {
+        let mut rig = rig(vec![profile("default")]);
+        let block = |exe: &str, blocked: bool| Request::SdkBlock { exe: exe.into(), blocked };
+        let path = r"C:\Program Files\Elgato\StreamDeck\StreamDeck.exe";
+        assert_eq!(rig.controller.handle(block(path, true), &rig.config), Reply::Done);
+        assert_eq!(rig.config.load_settings().unwrap().sdk.blocked, ["StreamDeck.exe"]);
+        for empty in ["", r"C:\Program Files\", "/"] {
+            assert!(matches!(rig.controller.handle(block(empty, true), &rig.config), Reply::Error { .. }), "{empty:?}");
+        }
+        assert_eq!(rig.controller.handle(block("/opt/elgato/streamdeck.exe", false), &rig.config), Reply::Done);
+        assert!(rig.config.load_settings().unwrap().sdk.blocked.is_empty());
     }
 }
