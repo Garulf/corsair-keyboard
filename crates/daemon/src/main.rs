@@ -15,6 +15,10 @@ use daemon::shutdown::{self, ReleaseSignal};
 use notify::{RecursiveMode, Watcher};
 
 fn main() -> ExitCode {
+    if std::env::args().nth(1).as_deref() == Some(daemon::standin::MODE_ARG) {
+        daemon::standin::wait_for_parent(std::io::stdin());
+        return ExitCode::SUCCESS;
+    }
     let instance = match ipc::InstanceLock::acquire(&ipc::lock_path()) {
         Ok(instance) => instance,
         Err(error) => {
@@ -72,7 +76,7 @@ fn run(instance: ipc::InstanceLock) -> Result<(), Box<dyn std::error::Error>> {
     let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
         let Ok(event) = event else { return };
         let changed = event.kind.is_modify() || event.kind.is_create() || event.kind.is_remove();
-        if changed && !watched.only_logs_changed(&event.paths) {
+        if changed && !watched.only_generated_files_changed(&event.paths) {
             let _ = reload.send(Command::Reload);
         }
     })?;
@@ -91,6 +95,12 @@ fn run(instance: ipc::InstanceLock) -> Result<(), Box<dyn std::error::Error>> {
     thread::spawn(move || server::serve(listener, server_sender));
     #[cfg(windows)]
     let sdk_listener = spawn_sdk_listener(&sender, &sdk_enabled);
+    #[cfg(windows)]
+    let standin = spawn_standin(&config, &sdk_enabled);
+    #[cfg(windows)]
+    let standin_pid = standin.as_ref().map_or_else(Default::default, |standin| standin.pid());
+    #[cfg(not(windows))]
+    let standin_pid = Default::default();
 
     let (sink, sink_warning): (Box<dyn actions::InputSink>, _) = match actions::platform_sink() {
         Ok(sink) => (sink, None),
@@ -116,10 +126,14 @@ fn run(instance: ipc::InstanceLock) -> Result<(), Box<dyn std::error::Error>> {
     let _ = no_tray;
 
     eprintln!("k100d: config in {}", config.root().display());
-    runtime::run(controller, config, receiver, sender, HidConnector, sdk_enabled);
+    runtime::run(controller, config, receiver, sender, HidConnector::new(standin_pid), sdk_enabled);
     #[cfg(windows)]
     if let Some(sdk_listener) = sdk_listener {
         sdk_listener.stop();
+    }
+    #[cfg(windows)]
+    if let Some(standin) = standin {
+        standin.stop();
     }
     #[cfg(any(windows, feature = "tray"))]
     if let Some(tray) = tray {
@@ -146,6 +160,14 @@ fn spawn_sdk_listener(
             None
         }
     }
+}
+
+#[cfg(windows)]
+fn spawn_standin(config: &ConfigDir, enabled: &Arc<AtomicBool>) -> Option<daemon::standin::SupervisorHandle> {
+    let source =
+        std::env::current_exe().map_err(|error| eprintln!("k100d: iCUE.exe stand-in unavailable: {error}")).ok()?;
+    let launcher = daemon::standin::ProcessLauncher::new(source, config.standin_exe());
+    Some(daemon::standin::spawn(launcher, enabled.clone()))
 }
 
 fn autostart_port() -> Box<dyn install::Autostart> {

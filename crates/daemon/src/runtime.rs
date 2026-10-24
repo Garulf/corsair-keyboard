@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, SyncSender};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -46,11 +46,19 @@ pub trait Connector {
     fn connect(&mut self, ignore_conflicts: &[String]) -> Result<Connection, ConnectError>;
 }
 
-pub struct HidConnector;
+pub struct HidConnector {
+    standin_pid: Arc<AtomicU32>,
+}
+
+impl HidConnector {
+    pub fn new(standin_pid: Arc<AtomicU32>) -> HidConnector {
+        HidConnector { standin_pid }
+    }
+}
 
 impl Connector for HidConnector {
     fn connect(&mut self, ignore_conflicts: &[String]) -> Result<Connection, ConnectError> {
-        let conflicts = remove_ignored(running_conflicts(), ignore_conflicts);
+        let conflicts = remove_ignored(running_conflicts(self.standin_pid.load(Ordering::SeqCst)), ignore_conflicts);
         if !conflicts.is_empty() {
             return Err(ConnectError::Blocked(conflicts));
         }

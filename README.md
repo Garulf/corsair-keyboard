@@ -164,6 +164,7 @@ The GUI's Onboard pane does the same through k100d: it lists the stored slots wi
 
 With iCUE closed, apps that use version 4 of the iCUE SDK talk to k100d instead. Elgato Stream Deck's Corsair G-key support and the SDK lighting in some games are the usual ones. k100d is compatible with the iCUE SDK and is not iCUE. It accepts at most 32 SDK connections at once and drops further ones.
 
+- Stream Deck only connects while a program named `iCUE.exe` is running, so while the SDK is enabled k100d runs a copy of itself under that name from the `icue-standin` folder in the config folder. The copy does nothing and exits with k100d. Stream Deck looks for it when it starts, so start k100d first, or restart Stream Deck once after k100d starts. k100d does not count its own copy as a running iCUE.
 - An app that asks for exclusive G-key control takes the G-keys it intercepts, and their k100d actions pause until it lets go or disconnects.
 - Each app's lighting sits above your profile, unless the app asks for a priority of 127 or lower, which puts it underneath. An app that asks for exclusive lighting replaces the profile's lighting while it holds it.
 - `k100 status` and the GUI's Overview list the connected apps and what each one holds. The Overview has Block and Unblock buttons, and `k100 sdk block <exe>` does the same from the command line. Blocking an app that is connected disconnects it.

@@ -27,11 +27,19 @@ pub fn remove_ignored(found: Vec<String>, ignored: &[String]) -> Vec<String> {
     found.into_iter().filter(|name| !ignored.iter().any(|skip| skip.eq_ignore_ascii_case(name))).collect()
 }
 
-pub fn running_conflicts() -> Vec<String> {
+pub fn find_conflicts_except<'a>(processes: impl IntoIterator<Item = (u32, &'a str)>, own_pid: u32) -> Vec<String> {
+    find_conflicts(processes.into_iter().filter(|&(pid, _)| own_pid == 0 || pid != own_pid).map(|(_, name)| name))
+}
+
+pub fn running_conflicts(standin_pid: u32) -> Vec<String> {
     let mut system = System::new_with_specifics(RefreshKind::nothing().with_processes(ProcessRefreshKind::nothing()));
     system.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing());
-    let names: Vec<String> = system.processes().values().map(|p| p.name().to_string_lossy().into_owned()).collect();
-    find_conflicts(names.iter().map(String::as_str))
+    let processes: Vec<(u32, String)> = system
+        .processes()
+        .iter()
+        .map(|(pid, process)| (pid.as_u32(), process.name().to_string_lossy().into_owned()))
+        .collect();
+    find_conflicts_except(processes.iter().map(|(pid, name)| (*pid, name.as_str())), standin_pid)
 }
 
 #[cfg(test)]
@@ -49,5 +57,12 @@ mod tests {
     fn ignored_names_are_not_conflicts() {
         let names = ["OpenRGB.exe", "iCUE.exe"];
         assert_eq!(remove_ignored(find_conflicts(names), &["openrgb.exe".to_string()]), ["iCUE.exe"]);
+    }
+
+    #[test]
+    fn our_standin_is_not_a_conflict_but_another_icue_is() {
+        assert!(find_conflicts_except([(7, "iCUE.exe"), (8, "bash")], 7).is_empty());
+        assert_eq!(find_conflicts_except([(7, "iCUE.exe"), (9, "iCUE.exe")], 7), ["iCUE.exe"]);
+        assert_eq!(find_conflicts_except([(7, "iCUE.exe")], 0), ["iCUE.exe"]);
     }
 }
